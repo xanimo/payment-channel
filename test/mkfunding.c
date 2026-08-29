@@ -68,12 +68,13 @@ int main(int argc, char **argv)
         goto done;
     if (!add_output(tix, (char *)p2sh, (char *)amount)) goto done;
 
-    /* returns a static buffer, so copy it before anything else formats hex */
-    const char *tmp = finalize_transaction(tix, (char *)p2sh, (char *)"1.0",
-                                           total, (char *)change);
-    if (!tmp) goto done;
-    char *hex = strdup(tmp);
+    char *hex = (char *)malloc(DOGECOIN_MAX_TX_HEX_LEN);
     if (!hex) goto done;
+    if (!finalize_transaction_ex(tix, (char *)p2sh, (char *)"1.0", total,
+                                 (char *)change, hex, DOGECOIN_MAX_TX_HEX_LEN)) {
+        free(hex);
+        goto done;
+    }
 
     size_t hl = strlen(hex), blen = 0;
     unsigned char *b = (unsigned char *)malloc(hl / 2 + 1);

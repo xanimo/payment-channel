@@ -235,16 +235,14 @@ pc_result pc_payment_create(const pc_channel *ch,
     if (!add_utxo(tix, (char *)ch->funding_txid, ch->funding_vout)) goto out;
     if (!add_output(tix, (char *)bob_addr, amt))                    goto out;
 
-    /* finalize_transaction() hands back utils_uint8_to_hex()'s static buffer,
-       not heap memory: it must not be freed, and the next call overwrites it.
-       Copy before doing anything else that might serialize. */
-    {
-        const char *tmp = finalize_transaction(tix, (char *)bob_addr, fee, total,
-                                               (char *)alice_addr);
-        if (!tmp) goto out;
-        unsigned_hex = strdup(tmp);
-        if (!unsigned_hex) goto out;
-    }
+    /* the _ex form writes where we say. finalize_transaction() returns a static
+       buffer shared with every other hex conversion in the library. */
+    unsigned_hex = (char *)malloc(DOGECOIN_MAX_TX_HEX_LEN);
+    if (!unsigned_hex) goto out;
+    if (!finalize_transaction_ex(tix, (char *)bob_addr, fee, total,
+                                 (char *)alice_addr,
+                                 unsigned_hex, DOGECOIN_MAX_TX_HEX_LEN))
+        goto out;
 
     size_t ulen = 0;
     if (!hex_to_bytes(unsigned_hex, &ubytes, &ulen)) goto out;
