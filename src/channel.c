@@ -48,6 +48,16 @@ const char *pc_strerror(pc_result r)
 
 /* ── helpers ─────────────────────────────────────────────────── */
 
+const dogecoin_chainparams *pc_chainparams(pc_chain chain)
+{
+    switch (chain) {
+    case PC_CHAIN_TEST:    return &dogecoin_chainparams_test;
+    case PC_CHAIN_REGTEST: return &dogecoin_chainparams_regtest;
+    case PC_CHAIN_MAIN:    break;
+    }
+    return &dogecoin_chainparams_main;
+}
+
 static int hexcat(char *dst, size_t cap, size_t *len, const char *fmt, ...)
 {
     va_list ap;
@@ -118,7 +128,7 @@ pc_result pc_channel_init(pc_channel *ch,
                           const char *alice_pubkey_hex,
                           const char *bob_pubkey_hex,
                           uint32_t locktime,
-                          int is_testnet)
+                          pc_chain chain)
 {
     if (!ch || !alice_pubkey_hex || !bob_pubkey_hex) return PC_ERR_ARG;
     if (strlen(alice_pubkey_hex) != 66 || strlen(bob_pubkey_hex) != 66)
@@ -128,8 +138,8 @@ pc_result pc_channel_init(pc_channel *ch,
     memset(ch, 0, sizeof(*ch));
     snprintf(ch->alice_pubkey_hex, sizeof(ch->alice_pubkey_hex), "%s", alice_pubkey_hex);
     snprintf(ch->bob_pubkey_hex,   sizeof(ch->bob_pubkey_hex),   "%s", bob_pubkey_hex);
-    ch->locktime   = locktime;
-    ch->is_testnet = is_testnet ? 1 : 0;
+    ch->locktime = locktime;
+    ch->chain    = chain;
 
     /* The locktime is pushed as a minimally encoded little-endian number.
        Heights below 500000000 are block heights per BIP65; three bytes cover
@@ -162,7 +172,10 @@ pc_result pc_channel_init(pc_channel *ch,
     if (!hexcat(s, cap, &p, "21%s", ch->bob_pubkey_hex))   return PC_ERR_SCRIPT;
     if (!hexcat(s, cap, &p, "52ae")) return PC_ERR_SCRIPT;          /* OP_2 CHECKMULTISIG */
 
-    if (!get_p2sh_address_from_script(ch->redeem_script_hex, ch->is_testnet,
+    /* the helper takes a boolean, and regtest shares testnet's 0xc4 script
+       prefix, so either non-main chain wants the same argument here */
+    if (!get_p2sh_address_from_script(ch->redeem_script_hex,
+                                      ch->chain != PC_CHAIN_MAIN,
                                       ch->p2sh_address, sizeof(ch->p2sh_address)))
         return PC_ERR_SCRIPT;
 
@@ -255,8 +268,7 @@ pc_result pc_payment_create(const pc_channel *ch,
     /* signer: Alice only. Bob countersigns when he accepts. */
     dogecoin_key key;
     dogecoin_privkey_init(&key);
-    const dogecoin_chainparams *chain = ch->is_testnet
-        ? &dogecoin_chainparams_test : &dogecoin_chainparams_main;
+    const dogecoin_chainparams *chain = pc_chainparams(ch->chain);
     if (!dogecoin_privkey_decode_wif((char *)alice_wif, chain, &key)) {
         rc = PC_ERR_KEY; goto out;
     }
@@ -337,8 +349,7 @@ pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
 
     dogecoin_key key;
     dogecoin_privkey_init(&key);
-    const dogecoin_chainparams *chain = ch->is_testnet
-        ? &dogecoin_chainparams_test : &dogecoin_chainparams_main;
+    const dogecoin_chainparams *chain = pc_chainparams(ch->chain);
     if (!dogecoin_privkey_decode_wif((char *)bob_wif, chain, &key)) {
         rc = PC_ERR_KEY; goto out;
     }

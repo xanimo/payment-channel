@@ -35,7 +35,15 @@ install it somewhere, and point at it:
 `make check` runs the protocol test and then runs alice against bob over a
 socket with a locally minted funding transaction. `contrib/regtest.sh` does the
 same thing against a real regtest node, including broadcasting the close, which
-is the only thing that proves the transactions are actually valid.
+is the only thing that proves the transactions are actually valid. it passes:
+the close confirms and pays bob exactly what he was promised.
+
+pick the chain with `--testnet` or `--regtest`. it is not a boolean because
+dogecoin regtest shares testnet's p2sh prefix but not its p2pkh one, 0x6f
+against 0x71, so testnet parameters against a regtest node print addresses the
+node does not recognise even though the scripts are identical. the same reason
+`generatePrivPubKeypair` cannot mint a regtest key: it takes a boolean, and
+regtest's 0xef wif prefix is neither of the two it can produce.
 
 ## running it
 
@@ -83,3 +91,14 @@ detected, but everything else on that socket is visible and modifiable.
 there is no persistence. bob holds the newest transaction in memory and prints
 it when the connection ends. a real merchant writes it to disk before
 acknowledging anything.
+
+bob does not check how much locktime is left. alice can refund once the
+locktime passes, so a merchant should stop accepting payments well before it and
+close while he still can. bob cannot see the chain from here, so he has no
+height to compare against.
+
+there is no invoice step. bob does not tell alice what to pay or where; alice
+chooses the amounts and derives bob's address from the pubkey in the channel.
+the funding is agreed out of band rather than announced over the wire, so both
+sides are told the outpoint on the command line and bob is expected to have
+confirmed it himself.

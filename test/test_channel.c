@@ -170,35 +170,40 @@ int main(void)
                   "redeem script is present in the final scriptSig");
 
             /* what Bob checks before he calls it money */
-            CHECK_OK(pc_tx_verify_payment(&ch, raw, bob_addr, 2000000000ULL),
+            CHECK_OK(pc_tx_verify_payment(&ch, raw, 2000000000ULL),
                      "closing tx pays what was claimed");
-            CHECK(pc_tx_verify_payment(&ch, raw, bob_addr, 2000000001ULL)
-                      == PC_ERR_AMOUNT,
+            CHECK(pc_tx_verify_payment(&ch, raw, 2000000001ULL) == PC_ERR_AMOUNT,
                   "claiming one koinu more is refused");
-            {   /* a party the transaction pays nothing to */
+            {   /* the same transaction read as a channel with a different payee */
                 char carol_wif[PRIVKEYWIFLEN], carol_addr[P2PKHLEN];
+                char carol_pub[PUBKEYHEXLEN];
+                size_t cn = sizeof(carol_pub);
                 generatePrivPubKeypair(carol_wif, carol_addr, false);
-                CHECK(pc_tx_verify_payment(&ch, raw, carol_addr, 1) == PC_ERR_AMOUNT,
-                      "an unpaid address gets nothing attributed to it");
+                getPubkeyFromPrivkey(carol_wif, false, carol_pub, &cn);
+                pc_channel other_payee = ch;
+                snprintf(other_payee.bob_pubkey_hex,
+                         sizeof(other_payee.bob_pubkey_hex), "%s", carol_pub);
+                CHECK(pc_tx_verify_payment(&other_payee, raw, 1) == PC_ERR_AMOUNT,
+                      "a payment to another key counts for nothing");
             }
             {   /* the same transaction against a different funding outpoint */
                 pc_channel wrong = ch;
                 wrong.funding_vout = 7;
-                CHECK(pc_tx_verify_payment(&wrong, raw, bob_addr, 1) != PC_OK,
+                CHECK(pc_tx_verify_payment(&wrong, raw, 1) != PC_OK,
                       "wrong outpoint is refused");
                 wrong = ch;
                 memset(wrong.funding_txid, '0', 64);
-                CHECK(pc_tx_verify_payment(&wrong, raw, bob_addr, 1) != PC_OK,
+                CHECK(pc_tx_verify_payment(&wrong, raw, 1) != PC_OK,
                       "wrong funding txid is refused");
             }
-            CHECK(pc_tx_verify_payment(&ch, "00", bob_addr, 1) != PC_OK,
+            CHECK(pc_tx_verify_payment(&ch, "00", 1) != PC_OK,
                   "garbage is refused");
             {   /* trailing bytes must not be ignored */
                 size_t n = strlen(raw);
                 char *extra = malloc(n + 3);
                 memcpy(extra, raw, n);
                 memcpy(extra + n, "00", 3);
-                CHECK(pc_tx_verify_payment(&ch, extra, bob_addr, 1) != PC_OK,
+                CHECK(pc_tx_verify_payment(&ch, extra, 1) != PC_OK,
                       "trailing bytes are refused");
                 free(extra);
             }

@@ -82,11 +82,25 @@ static void rd_script(rdr *r, const unsigned char **out, size_t *outlen)
 
 pc_result pc_tx_verify_payment(const pc_channel *ch,
                                const char *raw_tx_hex,
-                               const char *bob_addr,
                                uint64_t claimed_to_bob_koinu)
 {
-    if (!ch || !raw_tx_hex || !bob_addr) return PC_ERR_ARG;
+    if (!ch || !raw_tx_hex) return PC_ERR_ARG;
     if (!ch->funding_txid[0]) return PC_ERR_STATE;
+
+    /* the p2pkh script paying the key in the redeem script */
+    dogecoin_pubkey bob;
+    dogecoin_pubkey_init(&bob);
+    bob.compressed = true;
+    size_t pklen = 0;
+    utils_hex_to_bin(ch->bob_pubkey_hex, bob.pubkey, 66, &pklen);
+    if (pklen != 33) return PC_ERR_ARG;
+    uint160_t bob_h160;
+    dogecoin_pubkey_get_hash160(&bob, bob_h160);
+
+    unsigned char want[25];
+    want[0] = 0x76; want[1] = 0xa9; want[2] = 0x14;
+    memcpy(want + 3, bob_h160, 20);
+    want[23] = 0x88; want[24] = 0xac;
 
     size_t hl = strlen(raw_tx_hex);
     if (hl == 0 || (hl % 2)) return PC_ERR_ARG;
@@ -134,14 +148,8 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
         if (r.bad) goto out;
         total += value;
 
-        /* only p2pkh outputs can be attributed to an address here, which is
-           all this protocol ever pays to */
-        if (spklen * 2 + 1 > SCRIPTPUBKEYLEN) continue;
-        char spkhex[SCRIPTPUBKEYLEN];
-        utils_bin_to_hex((unsigned char *)spk, spklen, spkhex);
-        char addr[P2PKHLEN];
-        if (!getAddrFromScriptPubKey(spkhex, ch->is_testnet, addr)) continue;
-        if (strcmp(addr, bob_addr) == 0) to_bob += value;
+        if (spklen == sizeof(want) && memcmp(spk, want, sizeof(want)) == 0)
+            to_bob += value;
     }
     rd_u(&r, 4);                                  /* locktime */
     if (r.bad) goto out;
