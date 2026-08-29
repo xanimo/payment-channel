@@ -50,11 +50,14 @@ static char *make_funding_tx(const char *p2sh_addr, const char *change_addr,
         (char *)"b4455e7b7b7acb51fb6feba7a2702c42a5100f61f61abafa31851ed6ae076074", 0))
         return NULL;
     if (!add_output(tix, (char *)p2sh_addr, (char *)doge_amount)) return NULL;
-    const char *tmp = finalize_transaction(tix, (char *)p2sh_addr, (char *)"1.0",
-                                           (char *)total, (char *)change_addr);
-    if (!tmp) return NULL;
-    char *hex = strdup(tmp);   /* static buffer, copy before the next hex call */
+    char *hex = (char *)malloc(DOGECOIN_MAX_TX_HEX_LEN);
     if (!hex) return NULL;
+    if (!finalize_transaction_ex(tix, (char *)p2sh_addr, (char *)"1.0",
+                                 (char *)total, (char *)change_addr,
+                                 hex, DOGECOIN_MAX_TX_HEX_LEN)) {
+        free(hex);
+        return NULL;
+    }
 
     /* the txid, in display order */
     size_t hl = strlen(hex), blen = 0;
