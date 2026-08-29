@@ -43,7 +43,7 @@ static void usage(void)
     fprintf(stderr,
       "usage: bob --wif WIF --peer-pubkey HEX --locktime N\n"
       "           --funding TXID:VOUT --capacity DOGE\n"
-      "           [--listen [HOST:]PORT] [--testnet] [--once]\n"
+      "           [--listen [HOST:]PORT] [--testnet|--regtest] [--once]\n"
       "       bob --wif WIF --pubkey\n"
       "       bob --wif WIF --peer-pubkey HEX --locktime N --address\n"
       "\n"
@@ -56,7 +56,8 @@ int main(int argc, char **argv)
     const char *wif = NULL, *peer = NULL, *funding = NULL, *cap_s = NULL;
     const char *listen_at = NULL;
     uint32_t locktime = 0;
-    int testnet = 0, want_pubkey = 0, want_address = 0, once = 0;
+    pc_chain chain = PC_CHAIN_MAIN;
+    int want_pubkey = 0, want_address = 0, once = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -67,7 +68,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--capacity"))    cap_s = NEXT();
         else if (!strcmp(a, "--listen"))      listen_at = NEXT();
         else if (!strcmp(a, "--locktime"))    { const char *v = NEXT(); locktime = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
-        else if (!strcmp(a, "--testnet"))     testnet = 1;
+        else if (!strcmp(a, "--testnet"))     chain = PC_CHAIN_TEST;
+        else if (!strcmp(a, "--regtest"))     chain = PC_CHAIN_REGTEST;
         else if (!strcmp(a, "--pubkey"))      want_pubkey = 1;
         else if (!strcmp(a, "--address"))     want_address = 1;
         else if (!strcmp(a, "--once"))        once = 1;
@@ -80,7 +82,7 @@ int main(int argc, char **argv)
     int rc = 1;
 
     char bob_pub[PUBKEYHEXLEN], bob_addr[P2PKHLEN];
-    if (!pc_identity(wif, testnet, bob_pub, bob_addr)) {
+    if (!pc_identity(wif, chain, bob_pub, bob_addr)) {
         fprintf(stderr, "bob: wif would not decode\n");
         goto done;
     }
@@ -89,7 +91,7 @@ int main(int argc, char **argv)
     if (!peer || !locktime) { usage(); goto done; }
 
     pc_channel ch;
-    pc_result r = pc_channel_init(&ch, peer, bob_pub, locktime, testnet);
+    pc_result r = pc_channel_init(&ch, peer, bob_pub, locktime, chain);
     if (r != PC_OK) {
         fprintf(stderr, "bob: channel: %s\n", pc_strerror(r));
         goto done;
@@ -187,7 +189,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "countersign: %s\n", pc_strerror(r));
                 break;
             }
-            r = pc_tx_verify_payment(&ch, raw, bob_addr, in.to_bob_koinu);
+            r = pc_tx_verify_payment(&ch, raw, in.to_bob_koinu);
             if (r != PC_OK) {
                 fprintf(stderr, "payment does not say what it claims: %s\n", pc_strerror(r));
                 dogecoin_free(raw);

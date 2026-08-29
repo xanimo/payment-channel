@@ -42,6 +42,13 @@ extern "C" {
  * without SegWit, provided the funding transaction is confirmed before any
  * payment referencing it is signed. See doc/PROTOCOL.md. */
 
+/* Which chain. Not a boolean: regtest and testnet share a p2sh prefix but not a
+ * p2pkh one (0x6f against 0x71), so a two-state flag prints addresses a regtest
+ * node does not recognise even though the scripts are identical. */
+typedef enum { PC_CHAIN_MAIN = 0, PC_CHAIN_TEST, PC_CHAIN_REGTEST } pc_chain;
+
+const dogecoin_chainparams *pc_chainparams(pc_chain chain);
+
 #define PC_MAX_SCRIPT_HEX   1024   /* 520-byte redeem script as hex, plus NUL */
 #define PC_MAX_PSBT_HEX    16384
 #define PC_ADDR_LEN        P2SHLEN
@@ -79,7 +86,7 @@ typedef struct {
 
     /* highest payment seen so far; a later one must pay Bob strictly more */
     uint64_t paid_to_bob_koinu;
-    int      is_testnet;
+    pc_chain chain;
 } pc_channel;
 
 /* Build the channel's redeem script and P2SH address from both pubkeys.
@@ -93,7 +100,7 @@ pc_result pc_channel_init(pc_channel *ch,
                           const char *alice_pubkey_hex,
                           const char *bob_pubkey_hex,
                           uint32_t locktime,
-                          int is_testnet);
+                          pc_chain chain);
 
 /* Record the confirmed funding outpoint. Refuse to accept an unconfirmed one:
  * on a chain without SegWit the txid is malleable until it is buried. */
@@ -140,8 +147,14 @@ pc_result pc_payment_countersign(const pc_channel *ch,
 /* ── Bob: verify what he is actually being paid ──────────────── */
 
 /* Check the transaction Bob assembled before he treats it as money: exactly
- * one input, spending this channel's funding outpoint, paying (bob_addr) at
- * least (claimed_to_bob_koinu), and spending no more than the capacity.
+ * one input, spending this channel's funding outpoint, paying at least
+ * (claimed_to_bob_koinu) to the key in the redeem script, and spending no more
+ * than the capacity.
+ *
+ * Bob's payee is derived from the channel rather than passed in, so a payment
+ * only counts when it pays the key the channel was built around. Outputs are
+ * matched as scripts, not addresses: base58 encoding has nothing to do with
+ * whether the money arrives.
  *
  * This parses the raw transaction here rather than through libdogecoin because
  * dogecoin_tx is opaque in the published header and no PSBT accessor reports an
@@ -149,7 +162,6 @@ pc_result pc_payment_countersign(const pc_channel *ch,
  * it is being paid using the shipped surface alone. */
 pc_result pc_tx_verify_payment(const pc_channel *ch,
                                const char *raw_tx_hex,
-                               const char *bob_addr,
                                uint64_t claimed_to_bob_koinu);
 
 /* ── Wire envelope ───────────────────────────────────────────── */

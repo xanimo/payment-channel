@@ -47,7 +47,7 @@ static void usage(void)
       "usage: alice --wif WIF --peer-pubkey HEX --locktime N\n"
       "             --funding TXID:VOUT --funding-tx HEX|@FILE --capacity DOGE\n"
       "             --pay DOGE [--pay DOGE ...] [--fee DOGE] [--close]\n"
-      "             [--connect [HOST:]PORT] [--testnet]\n"
+      "             [--connect [HOST:]PORT] [--testnet|--regtest]\n"
       "       alice --wif WIF --pubkey\n"
       "       alice --wif WIF --peer-pubkey HEX --locktime N --address\n"
       "\n"
@@ -64,7 +64,8 @@ int main(int argc, char **argv)
     const char *pays[MAX_PAYMENTS];
     int npays = 0;
     uint32_t locktime = 0;
-    int testnet = 0, want_pubkey = 0, want_address = 0, want_close = 0;
+    pc_chain chain = PC_CHAIN_MAIN;
+    int want_pubkey = 0, want_address = 0, want_close = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -77,7 +78,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--fee"))         fee_s = NEXT();
         else if (!strcmp(a, "--connect"))     connect_to = NEXT();
         else if (!strcmp(a, "--locktime"))    { const char *v = NEXT(); locktime = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
-        else if (!strcmp(a, "--testnet"))     testnet = 1;
+        else if (!strcmp(a, "--testnet"))     chain = PC_CHAIN_TEST;
+        else if (!strcmp(a, "--regtest"))     chain = PC_CHAIN_REGTEST;
         else if (!strcmp(a, "--pubkey"))      want_pubkey = 1;
         else if (!strcmp(a, "--address"))     want_address = 1;
         else if (!strcmp(a, "--close"))       want_close = 1;
@@ -96,7 +98,7 @@ int main(int argc, char **argv)
     char *funding_tx = NULL;
 
     char alice_pub[PUBKEYHEXLEN], alice_addr[P2PKHLEN];
-    if (!pc_identity(wif, testnet, alice_pub, alice_addr)) {
+    if (!pc_identity(wif, chain, alice_pub, alice_addr)) {
         fprintf(stderr, "alice: wif would not decode\n");
         goto done;
     }
@@ -105,7 +107,7 @@ int main(int argc, char **argv)
     if (!peer || !locktime) { usage(); goto done; }
 
     pc_channel ch;
-    pc_result r = pc_channel_init(&ch, alice_pub, peer, locktime, testnet);
+    pc_result r = pc_channel_init(&ch, alice_pub, peer, locktime, chain);
     if (r != PC_OK) {
         fprintf(stderr, "alice: channel: %s\n", pc_strerror(r));
         goto done;
@@ -142,7 +144,7 @@ int main(int argc, char **argv)
         size_t n = 0;
         utils_hex_to_bin(ch.bob_pubkey_hex, bp.pubkey, 66, &n);
         if (n != 33 || !dogecoin_pubkey_getaddr_p2pkh(&bp,
-                testnet ? &dogecoin_chainparams_test : &dogecoin_chainparams_main,
+                pc_chainparams(chain),
                 bob_addr)) {
             fprintf(stderr, "alice: peer pubkey is not a usable key\n");
             goto done;

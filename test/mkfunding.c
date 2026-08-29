@@ -13,17 +13,39 @@
 
 int main(int argc, char **argv)
 {
-    if (argc == 2 && !strcmp(argv[1], "--keys")) {
+    if (argc >= 2 && !strcmp(argv[1], "--keys")) {
+        /* generatePrivPubKeypair() takes a boolean, so it cannot produce a
+           regtest wif: regtest's 0xef prefix is neither mainnet's nor
+           testnet's. Go through the chainparams directly. */
+        pc_chain which = PC_CHAIN_MAIN;
+        if (argc == 3 && !strcmp(argv[2], "--testnet")) which = PC_CHAIN_TEST;
+        if (argc == 3 && !strcmp(argv[2], "--regtest")) which = PC_CHAIN_REGTEST;
+        const dogecoin_chainparams *chain = pc_chainparams(which);
+
         dogecoin_ecc_start();
-        char wif[PRIVKEYWIFLEN], addr[P2PKHLEN];
-        int ok = generatePrivPubKeypair(wif, addr, false);
-        if (ok) printf("%s %s\n", wif, addr);
+        int ok = 0;
+        dogecoin_key key;
+        dogecoin_privkey_init(&key);
+        if (dogecoin_privkey_gen(&key)) {
+            char wif[PRIVKEYWIFLEN], addr[P2PKHLEN];
+            size_t wlen = sizeof(wif);
+            dogecoin_privkey_encode_wif(&key, chain, wif, &wlen);
+            dogecoin_pubkey pub;
+            dogecoin_pubkey_init(&pub);
+            pub.compressed = true;
+            dogecoin_pubkey_from_key(&key, &pub);
+            if (dogecoin_pubkey_getaddr_p2pkh(&pub, chain, addr)) {
+                printf("%s %s\n", wif, addr);
+                ok = 1;
+            }
+        }
+        dogecoin_privkey_cleanse(&key);
         dogecoin_ecc_stop();
         return ok ? 0 : 1;
     }
     if (argc != 4) {
         fprintf(stderr, "usage: mkfunding P2SH_ADDR CHANGE_ADDR DOGE\n"
-                        "       mkfunding --keys\n");
+                        "       mkfunding --keys [--testnet|--regtest]\n");
         return 2;
     }
     const char *p2sh = argv[1], *change = argv[2], *amount = argv[3];

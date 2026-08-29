@@ -33,11 +33,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# regtest shares testnet's base58 prefixes, so --testnet is the right flag
-NET=--testnet
+# regtest shares testnet's p2sh prefix but not its p2pkh one (0x6f against
+# 0x71), so --testnet here would print addresses this node does not recognise
+# even though the scripts are identical
+NET=--regtest
 
-read -r ALICE_WIF ALICE_ADDR < <(./test/mkfunding --keys)
-read -r BOB_WIF   BOB_ADDR   < <(./test/mkfunding --keys)
+read -r ALICE_WIF ALICE_ADDR < <(./test/mkfunding --keys --regtest)
+read -r BOB_WIF   BOB_ADDR   < <(./test/mkfunding --keys --regtest)
 
 ALICE_PUB=$(./alice $NET --wif "$ALICE_WIF" --pubkey)
 BOB_PUB=$(./bob    $NET --wif "$BOB_WIF"    --pubkey)
@@ -116,5 +118,6 @@ for o in tx["vout"]:
         t+=o["value"]
 print(t)
 ' "$BOB_ADDR")
-echo "bob paid $PAID DOGE"
+echo "bob paid $PAID DOGE, expected 30"
+[ "$PAID" = "30.0" ] || { echo "FAIL: bob was not paid 30" >&2; exit 1; }
 echo "regtest ok"

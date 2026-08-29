@@ -40,11 +40,10 @@
 #define PC_DEFAULT_PORT 9876
 
 /* Derive the compressed pubkey hex and the p2pkh address a WIF key controls. */
-static inline int pc_identity(const char *wif, int testnet,
+static inline int pc_identity(const char *wif, pc_chain which,
                        char pubkey_hex[PUBKEYHEXLEN], char addr[P2PKHLEN])
 {
-    const dogecoin_chainparams *chain = testnet
-        ? &dogecoin_chainparams_test : &dogecoin_chainparams_main;
+    const dogecoin_chainparams *chain = pc_chainparams(which);
 
     dogecoin_key key;
     dogecoin_privkey_init(&key);
