@@ -26,8 +26,8 @@ finalizer can classify the script:
 ## building
 
 libdogecoin is not yet released with the entry points this uses, so build
-against a tree carrying dogecoinfoundation/libdogecoin#454, #455, #456 and #457,
-install it somewhere, and point at it:
+against a tree carrying dogecoinfoundation/libdogecoin#454, #455, #456, #457
+and #459, install it somewhere, and point at it:
 
     make LIBDOGECOIN=/path/to/staged/install
     make LIBDOGECOIN=/path/to/staged/install check

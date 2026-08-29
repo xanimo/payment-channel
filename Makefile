@@ -2,7 +2,7 @@
 #
 # libdogecoin is not yet released with the entry points this needs, so point
 # LIBDOGECOIN at a staged install built from a tree carrying:
-#   dogecoinfoundation/libdogecoin#454 #455 #456 #457
+#   dogecoinfoundation/libdogecoin#454 #455 #456 #457 #459
 #
 #   make LIBDOGECOIN=/path/to/staged/install
 #
