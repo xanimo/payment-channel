@@ -48,14 +48,18 @@ regtest's 0xef wif prefix is neither of the two it can produce.
 ## running it
 
 bob needs alice's pubkey, the locktime, and a funding outpoint he has confirmed
-on chain himself. he cannot see the chain from here and does not take the
-payer's word for any of it.
+on chain himself. he cannot see the chain from here, so he takes the outpoint on
+the command line and takes the payer's word for nothing else. he also has no
+height to compare the locktime against, so stop accepting payments and close well
+before it: alice can refund once it passes.
 
     $ bob --wif $BOB_WIF --peer-pubkey $ALICE_PUB --locktime 300000 \
           --funding $TXID:$VOUT --capacity 100.0 --listen 127.0.0.1:9876
 
 alice pays cumulative totals. `--pay 5 --pay 30` means bob ends up holding a
-transaction paying him 30, not 35.
+transaction paying him 30, not 35. wait for the funding to confirm before paying:
+without segwit the funding txid is malleable, and a payment signed against an
+unconfirmed one points at an outpoint that can cease to exist.
 
     $ alice --wif $ALICE_WIF --peer-pubkey $BOB_PUB --locktime 300000 \
             --funding $TXID:$VOUT --funding-tx @funding.hex --capacity 100.0 \
@@ -76,29 +80,3 @@ through the shipped surface. src/txcheck.c parses the transaction instead.
 a payment is money only if it spends the funding outpoint bob confirmed, pays
 bob at least what was claimed, spends no more than the capacity, and pays him
 strictly more than the previous one.
-
-## what this does not do
-
-alice must not sign a payment until the funding transaction is confirmed.
-without segwit the funding txid is malleable, and every payment she has signed
-points at an outpoint that would cease to exist. neither program enforces this,
-because neither can see the chain.
-
-the transport is plain tcp in the clear. pubkeys are pinned on the command line
-and both sides refuse a peer that announces a different one, so substitution is
-detected, but everything else on that socket is visible and modifiable.
-
-there is no persistence. bob holds the newest transaction in memory and prints
-it when the connection ends. a real merchant writes it to disk before
-acknowledging anything.
-
-bob does not check how much locktime is left. alice can refund once the
-locktime passes, so a merchant should stop accepting payments well before it and
-close while he still can. bob cannot see the chain from here, so he has no
-height to compare against.
-
-there is no invoice step. bob does not tell alice what to pay or where; alice
-chooses the amounts and derives bob's address from the pubkey in the channel.
-the funding is agreed out of band rather than announced over the wire, so both
-sides are told the outpoint on the command line and bob is expected to have
-confirmed it himself.

@@ -22,7 +22,10 @@ dependency and a larger attack surface for no gain.
 
 both sides announce and each checks the other's pubkey against the one pinned on
 its command line. a mismatch is an attacker on the socket, not a disagreement,
-so the connection ends.
+so the connection ends. that pin is the only thing defending this exchange: the
+transport is plain tcp in the clear, so everything on it is visible and
+modifiable, and without the pin a substituted pubkey would hand the channel to
+whoever sent it.
 
     alice -> bob   announce  alice pubkey, locktime
     bob   -> alice announce  bob pubkey, locktime
