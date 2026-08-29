@@ -1,0 +1,5 @@
+*.o
+/alice
+/bob
+/test_channel
+/test/mkfunding
