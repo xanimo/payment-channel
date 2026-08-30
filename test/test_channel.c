@@ -415,6 +415,27 @@ int main(void)
              "absent more accepted");
     CHECK(back.more == 0, "absent more reads as no");
 
+    /* every reject reason has spaces in it, so a field held to base58's
+       alphabet could not carry one and the peer got a dead socket instead */
+    memset(&env, 0, sizeof(env));
+    env.type = PC_MSG_REJECT;
+    snprintf(env.addr, sizeof(env.addr), "%s", "not a channel script");
+    snprintf(env.psbt_hex, sizeof(env.psbt_hex), "01");
+    CHECK_OK(pc_envelope_encode(&env, wire, sizeof(wire)), "reject reason encodes");
+    CHECK_OK(pc_envelope_decode(wire, &back), "reject reason decodes");
+    CHECK(strcmp(back.addr, env.addr) == 0, "reject reason round-trips");
+
+    snprintf(env.addr, sizeof(env.addr), "%s", "has\"quote");
+    CHECK(pc_envelope_encode(&env, wire, sizeof(wire)) != PC_OK,
+          "a quote in the reason is refused");
+
+    CHECK(pc_envelope_decode("{\"type\":\"ack\",\"to_bob\":1,\"to_bob\":2,\"psbt\":\"01\"}",
+                             &back) != PC_OK, "a repeated key is refused");
+    CHECK(pc_envelope_decode("{\"type\":\"ack\",\"to_bob\":-1,\"psbt\":\"01\"}",
+                             &back) != PC_OK, "a negative amount is refused");
+    CHECK(pc_envelope_decode("{\"type\":\"ack\",\"to_bob\":12x,\"psbt\":\"01\"}",
+                             &back) != PC_OK, "a bad amount terminator is refused");
+
 done:
     dogecoin_ecc_stop();
     printf("\n%d checks, %d failures\n", checks, failures);

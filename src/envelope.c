@@ -69,14 +69,18 @@ static int type_from_name(const char *s, size_t len, pc_msg_type *out)
     return 0;
 }
 
-/* base58 has no punctuation, so an address needs no escaping either. A reason
-   string rides in the same field and is held to the same alphabet. */
-static int is_b58ish(const char *s)
+/* base58 has no punctuation, so an address needs no escaping. A reject reason
+   rides in the same field and every one of them has spaces in it, so a space is
+   allowed too: held to base58's alphabet the field could not carry a reason at
+   all, and every reject failed to encode rather than reaching the peer. What
+   matters for a hand-rolled encoder is that neither can contain a quote or a
+   backslash, and neither can. */
+static int is_safe_text(const char *s)
 {
     for (size_t i = 0; s[i]; i++) {
         char c = s[i];
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
-              (c >= 'A' && c <= 'Z')))
+              (c >= 'A' && c <= 'Z') || c == ' '))
             return 0;
     }
     return 1;
@@ -105,7 +109,7 @@ pc_result pc_envelope_encode(const pc_envelope *env, char *out, size_t cap)
         return PC_ERR_ARG;
     if (env->tx_hex[0] && !is_hex(env->tx_hex, strlen(env->tx_hex)))
         return PC_ERR_ARG;
-    if (env->addr[0] && !is_b58ish(env->addr)) return PC_ERR_ARG;
+    if (env->addr[0] && !is_safe_text(env->addr)) return PC_ERR_ARG;
     if (env->vout < 0) return PC_ERR_ARG;
     if (env->more != 0 && env->more != 1) return PC_ERR_ARG;
 
@@ -153,10 +157,28 @@ static int read_string(const char *p, char *dst, size_t cap, size_t *len_out)
     return 1;
 }
 
+/* A repeated key is two answers to one question and find_key() takes the first,
+   so the second would be ignored rather than noticed. No value can contain a
+   quote, so a quoted key only ever appears as a key. */
+static int has_duplicate_key(const char *json)
+{
+    static const char *KEYS[] = { "type", "ref", "vout", "more",
+                                  "to_bob", "addr", "psbt", "tx" };
+    for (size_t i = 0; i < sizeof(KEYS) / sizeof(KEYS[0]); i++) {
+        char pat[32];
+        int n = snprintf(pat, sizeof(pat), "\"%s\"", KEYS[i]);
+        if (n < 0 || (size_t)n >= sizeof(pat)) return 1;
+        const char *p = strstr(json, pat);
+        if (p && strstr(p + n, pat)) return 1;
+    }
+    return 0;
+}
+
 pc_result pc_envelope_decode(const char *json, pc_envelope *env)
 {
     if (!json || !env) return PC_ERR_ARG;
     memset(env, 0, sizeof(*env));
+    if (has_duplicate_key(json)) return PC_ERR_ARG;
 
     char tbuf[16];
     size_t tlen = 0;
@@ -208,7 +230,7 @@ pc_result pc_envelope_decode(const char *json, pc_envelope *env)
     const char *dp = find_key(json, "addr");
     if (dp) {
         if (!read_string(dp, env->addr, sizeof(env->addr), NULL)) return PC_ERR_ARG;
-        if (!is_b58ish(env->addr)) return PC_ERR_ARG;
+        if (!is_safe_text(env->addr)) return PC_ERR_ARG;
     }
 
     size_t plen = 0;
