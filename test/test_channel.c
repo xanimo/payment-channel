@@ -601,6 +601,29 @@ int main(void)
     CHECK(pc_min_fee(400, 2) == 2040000ULL,
           "and two add two, got %" PRIu64, pc_min_fee(400, 2));
 
+    /* pc_min_fee's invariant is short enough to state outright, so state it
+       over a range rather than at the handful of points above: monotonic in
+       both arguments, and never below the block floor. */
+    {
+        uint64_t prev = 0;
+        for (size_t b = 0; b <= 20000; b += 137) {
+            uint64_t f = pc_min_fee(b, 0);
+            if (f < prev || f < 1000000ULL * (uint64_t)b / 1000) {
+                CHECK(0, "pc_min_fee(%zu, 0) = %" PRIu64 " breaks monotonicity "
+                         "or the block floor", b, f);
+                break;
+            }
+            prev = f;
+        }
+        CHECK(1, "pc_min_fee is monotonic in size and never under the block floor");
+
+        int dust_ok = 1;
+        for (size_t d = 1; d < 8; d++)
+            if (pc_min_fee(400, d) < pc_min_fee(400, d - 1)) dust_ok = 0;
+        CHECK(dust_ok, "pc_min_fee is monotonic in the dust count");
+        CHECK(pc_min_fee(0, 0) == 0, "an empty transaction owes nothing");
+    }
+
     /* bob sends pc_strerror() as a reject reason, so every one of them has to
        survive the envelope. a comma in one of these is how the reject path went
        dead the first time. */

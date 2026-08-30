@@ -47,6 +47,20 @@ test/adversary: test/adversary.o $(CORE_OBJ)
 test/mkfunding: test/mkfunding.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+# Two hand-rolled parsers consume attacker-controlled bytes: pc_envelope_decode
+# on a line off the socket, and the reader in txcheck.c on peer-supplied
+# transaction hex. Both are read carefully and neither had been fuzzed, which is
+# the bug class reading misses. clang only, since it needs libFuzzer.
+FUZZ_SAN = -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer
+FUZZERS  = fuzz/fuzz_envelope fuzz/fuzz_txcheck
+
+fuzz: $(FUZZERS)
+
+fuzz/fuzz_%: fuzz/fuzz_%.c $(CORE_SRC)
+	clang -std=gnu99 -O1 -g $(FUZZ_SAN) $(CPPFLAGS) -o $@ $^ \
+	      $(LIBDOGECOIN)/lib/libdogecoin.a -levent -levent_core -levent_extra \
+	      -levent_pthreads -lpthread -lm
+
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
@@ -57,4 +71,4 @@ check: $(TESTS) $(BINS)
 clean:
 	rm -f $(BINS) $(TESTS) src/*.o test/*.o
 
-.PHONY: all check clean
+.PHONY: all check clean fuzz
