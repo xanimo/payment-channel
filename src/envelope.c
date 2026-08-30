@@ -34,6 +34,7 @@
 
 #include "channel.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -173,17 +174,24 @@ pc_result pc_envelope_decode(const char *json, pc_envelope *env)
 
     const char *ap = find_key(json, "to_bob");
     if (ap) {
+        /* strtoull negates a leading minus and reports success, so "-1" would
+           arrive as UINT64_MAX and walk through every amount guard downstream */
+        if (*ap == '-' || *ap == '+') return PC_ERR_ARG;
+        errno = 0;
         char *end = NULL;
         unsigned long long v = strtoull(ap, &end, 10);
-        if (end == ap) return PC_ERR_ARG;
+        if (end == ap || errno == ERANGE) return PC_ERR_ARG;
+        if (*end != ',' && *end != '}') return PC_ERR_ARG;
         env->to_bob_koinu = (uint64_t)v;
     }
 
     const char *vp = find_key(json, "vout");
     if (vp) {
+        errno = 0;
         char *end = NULL;
         long v = strtol(vp, &end, 10);
-        if (end == vp || v < 0 || v > 0xFFFF) return PC_ERR_ARG;
+        if (end == vp || errno == ERANGE || v < 0 || v > 0xFFFF) return PC_ERR_ARG;
+        if (*end != ',' && *end != '}') return PC_ERR_ARG;
         env->vout = (int)v;
     }
 
@@ -193,6 +201,7 @@ pc_result pc_envelope_decode(const char *json, pc_envelope *env)
         char *end = NULL;
         long v = strtol(mp, &end, 10);
         if (end == mp || (v != 0 && v != 1)) return PC_ERR_ARG;
+        if (*end != ',' && *end != '}') return PC_ERR_ARG;
         env->more = (int)v;
     }
 

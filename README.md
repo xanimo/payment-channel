@@ -94,3 +94,14 @@ through the shipped surface. src/txcheck.c parses the transaction instead.
 a payment is money only if it spends the funding outpoint bob confirmed, pays
 bob at least what was claimed, spends no more than the capacity, and pays him
 strictly more than the previous one.
+
+being addressed correctly is not the same as being spendable, so it also has to
+carry two signatures that verify, leave a fee at or above the relay floor, and
+be final. a non-zero locktime or a sequence under `0xffffffff` is a transaction
+no node will mine yet, and neither field is constrained by the script, since the
+else branch never executes `OP_CHECKLOCKTIMEVERIFY`. the sighash those
+signatures are checked against is computed in src/txcheck.c, because
+`dogecoin_tx_sighash` is `LIBDOGECOIN_API` but declared in `tx.h`, which is not
+an installed header. bob's own signature is verified alongside alice's: his came
+from libdogecoin's signer, so a digest that verifies his is a digest computed
+the same way libdogecoin computes it.

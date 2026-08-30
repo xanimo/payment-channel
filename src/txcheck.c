@@ -80,6 +80,134 @@ static void rd_script(rdr *r, const unsigned char **out, size_t *outlen)
     r->off += (size_t)n;
 }
 
+/* Dogecoin's relay floor is 0.001 DOGE per kilobyte. Charged per started kB,
+   which is what a node does when it sizes a transaction. */
+#define PC_MIN_RELAY_KOINU_PER_KB 100000ULL
+
+static uint64_t min_fee_for(size_t txbytes)
+{
+    uint64_t kb = (uint64_t)((txbytes + 999) / 1000);
+    if (kb == 0) kb = 1;
+    return kb * PC_MIN_RELAY_KOINU_PER_KB;
+}
+
+static size_t put_varint(unsigned char *out, uint64_t v)
+{
+    if (v < 0xfd)   { out[0] = (unsigned char)v; return 1; }
+    if (v <= 0xffff) {
+        out[0] = 0xfd; out[1] = v & 0xff; out[2] = (v >> 8) & 0xff; return 3;
+    }
+    out[0] = 0xfe;
+    out[1] = v & 0xff;        out[2] = (v >> 8) & 0xff;
+    out[3] = (v >> 16) & 0xff; out[4] = (v >> 24) & 0xff;
+    return 5;
+}
+
+/* Read one plain data push, refusing anything else. The scriptSig this channel
+   builds is pushes and OP_0 only, so an opcode here means it is not ours. */
+static int rd_push(const unsigned char *p, size_t len, size_t *off,
+                   const unsigned char **out, size_t *outlen)
+{
+    if (*off >= len) return 0;
+    unsigned char op = p[*off];
+    size_t n;
+    if (op >= 1 && op <= 75)  { n = op; *off += 1; }
+    else if (op == 0x4c) {
+        if (*off + 2 > len) return 0;
+        n = p[*off + 1]; *off += 2;
+    } else return 0;
+    if (*off + n > len) return 0;
+    *out = p + *off; *outlen = n; *off += n;
+    return 1;
+}
+
+/* The legacy SIGHASH_ALL digest for the one input, with (script_code) standing
+   in where the scriptSig sits. Rolled here because dogecoin_tx_sighash() is
+   LIBDOGECOIN_API but declared in tx.h, which is not an installed header. */
+static int sighash_all(const unsigned char *tx, size_t txlen,
+                       size_t sig_start, size_t sig_end,
+                       const unsigned char *script_code, size_t sclen,
+                       unsigned char out[32])
+{
+    if (sig_start > sig_end || sig_end > txlen) return 0;
+    unsigned char lenbuf[9];
+    size_t lenn = put_varint(lenbuf, sclen);
+    size_t post = txlen - sig_end;
+    size_t n = sig_start + lenn + sclen + post + 4;
+    unsigned char *buf = (unsigned char *)malloc(n);
+    if (!buf) return 0;
+
+    size_t o = 0;
+    memcpy(buf + o, tx, sig_start);            o += sig_start;
+    memcpy(buf + o, lenbuf, lenn);             o += lenn;
+    memcpy(buf + o, script_code, sclen);       o += sclen;
+    memcpy(buf + o, tx + sig_end, post);       o += post;
+    buf[o++] = 0x01; buf[o++] = 0x00; buf[o++] = 0x00; buf[o++] = 0x00;
+
+    unsigned char h1[32];
+    sha256_raw(buf, o, h1);
+    sha256_raw(h1, sizeof(h1), out);
+    free(buf);
+    return 1;
+}
+
+/* Both signatures are checked, not just Alice's. Bob's came from libdogecoin's
+   signer, so a digest that verifies his verifies that this computation agrees
+   with the one that produced it, and a mistake here fails on the honest path
+   instead of passing a forgery. */
+static pc_result verify_sigs(const pc_channel *ch,
+                             const unsigned char *tx, size_t txlen,
+                             size_t sig_start, size_t sig_end,
+                             const unsigned char *ss, size_t sslen)
+{
+    unsigned char redeem[520];
+    size_t rlen = 0;
+    size_t rhexlen = strlen(ch->redeem_script_hex);
+    if (rhexlen == 0 || (rhexlen % 2) || rhexlen / 2 > sizeof(redeem))
+        return PC_ERR_SCRIPT;
+    utils_hex_to_bin(ch->redeem_script_hex, redeem, rhexlen, &rlen);
+    if (rlen != rhexlen / 2) return PC_ERR_SCRIPT;
+
+    /* OP_0 <sig alice> <sig bob> OP_0 <redeem script> */
+    size_t off = 0;
+    if (off >= sslen || ss[off] != 0x00) return PC_ERR_PSBT;
+    off++;
+    const unsigned char *sa = NULL, *sb = NULL, *rs = NULL;
+    size_t salen = 0, sblen = 0, rslen = 0;
+    if (!rd_push(ss, sslen, &off, &sa, &salen)) return PC_ERR_PSBT;
+    if (!rd_push(ss, sslen, &off, &sb, &sblen)) return PC_ERR_PSBT;
+    if (off >= sslen || ss[off] != 0x00) return PC_ERR_PSBT;
+    off++;
+    if (!rd_push(ss, sslen, &off, &rs, &rslen)) return PC_ERR_PSBT;
+    if (off != sslen) return PC_ERR_PSBT;
+
+    /* the script it commits to must be this channel's */
+    if (rslen != rlen || memcmp(rs, redeem, rlen) != 0) return PC_ERR_SCRIPT;
+
+    /* each signature carries its hashtype as a trailing byte */
+    if (salen < 2 || sblen < 2) return PC_ERR_PSBT;
+    if (sa[salen - 1] != 0x01 || sb[sblen - 1] != 0x01) return PC_ERR_PSBT;
+
+    unsigned char hash[32];
+    if (!sighash_all(tx, txlen, sig_start, sig_end, redeem, rlen, hash))
+        return PC_ERR_PSBT;
+
+    unsigned char apub[33], bpub[33];
+    size_t n = 0;
+    if (strlen(ch->alice_pubkey_hex) != 66 || strlen(ch->bob_pubkey_hex) != 66)
+        return PC_ERR_KEY;
+    utils_hex_to_bin(ch->alice_pubkey_hex, apub, 66, &n);
+    if (n != sizeof(apub)) return PC_ERR_KEY;
+    utils_hex_to_bin(ch->bob_pubkey_hex, bpub, 66, &n);
+    if (n != sizeof(bpub)) return PC_ERR_KEY;
+
+    if (!dogecoin_ecc_verify_sig(apub, true, hash, (unsigned char *)sa, salen - 1))
+        return PC_ERR_PSBT;
+    if (!dogecoin_ecc_verify_sig(bpub, true, hash, (unsigned char *)sb, sblen - 1))
+        return PC_ERR_PSBT;
+    return PC_OK;
+}
+
 /* The scriptPubKey a P2SH address stands for: base58check gives back a version
    byte and the 20-byte script hash, so no hashing is needed to rebuild it. */
 static int p2sh_script_for(const pc_channel *ch, unsigned char out[23])
@@ -147,10 +275,12 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
             rd_script(&r, &spk, &spklen);
             if (r.bad) { rc = PC_ERR_PSBT; goto out; }
             if (spklen == sizeof(want) && memcmp(spk, want, sizeof(want)) == 0) {
+                /* two outputs paying the channel means the capacity is not a
+                   fact about the transaction, so refuse rather than pick */
+                if (rc == PC_OK) { rc = PC_ERR_AMOUNT; goto out; }
                 if (vout_out)  *vout_out  = (int)i;
                 if (value_out) *value_out = value;
                 rc = PC_OK;
-                break;                      /* the first one funds the channel */
             }
         }
     }
@@ -204,9 +334,19 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     memcpy(prev, r.p + r.off, 32);
     r.off += 32;
     uint32_t vout = (uint32_t)rd_u(&r, 4);
-    rd_script(&r, NULL, NULL);                    /* scriptSig */
-    rd_u(&r, 4);                                  /* sequence  */
+    size_t sig_start = r.off;
+    const unsigned char *ss = NULL;
+    size_t sslen = 0;
+    rd_script(&r, &ss, &sslen);                   /* scriptSig */
+    size_t sig_end = r.off;
+    uint32_t sequence = (uint32_t)rd_u(&r, 4);
     if (r.bad) goto out;
+
+    /* Nothing in the ELSE branch executes CLTV, so the script does not
+       constrain either field. A non-final input or a future locktime is a
+       transaction no node will mine until then, which is money that arrives
+       whenever Alice chose rather than now. */
+    if (sequence != 0xffffffffu) { rc = PC_ERR_STATE; goto out; }
 
     /* txids are displayed reversed */
     unsigned char disp[32];
@@ -231,16 +371,22 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
         if (spklen == sizeof(want) && memcmp(spk, want, sizeof(want)) == 0)
             to_bob += value;
     }
-    rd_u(&r, 4);                                  /* locktime */
+    uint32_t locktime = (uint32_t)rd_u(&r, 4);
     if (r.bad) goto out;
     if (r.off != r.len) goto out;                 /* trailing bytes: not our tx */
+    if (locktime != 0) { rc = PC_ERR_STATE; goto out; }
 
     /* The fee is capacity minus what the outputs spend, so an input that does
        not cover the outputs would be a transaction no node will relay. */
     if (total > ch->capacity_koinu) { rc = PC_ERR_AMOUNT; goto out; }
     if (to_bob < claimed_to_bob_koinu) { rc = PC_ERR_AMOUNT; goto out; }
+    /* and one that leaves nothing over pays no fee, which the relay drops just
+       the same, so it is not money either */
+    if (ch->capacity_koinu - total < min_fee_for(blen)) {
+        rc = PC_ERR_AMOUNT; goto out;
+    }
 
-    rc = PC_OK;
+    rc = verify_sigs(ch, buf, blen, sig_start, sig_end, ss, sslen);
 out:
     free(buf);
     return rc;

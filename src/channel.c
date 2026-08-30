@@ -392,7 +392,10 @@ pc_result pc_payment_create(const pc_channel *ch,
     if (!ch || !funding_tx_hex || !alice_wif || !alice_addr || !bob_addr ||
         !psbt_hex_out) return PC_ERR_ARG;
     if (!ch->funding_txid[0]) return PC_ERR_STATE;
-    if (to_bob_koinu == 0 || to_bob_koinu + fee_koinu > ch->capacity_koinu)
+    /* subtract rather than add: to_bob + fee wraps and passes on a hostile
+       amount, and the envelope is where such an amount arrives from */
+    if (to_bob_koinu == 0 || fee_koinu > ch->capacity_koinu ||
+        to_bob_koinu > ch->capacity_koinu - fee_koinu)
         return PC_ERR_AMOUNT;
 
     *psbt_hex_out = NULL;
@@ -496,11 +499,7 @@ pc_result pc_payment_accept(pc_channel *ch, const char *psbt_hex,
 
     /* and it must be spending this channel's redeem script */
     size_t rlen = 0;
-    if (!dogecoin_psbt_input_get_redeemscript(psbt, 0, NULL, 0, &rlen)) {
-        if (rlen == 0) goto out;
-    }
     unsigned char rbuf[520];
-    if (rlen > sizeof(rbuf)) goto out;
     if (!dogecoin_psbt_input_get_redeemscript(psbt, 0, rbuf, sizeof(rbuf), &rlen)) goto out;
     char rhex[PC_MAX_SCRIPT_HEX];
     if (rlen * 2 + 1 > sizeof(rhex)) goto out;
@@ -570,6 +569,15 @@ pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
     if (!hex_to_bytes(ch->redeem_script_hex, &rbytes, &rlen)) goto out;
 
     unsigned char ss[1024];
+    /* bound the whole assembly before writing any of it, rather than after the
+       signatures are already in */
+    if (siglen[alice_idx] == 0 || siglen[alice_idx] > 75 ||
+        siglen[bob_idx]   == 0 || siglen[bob_idx]   > 75 ||
+        rlen == 0 || rlen > 520) goto out;
+    size_t pushn = (rlen < 76) ? 1 : 2;
+    if (4 + siglen[alice_idx] + siglen[bob_idx] + pushn + rlen > sizeof(ss))
+        goto out;
+
     size_t n = 0;
     ss[n++] = 0x00;                                  /* OP_0, the extra pop   */
     ss[n++] = (unsigned char)siglen[alice_idx];
@@ -583,7 +591,6 @@ pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
         ss[n++] = 0x4c;                              /* OP_PUSHDATA1          */
         ss[n++] = (unsigned char)rlen;
     }
-    if (n + rlen > sizeof(ss)) goto out;
     memcpy(ss + n, rbytes, rlen); n += rlen;
 
     if (!dogecoin_psbt_input_set_final_scriptsig(psbt, 0, ss, n)) goto out;
