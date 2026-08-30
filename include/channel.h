@@ -144,6 +144,43 @@ pc_result pc_payment_countersign(const pc_channel *ch,
                                  const char *bob_wif,
                                  char **raw_tx_hex_out);
 
+/* ── Opening: Alice proposes a funding, Bob checks it ────────── */
+
+/* Read a channel redeem script back into its parts, so Bob can learn who he is
+ * dealing with from the script itself rather than being told out of band. Any
+ * script that is not exactly the shape pc_channel_init() builds is refused. */
+pc_result pc_redeem_parse(const char *redeem_hex, char alice_pubkey_hex[PUBKEYHEXLEN],
+                          char bob_pubkey_hex[PUBKEYHEXLEN], uint32_t *locktime_out);
+
+/* Find the output of (raw_tx_hex) that pays this channel, and what it is worth.
+ * Bob is told a funding transaction, not an outpoint: which output funds the
+ * channel is a fact about the transaction, so he works it out rather than
+ * trusting it. */
+pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex,
+                                    char txid_out[65], int *vout_out,
+                                    uint64_t *value_out);
+
+/* Alice: the opening PSBT. One input spending the funding output, no outputs
+ * and no signatures, carrying the redeem script and the transaction that
+ * created the input. Result is hex, caller frees with dogecoin_free(). */
+pc_result pc_channel_open_create(const pc_channel *ch, const char *funding_tx_hex,
+                                 char **psbt_hex_out);
+
+/* Bob: accept or refuse an opening. The PSBT must spend the output of
+ * (funding_tx_hex) that pays this channel, carry the redeem script Bob computed
+ * from his own key and locktime, and carry no signatures yet. The locktime must
+ * leave at least (min_slack) blocks above (chain_height), because a channel that
+ * expires while Bob is holding a payment is one Alice can refund out from under
+ * him. On success the channel is funded and (capacity_out) is what it is worth.
+ *
+ * Bob cannot read the funding transaction back out of the PSBT: no published
+ * accessor reports an input's previous transaction, so it travels beside it and
+ * is checked against the outpoint the PSBT actually spends. */
+pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
+                                 const char *funding_tx_hex,
+                                 uint32_t chain_height, uint32_t min_slack,
+                                 uint64_t *capacity_out);
+
 /* ── Bob: verify what he is actually being paid ──────────────── */
 
 /* Check the transaction Bob assembled before he treats it as money: exactly
@@ -166,16 +203,35 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
 
 /* ── Wire envelope ───────────────────────────────────────────── */
 
-/* One line of JSON per message. The (psbt) field is a hex payload whose
- * meaning follows the type:
+/* One line of JSON per message, following the flow in doc/PROTOCOL.md.
  *
- *   announce  the sender's compressed pubkey; to_bob carries the locktime
- *   payment   the PSBT; ref is the funding txid, to_bob the cumulative total
- *   ack       "01"; to_bob echoes the total the receiver now considers paid
- *   close     the final raw transaction; to_bob the total it pays
+ *   request   Alice asks for a channel. no payload
+ *   announce  Bob returns the pubkey he will sign this channel with
+ *   open      Alice's funding PSBT: the funding input, its redeem script and
+ *             the transaction that created it, no outputs and no signatures.
+ *             (tx) carries that funding transaction, which Bob cannot read back
+ *             out of the PSBT through the published accessors. to_bob is the
+ *             locktime, ref the funding txid, vout its index
+ *   accept    Bob has checked the funding and will take payments on it.
+ *             to_bob is the capacity he read from it
+ *   reject    Bob will not. (addr) carries the reason
+ *   invoice   Bob asks for a total. to_bob is the cumulative amount now owed,
+ *             (addr) where he wants it
+ *   payment   Alice's PSBT paying that total, signed by her
+ *   ack       Bob has verified and stored it. to_bob echoes the total held,
+ *             (more) says whether an invoice follows. Bob is the only one who
+ *             knows the order is finished, so without it Alice waits for an
+ *             invoice that never comes and both sides block in recv
+ *   close     from Alice "01" and means close now; from Bob the final raw
+ *             transaction
  */
 typedef enum {
+    PC_MSG_REQUEST,
     PC_MSG_ANNOUNCE,
+    PC_MSG_OPEN,
+    PC_MSG_ACCEPT,
+    PC_MSG_REJECT,
+    PC_MSG_INVOICE,
     PC_MSG_PAYMENT,
     PC_MSG_ACK,
     PC_MSG_CLOSE
@@ -184,11 +240,15 @@ typedef enum {
 typedef struct {
     pc_msg_type type;
     char        ref[65];                 /* channel reference, the funding txid */
+    int         vout;                    /* which output of it funds the channel */
+    int         more;                    /* on an ack, another invoice follows */
     uint64_t    to_bob_koinu;
+    char        addr[P2PKHLEN];          /* an address, or a short reason */
     char        psbt_hex[PC_MAX_PSBT_HEX];
+    char        tx_hex[PC_MAX_PSBT_HEX];
 } pc_envelope;
 
-/* {"type":"payment","ref":"<hex>","to_bob":<n>,"psbt":"<hex>"} */
+/* {"type":"payment","ref":"<hex>","vout":<n>,"more":<0|1>,"to_bob":<n>,"addr":"<b58>","psbt":"<hex>","tx":"<hex>"} */
 pc_result pc_envelope_encode(const pc_envelope *env, char *out, size_t cap);
 pc_result pc_envelope_decode(const char *json, pc_envelope *env);
 

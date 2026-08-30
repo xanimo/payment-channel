@@ -47,28 +47,42 @@ regtest's 0xef wif prefix is neither of the two it can produce.
 
 ## running it
 
-bob needs alice's pubkey, the locktime, and a funding outpoint he has confirmed
-on chain himself. he cannot see the chain from here, so he takes the outpoint on
-the command line and takes the payer's word for nothing else. he also has no
-height to compare the locktime against, so stop accepting payments and close well
-before it: alice can refund once it passes.
+bob is told nothing about the channel. he prices the orders he is willing to
+sell and learns the rest from the opening psbt: who the channel is between, what
+it is worth, and until when. `--price` is what one order costs, so the three
+below invoice cumulative totals of 5, 12.5 and 30.
 
-    $ bob --wif $BOB_WIF --peer-pubkey $ALICE_PUB --locktime 300000 \
-          --funding $TXID:$VOUT --capacity 100.0 --listen 127.0.0.1:9876
+he cannot see the chain, so the height he measures the locktime against is given
+to him, and he refuses a channel whose locktime is not at least `--min-slack`
+blocks above it. alice can refund once the locktime passes, so a channel that
+expires while bob is holding a payment is one he loses.
 
-alice pays cumulative totals. `--pay 5 --pay 30` means bob ends up holding a
-transaction paying him 30, not 35. wait for the funding to confirm before paying:
-without segwit the funding txid is malleable, and a payment signed against an
-unconfirmed one points at an outpoint that can cease to exist.
+    $ bob --wif $BOB_WIF --listen 127.0.0.1:9876 \
+          --height 5100000 --min-slack 100 \
+          --price 5.0 --price 7.5 --price 17.5
 
-    $ alice --wif $ALICE_WIF --peer-pubkey $BOB_PUB --locktime 300000 \
-            --funding $TXID:$VOUT --funding-tx @funding.hex --capacity 100.0 \
-            --pay 5.0 --pay 12.5 --pay 30.0 --close
+alice prints the address, funds it, then pays what she is invoiced up to
+`--max`. wait for the funding to confirm before paying: without segwit the
+funding txid is malleable, and a payment signed against an unconfirmed one
+points at an outpoint that can cease to exist.
 
-both take `--address` to print the channel address to fund, and `--pubkey` to
-print their own key. see doc/PROTOCOL.md for the wire format.
+    $ alice --wif $ALICE_WIF --peer-pubkey $BOB_PUB --locktime 5200000 --address
+    $ alice --wif $ALICE_WIF --peer-pubkey $BOB_PUB --locktime 5200000 \
+            --funding-tx @funding.hex --max 100.0 \
+            --connect 127.0.0.1:9876 --close
+
+she is handed the funding transaction rather than an outpoint and works out
+which of its outputs pays the channel herself. `--peer-pubkey` pins bob's key;
+without it she trusts whatever he announces, and the transport is plain tcp in
+the clear. both take `--pubkey` to print their own key. see doc/PROTOCOL.md for
+the wire format.
 
 ## what bob checks
+
+at the opening he checks that the redeem script names his own key, that the
+transaction travelling beside the psbt really pays that script, and that the
+locktime clears the height he was given by `--min-slack`. the capacity is what
+he reads off the funding output, not what he is told it is worth.
 
 every payment is countersigned and then parsed before it counts. bob's signature
 never leaves his process, so assembling the transaction first is free, and it is

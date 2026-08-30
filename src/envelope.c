@@ -39,24 +39,46 @@
 #include <stdlib.h>
 #include <string.h>
 
+static const struct { const char *name; size_t len; pc_msg_type t; } TYPES[] = {
+    { "request",  7, PC_MSG_REQUEST  },
+    { "announce", 8, PC_MSG_ANNOUNCE },
+    { "open",     4, PC_MSG_OPEN     },
+    { "accept",   6, PC_MSG_ACCEPT   },
+    { "reject",   6, PC_MSG_REJECT   },
+    { "invoice",  7, PC_MSG_INVOICE  },
+    { "payment",  7, PC_MSG_PAYMENT  },
+    { "ack",      3, PC_MSG_ACK      },
+    { "close",    5, PC_MSG_CLOSE    },
+};
+
 static const char *type_name(pc_msg_type t)
 {
-    switch (t) {
-    case PC_MSG_ANNOUNCE: return "announce";
-    case PC_MSG_PAYMENT:  return "payment";
-    case PC_MSG_ACK:      return "ack";
-    case PC_MSG_CLOSE:    return "close";
-    }
+    for (size_t i = 0; i < sizeof(TYPES) / sizeof(TYPES[0]); i++)
+        if (TYPES[i].t == t) return TYPES[i].name;
     return NULL;
 }
 
 static int type_from_name(const char *s, size_t len, pc_msg_type *out)
 {
-    if (len == 8 && !memcmp(s, "announce", 8)) { *out = PC_MSG_ANNOUNCE; return 1; }
-    if (len == 7 && !memcmp(s, "payment",  7)) { *out = PC_MSG_PAYMENT;  return 1; }
-    if (len == 3 && !memcmp(s, "ack",      3)) { *out = PC_MSG_ACK;      return 1; }
-    if (len == 5 && !memcmp(s, "close",    5)) { *out = PC_MSG_CLOSE;    return 1; }
+    for (size_t i = 0; i < sizeof(TYPES) / sizeof(TYPES[0]); i++)
+        if (len == TYPES[i].len && !memcmp(s, TYPES[i].name, len)) {
+            *out = TYPES[i].t;
+            return 1;
+        }
     return 0;
+}
+
+/* base58 has no punctuation, so an address needs no escaping either. A reason
+   string rides in the same field and is held to the same alphabet. */
+static int is_b58ish(const char *s)
+{
+    for (size_t i = 0; s[i]; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+              (c >= 'A' && c <= 'Z')))
+            return 0;
+    }
+    return 1;
 }
 
 static int is_hex(const char *s, size_t len)
@@ -78,12 +100,20 @@ pc_result pc_envelope_encode(const pc_envelope *env, char *out, size_t cap)
     if (!t) return PC_ERR_ARG;
     if (env->ref[0] && (strlen(env->ref) != 64 || !is_hex(env->ref, 64)))
         return PC_ERR_ARG;
-    if (!is_hex(env->psbt_hex, strlen(env->psbt_hex))) return PC_ERR_ARG;
+    if (env->psbt_hex[0] && !is_hex(env->psbt_hex, strlen(env->psbt_hex)))
+        return PC_ERR_ARG;
+    if (env->tx_hex[0] && !is_hex(env->tx_hex, strlen(env->tx_hex)))
+        return PC_ERR_ARG;
+    if (env->addr[0] && !is_b58ish(env->addr)) return PC_ERR_ARG;
+    if (env->vout < 0) return PC_ERR_ARG;
+    if (env->more != 0 && env->more != 1) return PC_ERR_ARG;
 
     int n = snprintf(out, cap,
-                     "{\"type\":\"%s\",\"ref\":\"%s\",\"to_bob\":%" PRIu64
-                     ",\"psbt\":\"%s\"}",
-                     t, env->ref, env->to_bob_koinu, env->psbt_hex);
+                     "{\"type\":\"%s\",\"ref\":\"%s\",\"vout\":%d,\"more\":%d"
+                     ",\"to_bob\":%" PRIu64 ",\"addr\":\"%s\""
+                     ",\"psbt\":\"%s\",\"tx\":\"%s\"}",
+                     t, env->ref, env->vout, env->more, env->to_bob_koinu,
+                     env->addr, env->psbt_hex, env->tx_hex);
     if (n < 0 || (size_t)n >= cap) return PC_ERR_ARG;
     return PC_OK;
 }
@@ -149,11 +179,47 @@ pc_result pc_envelope_decode(const char *json, pc_envelope *env)
         env->to_bob_koinu = (uint64_t)v;
     }
 
+    const char *vp = find_key(json, "vout");
+    if (vp) {
+        char *end = NULL;
+        long v = strtol(vp, &end, 10);
+        if (end == vp || v < 0 || v > 0xFFFF) return PC_ERR_ARG;
+        env->vout = (int)v;
+    }
+
+    /* absent means no, so a peer that predates the field still parses */
+    const char *mp = find_key(json, "more");
+    if (mp) {
+        char *end = NULL;
+        long v = strtol(mp, &end, 10);
+        if (end == mp || (v != 0 && v != 1)) return PC_ERR_ARG;
+        env->more = (int)v;
+    }
+
+    const char *dp = find_key(json, "addr");
+    if (dp) {
+        if (!read_string(dp, env->addr, sizeof(env->addr), NULL)) return PC_ERR_ARG;
+        if (!is_b58ish(env->addr)) return PC_ERR_ARG;
+    }
+
     size_t plen = 0;
     if (!read_string(find_key(json, "psbt"), env->psbt_hex,
                      sizeof(env->psbt_hex), &plen))
         return PC_ERR_ARG;
-    if (!is_hex(env->psbt_hex, plen)) return PC_ERR_ARG;
+    if (plen && !is_hex(env->psbt_hex, plen)) return PC_ERR_ARG;
+
+    const char *xp = find_key(json, "tx");
+    if (xp) {
+        size_t xlen = 0;
+        if (!read_string(xp, env->tx_hex, sizeof(env->tx_hex), &xlen))
+            return PC_ERR_ARG;
+        if (xlen && !is_hex(env->tx_hex, xlen)) return PC_ERR_ARG;
+    }
+
+    /* the types that carry money must actually carry it */
+    if ((env->type == PC_MSG_PAYMENT || env->type == PC_MSG_OPEN ||
+         env->type == PC_MSG_CLOSE) && !env->psbt_hex[0])
+        return PC_ERR_ARG;
 
     return PC_OK;
 }

@@ -196,6 +196,188 @@ pc_result pc_channel_set_funding(pc_channel *ch, const char *txid_hex,
     return PC_OK;
 }
 
+/* ── Opening ─────────────────────────────────────────────────── */
+
+pc_result pc_redeem_parse(const char *redeem_hex, char alice_pubkey_hex[PUBKEYHEXLEN],
+                          char bob_pubkey_hex[PUBKEYHEXLEN], uint32_t *locktime_out)
+{
+    if (!redeem_hex || !alice_pubkey_hex || !bob_pubkey_hex) return PC_ERR_ARG;
+
+    unsigned char *b = NULL;
+    size_t n = 0;
+    if (!hex_to_bytes(redeem_hex, &b, &n)) return PC_ERR_ARG;
+
+    pc_result rc = PC_ERR_SCRIPT;
+    size_t i = 0;
+    #define TAKE(x) do { if (i >= n || b[i] != (x)) goto out; i++; } while (0)
+
+    TAKE(0x63);                                       /* OP_IF */
+    if (i >= n) goto out;
+    size_t ltlen = b[i++];
+    if (ltlen < 1 || ltlen > 4 || i + ltlen > n) goto out;
+    uint32_t locktime = 0;
+    for (size_t k = 0; k < ltlen; k++) locktime |= (uint32_t)b[i + k] << (8 * k);
+    i += ltlen;
+    TAKE(0xb1);                                       /* CHECKLOCKTIMEVERIFY */
+    TAKE(0x75);                                       /* OP_DROP */
+    TAKE(0x21);
+    if (i + 33 > n) goto out;
+    size_t alice_at = i; i += 33;
+    TAKE(0xad);                                       /* CHECKSIGVERIFY */
+    TAKE(0x67);                                       /* OP_ELSE */
+    TAKE(0x52);                                       /* OP_2 */
+    TAKE(0x68);                                       /* OP_ENDIF */
+    TAKE(0x21);
+    if (i + 33 > n) goto out;
+    size_t alice2_at = i; i += 33;
+    TAKE(0x21);
+    if (i + 33 > n) goto out;
+    size_t bob_at = i; i += 33;
+    TAKE(0x52);                                       /* OP_2 */
+    TAKE(0xae);                                       /* CHECKMULTISIG */
+    if (i != n) goto out;                             /* trailing bytes */
+    #undef TAKE
+
+    /* the refund branch and the multisig must name the same Alice */
+    if (memcmp(b + alice_at, b + alice2_at, 33) != 0) goto out;
+    if (locktime == 0 || locktime >= 500000000u) goto out;
+
+    utils_bin_to_hex(b + alice_at, 33, alice_pubkey_hex);
+    utils_bin_to_hex(b + bob_at,   33, bob_pubkey_hex);
+    if (locktime_out) *locktime_out = locktime;
+    rc = PC_OK;
+out:
+    free(b);
+    return rc;
+}
+
+/* A transaction with one input and no outputs, serialized by hand. The overlay
+   will not build one: finalize_transaction() needs somewhere to send the money,
+   and the whole point of the opening PSBT is that it does not say yet. */
+static int unsigned_1in_0out(const char *txid_display, uint32_t vout,
+                             char *out, size_t cap)
+{
+    unsigned char prev[32];
+    size_t n = 0;
+    utils_hex_to_bin((char *)txid_display, prev, 64, &n);
+    if (n != 32) return 0;
+
+    unsigned char tx[64];
+    size_t i = 0;
+    tx[i++] = 0x01; tx[i++] = 0x00; tx[i++] = 0x00; tx[i++] = 0x00;  /* version */
+    tx[i++] = 0x01;                                                  /* 1 input */
+    for (int k = 31; k >= 0; k--) tx[i++] = prev[k];                 /* internal order */
+    tx[i++] = (unsigned char)(vout & 0xFF);
+    tx[i++] = (unsigned char)((vout >> 8) & 0xFF);
+    tx[i++] = (unsigned char)((vout >> 16) & 0xFF);
+    tx[i++] = (unsigned char)((vout >> 24) & 0xFF);
+    tx[i++] = 0x00;                                                  /* empty scriptSig */
+    tx[i++] = 0xFF; tx[i++] = 0xFF; tx[i++] = 0xFF; tx[i++] = 0xFF;  /* sequence */
+    tx[i++] = 0x00;                                                  /* 0 outputs */
+    tx[i++] = 0x00; tx[i++] = 0x00; tx[i++] = 0x00; tx[i++] = 0x00;  /* locktime */
+
+    if (i * 2 + 1 > cap) return 0;
+    utils_bin_to_hex(tx, i, out);
+    return 1;
+}
+
+pc_result pc_channel_open_create(const pc_channel *ch, const char *funding_tx_hex,
+                                 char **psbt_hex_out)
+{
+    if (!ch || !funding_tx_hex || !psbt_hex_out) return PC_ERR_ARG;
+    *psbt_hex_out = NULL;
+
+    char txid[65] = {0};
+    int vout = 0;
+    uint64_t value = 0;
+    pc_result r = pc_tx_find_channel_output(ch, funding_tx_hex, txid, &vout, &value);
+    if (r != PC_OK) return r;
+
+    char txhex[256];
+    if (!unsigned_1in_0out(txid, (uint32_t)vout, txhex, sizeof(txhex)))
+        return PC_ERR_PSBT;
+
+    dogecoin_tx *spend = NULL, *funding = NULL;
+    dogecoin_psbt *psbt = NULL;
+    unsigned char *sbytes = NULL, *fbytes = NULL, *rbytes = NULL;
+    pc_result rc = PC_ERR_PSBT;
+
+    size_t slen = 0;
+    if (!hex_to_bytes(txhex, &sbytes, &slen)) goto out;
+    spend = dogecoin_tx_new();
+    if (dogecoin_tx_deserialize(sbytes, slen, spend, NULL) == 0) goto out;
+
+    psbt = dogecoin_psbt_create(spend);
+    if (!psbt) goto out;
+
+    size_t flen = 0;
+    if (!hex_to_bytes(funding_tx_hex, &fbytes, &flen)) goto out;
+    funding = dogecoin_tx_new();
+    if (dogecoin_tx_deserialize(fbytes, flen, funding, NULL) == 0) goto out;
+    if (!dogecoin_psbt_input_set_utxo(psbt, 0, funding)) goto out;
+
+    size_t rlen = 0;
+    if (!hex_to_bytes(ch->redeem_script_hex, &rbytes, &rlen)) goto out;
+    if (!dogecoin_psbt_input_set_redeemscript(psbt, 0, rbytes, rlen)) goto out;
+
+    *psbt_hex_out = dogecoin_psbt_to_hex(psbt);
+    rc = *psbt_hex_out ? PC_OK : PC_ERR_PSBT;
+out:
+    free(sbytes); free(fbytes); free(rbytes);
+    if (psbt)    dogecoin_psbt_free(psbt);
+    if (spend)   dogecoin_tx_free(spend);
+    if (funding) dogecoin_tx_free(funding);
+    return rc;
+}
+
+pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
+                                 const char *funding_tx_hex,
+                                 uint32_t chain_height, uint32_t min_slack,
+                                 uint64_t *capacity_out)
+{
+    if (!ch || !psbt_hex || !funding_tx_hex) return PC_ERR_ARG;
+    if (!ch->redeem_script_hex[0]) return PC_ERR_STATE;
+
+    /* A channel that expires while Bob holds a payment is one Alice can refund
+       out from under him, so refuse one that does not outlast the work. */
+    if ((uint64_t)ch->locktime <= (uint64_t)chain_height + min_slack)
+        return PC_ERR_STATE;
+
+    /* Which output funds the channel is derived, not asserted. */
+    char txid[65] = {0};
+    int vout = 0;
+    uint64_t value = 0;
+    pc_result r = pc_tx_find_channel_output(ch, funding_tx_hex, txid, &vout, &value);
+    if (r != PC_OK) return r;
+    if (value == 0) return PC_ERR_AMOUNT;
+
+    dogecoin_psbt *psbt = NULL;
+    if (!dogecoin_psbt_from_hex(psbt_hex, &psbt) || !psbt) return PC_ERR_PSBT;
+
+    pc_result rc = PC_ERR_PSBT;
+    if (dogecoin_psbt_num_inputs(psbt) != 1) goto out;
+    if (dogecoin_psbt_num_outputs(psbt) != 0) goto out;   /* nothing promised yet */
+    if (dogecoin_psbt_input_num_partial_sigs(psbt, 0) != 0) goto out;
+
+    /* The redeem script commits Bob's key and the locktime, so matching it
+       against the one he computed is what makes the rest of this his channel. */
+    size_t rlen = 0;
+    unsigned char rbuf[520];
+    if (!dogecoin_psbt_input_get_redeemscript(psbt, 0, rbuf, sizeof(rbuf), &rlen)) goto out;
+    char rhex[PC_MAX_SCRIPT_HEX];
+    if (rlen * 2 + 1 > sizeof(rhex)) goto out;
+    utils_bin_to_hex(rbuf, rlen, rhex);
+    if (strcmp(rhex, ch->redeem_script_hex) != 0) goto out;
+
+    r = pc_channel_set_funding(ch, txid, vout, value);
+    if (r != PC_OK) { rc = r; goto out; }
+    if (capacity_out) *capacity_out = value;
+    rc = PC_OK;
+out:
+    if (psbt) dogecoin_psbt_free(psbt);
+    return rc;
+}
+
 /* ── Alice ───────────────────────────────────────────────────── */
 
 pc_result pc_payment_create(const pc_channel *ch,

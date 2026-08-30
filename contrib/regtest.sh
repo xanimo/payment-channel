@@ -44,13 +44,12 @@ read -r BOB_WIF   BOB_ADDR   < <(./test/mkfunding --keys --regtest)
 ALICE_PUB=$(./alice $NET --wif "$ALICE_WIF" --pubkey)
 BOB_PUB=$(./bob    $NET --wif "$BOB_WIF"    --pubkey)
 
-# both sides must derive the same address from the same inputs
+# Only Alice derives the address now. Bob is told nothing about the channel and
+# reads it back out of the opening PSBT, refusing any script that does not name
+# his own key, so there is no out-of-band address left to compare.
 LOCKTIME=$(( $("${RPC[@]}" getblockcount) + 500 ))
 CHANNEL=$(./alice $NET --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" \
                        --locktime "$LOCKTIME" --address)
-CHANNEL_B=$(./bob $NET --wif "$BOB_WIF" --peer-pubkey "$ALICE_PUB" \
-                       --locktime "$LOCKTIME" --address)
-[ "$CHANNEL" = "$CHANNEL_B" ] || { echo "the two sides disagree on the address" >&2; exit 1; }
 echo "channel  $CHANNEL  locktime $LOCKTIME"
 
 # fund it and bury it. signing a payment against an unconfirmed funding tx is
@@ -75,9 +74,13 @@ else:
 ' "$CHANNEL")
 echo "outpoint $TXID:$VOUT"
 
-./bob $NET --wif "$BOB_WIF" --peer-pubkey "$ALICE_PUB" --locktime "$LOCKTIME" \
-           --funding "$TXID:$VOUT" --capacity "$CAPACITY" \
-           --listen "127.0.0.1:$PORT" --once > "$WORK/bob.log" 2>&1 &
+# Bob prices three orders and invoices for them one at a time. They are what
+# each order costs, so the cumulative totals are 5, 12.5 and 30. He measures the
+# locktime against the height he is given, because he cannot see the chain.
+HEIGHT=$("${RPC[@]}" getblockcount)
+./bob $NET --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once \
+           --height "$HEIGHT" --min-slack 100 \
+           --price 5.0 --price 7.5 --price 17.5 > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!
 
 for _ in $(seq 1 50); do
@@ -86,13 +89,18 @@ for _ in $(seq 1 50); do
 done
 
 ./alice $NET --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$LOCKTIME" \
-             --funding "$TXID:$VOUT" --funding-tx "@$WORK/funding.hex" \
-             --capacity "$CAPACITY" --fee "$FEE" \
-             --connect "127.0.0.1:$PORT" \
-             --pay 5.0 --pay 12.5 --pay 30.0 --close | tee "$WORK/alice.log"
+             --funding-tx "@$WORK/funding.hex" --fee "$FEE" \
+             --max "$CAPACITY" --connect "127.0.0.1:$PORT" \
+             --close | tee "$WORK/alice.log"
 
 wait "$BOB_PID" || true
 BOB_PID=
+
+# she is given the transaction, not the outpoint, so check she picked the same
+# output of it that the node reports
+grep -q "funding  $TXID:$VOUT " "$WORK/alice.log" || {
+    echo "FAIL: alice derived a different funding output" >&2
+    cat "$WORK/bob.log" >&2; exit 1; }
 
 CLOSING=$(grep -A1 "closing transaction" "$WORK/alice.log" | tail -1)
 [ -n "$CLOSING" ] || { echo "no closing transaction" >&2; cat "$WORK/bob.log" >&2; exit 1; }
