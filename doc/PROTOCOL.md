@@ -93,5 +93,11 @@ a peer that stops talking, closes the connection and logs why.
 ## refund
 
 if bob stops responding, alice waits for the locktime and spends the funding
-output through the `OP_IF` branch with `nLockTime` set to at least the locktime
-and a non final sequence number. neither program does this yet.
+output through the `OP_IF` branch with `nLockTime` set to the locktime and a non
+final sequence number, both of which `OP_CHECKLOCKTIMEVERIFY` requires. that is
+`alice --refund`, it talks to nobody, and contrib/regtest.sh broadcasts one and
+checks it confirms and returns the balance.
+
+nothing revokes an old state, so bob can still broadcast any payment he holds
+before the locktime arrives. that is the design rather than a gap: every state
+he holds pays him more than the last, so the newest is the one he wants.

@@ -13,15 +13,26 @@ less, so there is nothing to revoke and no penalty machinery to get wrong. alice
 gets her money back through the `OP_CHECKLOCKTIMEVERIFY` branch if bob
 disappears.
 
-    OP_IF <locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP <alice> OP_CHECKSIGVERIFY
-    OP_ELSE OP_2 OP_ENDIF <alice> <bob> OP_2 OP_CHECKMULTISIG
+    OP_IF <locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP <alice> OP_CHECKSIG
+    OP_ELSE OP_2 <alice> <bob> OP_2 OP_CHECKMULTISIG OP_ENDIF
 
-the else branch pushes `OP_2` so the cooperative close is a plain 2-of-2. the if
-branch gates alice's unilateral refund on the locktime. the scriptsig for the
-cooperative spend is assembled by hand, because `OP_IF` means no generic
-finalizer can classify the script:
+each branch is self contained. the if branch gates alice's unilateral refund on
+the locktime and needs one signature, the else branch is a plain 2-of-2. closing
+the endif after the multisig rather than before it is what keeps them apart:
+with a shared tail the refund falls through into a multisig the if branch pushes
+no `m` for, so alice's scriptsig has to carry the same signature twice and an
+`m` of its own to feed it. both scriptsigs are assembled by hand, because
+`OP_IF` means no generic finalizer can classify the script:
 
-    OP_0 <alice sig> <bob sig> OP_0 <redeem script>
+    OP_0 <alice sig> <bob sig> OP_0 <redeem script>     cooperative close
+    <alice sig> OP_1 <redeem script>                    alice's refund
+
+the trailing push selects the branch. the refund sets `nLockTime` to the
+channel's locktime and leaves the input non-final, both of which
+`OP_CHECKLOCKTIMEVERIFY` requires, so no node will mine it until the locktime
+passes. `contrib/regtest.sh` broadcasts one and checks it confirms and returns
+the balance, which is the only thing that makes the recovery path more than a
+reading of the script.
 
 ## building
 
@@ -33,10 +44,12 @@ and #459, install it somewhere, and point at it:
     make LIBDOGECOIN=/path/to/staged/install check
 
 `make check` runs the protocol test and then runs alice against bob over a
-socket with a locally minted funding transaction. `contrib/regtest.sh` does the
-same thing against a real regtest node, including broadcasting the close, which
-is the only thing that proves the transactions are actually valid. it passes:
-the close confirms and pays bob exactly what he was promised.
+socket with a locally minted funding transaction, including a peer that
+misbehaves so bob's refusals get exercised rather than only his arithmetic.
+`contrib/regtest.sh` does the same against a real regtest node and broadcasts
+both transactions this scheme can produce, which is the only thing that proves
+either is valid. it passes: the close confirms and pays bob exactly what he was
+promised, and the refund confirms and returns the balance to alice.
 
 pick the chain with `--testnet` or `--regtest`. it is not a boolean because
 dogecoin regtest shares testnet's p2sh prefix but not its p2pkh one, 0x6f
@@ -76,6 +89,13 @@ which of its outputs pays the channel herself. `--peer-pubkey` pins bob's key;
 without it she trusts whatever he announces, and the transport is plain tcp in
 the clear. both take `--pubkey` to print their own key. see doc/PROTOCOL.md for
 the wire format.
+
+if bob stops answering, alice takes the money back through the timelocked
+branch. it needs no peer, which is the situation it is for, and the transaction
+it prints is worthless to anyone until the locktime passes.
+
+    $ alice --wif $ALICE_WIF --peer-pubkey $BOB_PUB --locktime 5200000 \
+            --funding-tx @funding.hex --refund
 
 ## what bob checks
 

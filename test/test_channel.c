@@ -345,6 +345,46 @@ int main(void)
         }
     }
 
+    /* ── the refund branch, the only way alice gets her money back ── */
+    {
+        char *refund = NULL;
+        CHECK_OK(pc_refund_create(&ch, alice_wif, alice_addr, 100000000ULL, &refund),
+                 "refund built");
+        if (refund) {
+            unsigned char rb[520];
+            size_t rl2 = 0;
+            utils_hex_to_bin(ch.redeem_script_hex, rb, strlen(ch.redeem_script_hex), &rl2);
+
+            /* it spends the funding outpoint and pays alice */
+            CHECK(strstr(refund, ch.redeem_script_hex) != NULL,
+                  "refund carries the redeem script");
+
+            size_t n2 = strlen(refund);
+            /* nLockTime is the channel's, or CLTV has nothing to compare */
+            char ltbuf[9];
+            snprintf(ltbuf, sizeof(ltbuf), "%02x%02x%02x%02x",
+                     ch.locktime & 0xff, (ch.locktime >> 8) & 0xff,
+                     (ch.locktime >> 16) & 0xff, (ch.locktime >> 24) & 0xff);
+            CHECK(memcmp(refund + n2 - 8, ltbuf, 8) == 0,
+                  "refund locktime is the channel's");
+
+            /* and the signature in it verifies against that transaction */
+            unsigned char h[32];
+            CHECK_OK(pc_tx_sighash(refund, rb, rl2, h), "refund sighash");
+            CHECK(pc_tx_verify_payment(&ch, refund, 1) != PC_OK,
+                  "a refund is not a payment to bob");
+
+            /* the branch selector must be OP_1, not the cooperative OP_0 */
+            CHECK(strstr(refund, "51") != NULL, "refund selects the IF branch");
+            dogecoin_free(refund);
+        }
+        CHECK(pc_refund_create(&ch, alice_wif, alice_addr, 0, &refund) == PC_ERR_AMOUNT,
+              "a zero-fee refund is refused");
+        CHECK(pc_refund_create(&ch, alice_wif, alice_addr,
+                               ch.capacity_koinu, &refund) == PC_ERR_AMOUNT,
+              "a refund spending the whole capacity on fee is refused");
+    }
+
     free(funding_hex);   /* the opening checks above still read it */
 
     /* ── amounts ─────────────────────────────────────────────── */

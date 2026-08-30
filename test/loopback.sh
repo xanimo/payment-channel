@@ -59,4 +59,29 @@ grep -q "paid     3000000000 koinu held" "$WORK/bob.log" || {
     echo "FAIL: bob did not accept the final payment" >&2; exit 1; }
 grep -q "closing transaction" "$WORK/alice.log" || {
     echo "FAIL: alice did not get a closing transaction" >&2; exit 1; }
+# Bob's refusals live in his dispatch loop, so only a peer that misbehaves can
+# reach them. test/adversary is that peer: it opens honestly, then does one
+# wrong thing and asserts the answer is a reject rather than a dead socket.
+for CASE in reopen payment-before-open; do
+    ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once \
+          --height 1000 --min-slack 100 \
+          --price 5.0 > "$WORK/bob-$CASE.log" 2>&1 &
+    ADV_BOB=$!
+    for _ in $(seq 1 50); do
+        grep -q "listening" "$WORK/bob-$CASE.log" 2>/dev/null && break
+        sleep 0.1
+    done
+    if ./test/adversary --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" \
+                        --locktime "$LOCKTIME" --funding-tx "@$WORK/funding.hex" \
+                        --connect "127.0.0.1:$PORT" --case "$CASE"; then
+        echo "  $CASE refused"
+    else
+        echo "FAIL: bob did not refuse $CASE" >&2
+        cat "$WORK/bob-$CASE.log" >&2
+        kill "$ADV_BOB" 2>/dev/null || true
+        exit 1
+    fi
+    wait "$ADV_BOB" 2>/dev/null || true
+done
+
 echo "loopback ok"
