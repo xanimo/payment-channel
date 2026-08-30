@@ -39,9 +39,15 @@ const char *pc_strerror(pc_result r)
     case PC_ERR_ARG:     return "bad argument";
     case PC_ERR_KEY:     return "key would not decode";
     case PC_ERR_SCRIPT:  return "redeem script would not build";
-    case PC_ERR_PSBT:    return "psbt would not parse, sign or finalize";
+    /* these travel on the wire as reject reasons, so they are held to the
+       envelope's alphabet: no commas, no punctuation */
+    case PC_ERR_PSBT:    return "psbt would not parse or sign";
     case PC_ERR_STATE:   return "channel not in a state that allows this";
-    case PC_ERR_AMOUNT:  return "payment does not respect the channel balance";
+    case PC_ERR_AMOUNT:  return "pays less than it claims to";
+    case PC_ERR_CAPACITY: return "spends more than the channel holds";
+    case PC_ERR_DUST:    return "carries an output under the dust limit";
+    case PC_ERR_FEE:     return "leaves too little fee to be mined";
+    case PC_ERR_FINAL:   return "is not final and cannot be mined yet";
     }
     return "unknown";
 }
@@ -724,9 +730,9 @@ pc_result pc_refund_create(const pc_channel *ch,
        other end to refuse it and tell her why. Everything Bob would have
        checked about a payment gets checked here instead, which turns a
        discovery at the locktime into a discovery at call time. */
-    if (value < PC_HARD_DUST_KOINU) { rc = PC_ERR_AMOUNT; goto out; }
+    if (value < PC_HARD_DUST_KOINU) { rc = PC_ERR_DUST; goto out; }
     if (fee_koinu < pc_min_fee(fn, value < PC_SOFT_DUST_KOINU ? 1 : 0)) {
-        rc = PC_ERR_AMOUNT; goto out;
+        rc = PC_ERR_FEE; goto out;
     }
     {
         unsigned char apub[33];

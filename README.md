@@ -36,9 +36,15 @@ reading of the script.
 
 ## building
 
-libdogecoin is not yet released with the entry points this uses, so build
-against a tree carrying dogecoinfoundation/libdogecoin#454, #455, #456, #457
-and #459, install it somewhere, and point at it:
+this does not build against any released libdogecoin, and will not for the
+foreseeable future. it needs entry points that exist upstream but are not in a
+release: #454, #455, #456, #457 and #459 for the build, and #461 for
+`contrib/regtest.sh` to pass reliably. none of them are merged and none of them
+have a timeline, so do not wait for one.
+
+the patches are archived in depends/patches so the build is reproducible from
+this repo alone. see the README there; it is eight patches onto `0.1.5-dev` at
+bf3f9df4, and they apply and build clean.
 
     make LIBDOGECOIN=/path/to/staged/install
     make LIBDOGECOIN=/path/to/staged/install check
@@ -120,6 +126,13 @@ carry two signatures that verify, pay a large enough fee, carry no dust, and be
 final. a non-zero locktime or a sequence under `0xffffffff` is a transaction no
 node will mine yet, and neither field is constrained by the script, since the
 else branch never executes `OP_CHECKLOCKTIMEVERIFY`.
+
+all of that is calibrated to a node running default policy. `-blockmintxfee`,
+`-dustlimit` and `-harddustlimit` are all settable, so on a network configured
+otherwise these checks are confidently wrong in one direction or the other:
+too strict and bob refuses payments that would have been mined, too loose and he
+ships against one that will not be. what bob guarantees is "this would be
+accepted and mined by a default node", not "this will be mined".
 
 the fee is measured against the floor a miner uses, `DEFAULT_BLOCK_MIN_TX_FEE`,
 not the one a relay uses. they differ by ten times, so checking only the relay

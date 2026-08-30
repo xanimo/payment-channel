@@ -268,13 +268,13 @@ int main(void)
                    not constrain either field and Bob has to */
                 char *lt = strdup(raw);
                 memcpy(lt + rl - 8, "40420f00", 8);
-                CHECK(pc_tx_verify_payment(&ch, lt, 2000000000ULL) == PC_ERR_STATE,
+                CHECK(pc_tx_verify_payment(&ch, lt, 2000000000ULL) == PC_ERR_FINAL,
                       "a future locktime is refused");
                 free(lt);
 
                 char *sq = strdup(raw);
                 memcpy(sq + seq_off, "feffffff", 8);
-                CHECK(pc_tx_verify_payment(&ch, sq, 2000000000ULL) == PC_ERR_STATE,
+                CHECK(pc_tx_verify_payment(&ch, sq, 2000000000ULL) == PC_ERR_FINAL,
                       "a non-final sequence is refused");
                 free(sq);
             }
@@ -289,18 +289,18 @@ int main(void)
 
                 pc_channel zero = ch;
                 zero.capacity_koinu = OUTPUTS;         /* what the outputs spend */
-                CHECK(pc_tx_verify_payment(&zero, raw, 2000000000ULL) == PC_ERR_AMOUNT,
+                CHECK(pc_tx_verify_payment(&zero, raw, 2000000000ULL) == PC_ERR_FEE,
                       "a zero-fee payment is refused");
 
                 /* the one that matters: a fee that relays and never gets mined */
                 pc_channel relayonly = ch;
                 relayonly.capacity_koinu = OUTPUTS + relay_floor;
-                CHECK(pc_tx_verify_payment(&relayonly, raw, 2000000000ULL) == PC_ERR_AMOUNT,
+                CHECK(pc_tx_verify_payment(&relayonly, raw, 2000000000ULL) == PC_ERR_FEE,
                       "the relay floor alone is refused");
 
                 pc_channel under = ch;
                 under.capacity_koinu = OUTPUTS + block_floor - 1;
-                CHECK(pc_tx_verify_payment(&under, raw, 2000000000ULL) == PC_ERR_AMOUNT,
+                CHECK(pc_tx_verify_payment(&under, raw, 2000000000ULL) == PC_ERR_FEE,
                       "one koinu under the block floor is refused");
 
                 pc_channel atfloor = ch;
@@ -322,7 +322,7 @@ int main(void)
                 /* value(8) script(1+25) then the second value */
                 size_t val1 = nout_off + 2 + 16 + 2 + 50;
                 memcpy(dusty + val1, "e803000000000000", 16);   /* 1000 koinu */
-                CHECK(pc_tx_verify_payment(&ch, dusty, 2000000000ULL) == PC_ERR_AMOUNT,
+                CHECK(pc_tx_verify_payment(&ch, dusty, 2000000000ULL) == PC_ERR_DUST,
                       "an output under the hard dust limit is refused");
                 free(dusty);
             }
@@ -582,6 +582,18 @@ int main(void)
                              &back) != PC_OK, "a negative amount is refused");
     CHECK(pc_envelope_decode("{\"type\":\"ack\",\"to_bob\":12x,\"psbt\":\"01\"}",
                              &back) != PC_OK, "a bad amount terminator is refused");
+
+    /* bob sends pc_strerror() as a reject reason, so every one of them has to
+       survive the envelope. a comma in one of these is how the reject path went
+       dead the first time. */
+    for (int e = PC_OK; e <= PC_ERR_FINAL + 1; e++) {
+        memset(&env, 0, sizeof(env));
+        env.type = PC_MSG_REJECT;
+        snprintf(env.addr, sizeof(env.addr), "%s", pc_strerror((pc_result)e));
+        snprintf(env.psbt_hex, sizeof(env.psbt_hex), "01");
+        CHECK(pc_envelope_encode(&env, wire, sizeof(wire)) == PC_OK,
+              "pc_strerror(%d) survives the envelope: %s", e, pc_strerror((pc_result)e));
+    }
 
 done:
     dogecoin_ecc_stop();

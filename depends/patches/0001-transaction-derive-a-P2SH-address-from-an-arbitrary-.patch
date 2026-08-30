@@ -1,0 +1,218 @@
+From e98b0d5f3a794a0a80b6bc7c2eacfa112f6c7d47 Mon Sep 17 00:00:00 2001
+From: bluezr <bluezr@dogecoin.com>
+Date: Fri, 28 Aug 2026 16:21:24 -0700
+Subject: [PATCH 1/7] transaction: derive a P2SH address from an arbitrary
+ redeem script
+
+get_p2sh_multisig_address() covers plain M-of-N, which was the only redeem
+script a consumer could get an address for. dogecoin_script_get_scripthash()
+and the script builders are exported but live in script.h, which is not
+installed, so a script assembled by hand -- a timelocked branch, an escrow,
+anything with OP_IF -- had no reachable path to the address it pays to.
+
+Takes the script as hex and returns the address, so no libdogecoin type
+appears in the signature and script.h stays out of the installed set. Rejects
+scripts over 520 bytes: a P2SH redeem script is pushed as one stack element
+and cannot exceed MAX_SCRIPT_ELEMENT_SIZE, so an address for a larger one
+could never be spent.
+
+Adds P2SHLEN. A mainnet P2SH address is 34 characters and a testnet one is 35,
+so P2PKHLEN is one short on testnet and base58 encoding refuses:
+
+    mainnet  A7eckwLVNFDsTtYazcKsVGnJ5iZFgVsmox  34
+    testnet  2N8Ta5qCcudrKmJofFcHKs69BbVPPN2b7Yz  35
+
+get_p2sh_multisig_address() documented P2PKHLEN as sufficient, so a testnet
+caller following the contract got 0 back with no indication why. The guard is
+left alone, since tightening it would reject mainnet callers passing 35 today;
+only the documented size is corrected.
+
+test_p2sh_address_from_script pins the generic route against the multisig
+helper for the same script, covers a script the helper cannot build, and
+asserts P2PKHLEN is refused. It fails on line 1141 if the derivation is
+stubbed. 104/104.
+---
+ include/dogecoin/dogecoin.h    |  3 +++
+ include/dogecoin/libdogecoin.h | 15 +++++++++--
+ src/transaction.c              | 45 +++++++++++++++++++++++++++++++
+ test/transaction_tests.c       | 48 +++++++++++++++++++++++++++++++++-
+ test/unittester.c              |  2 ++
+ 5 files changed, 110 insertions(+), 3 deletions(-)
+
+diff --git a/include/dogecoin/dogecoin.h b/include/dogecoin/dogecoin.h
+index 4a8a0fd2..e1685867 100644
+--- a/include/dogecoin/dogecoin.h
++++ b/include/dogecoin/dogecoin.h
+@@ -213,6 +213,9 @@ typedef struct dogecoin_mutex_ {
+ #define HDKEYLEN 112
+ #define PRIVKEYWIFLEN 53
+ #define P2PKHLEN 35
++/* P2SH addresses are 34 chars on mainnet and 35 on testnet, so a buffer that
++   works on both chains needs 36 including the terminator. */
++#define P2SHLEN 36
+ #define PRIVKEYHEXLEN DOGECOIN_ECKEY_PKEY_LENGTH * 2 + 1
+ #define PUBKEYHEXLEN 67
+ #define PUBKEYHASHLEN 41 // bare hash160 hex only, not a scriptPubKey
+diff --git a/include/dogecoin/libdogecoin.h b/include/dogecoin/libdogecoin.h
+index 483b3588..cf866f6f 100644
+--- a/include/dogecoin/libdogecoin.h
++++ b/include/dogecoin/libdogecoin.h
+@@ -601,9 +601,20 @@ int sign_transaction_ex(int txindex, const char* script_pubkey, const char* priv
+ /* convenience wrapper: sign a single-key p2pkh tx at (txindex) using (privkey); writes signed hex into (buf) with capacity (buf_cap) */
+ int sign_transaction_w_privkey_ex(int txindex, const char* privkey, char* buf, size_t buf_cap);
+ 
++/* derive the P2SH address an arbitrary redeem script pays to; (redeem_script_hex)
++   is the script as hex, at most 520 bytes once decoded (a P2SH redeem script is
++   pushed as one stack element and cannot exceed that);
++   writes the address into (p2sh_addr_out), which must hold at least P2SHLEN
++   bytes, capacity given by (p2sh_addr_cap);
++   returns 1 on success, 0 on error (bad hex, oversized script, small buffer) */
++int get_p2sh_address_from_script(const char* redeem_script_hex, int is_testnet,
++                                 char* p2sh_addr_out, size_t p2sh_addr_cap);
++
+ /* build an M-of-N P2SH multisig address from (n) compressed pubkey hex strings;
+-   writes the P2SH address into (p2sh_addr_out) (must hold at least P2PKHLEN bytes,
+-   capacity given by (p2sh_addr_cap)) and the redeem script hex into
++   writes the P2SH address into (p2sh_addr_out) (must hold at least P2SHLEN
++   bytes: a mainnet P2SH address is 34 chars but a testnet one is 35, so a
++   P2PKHLEN buffer is refused on testnet, capacity given by (p2sh_addr_cap))
++   and the redeem script hex into
+    (redeem_script_hex_out) (must hold at least (n*68+6)*2+1 bytes, capacity given
+    by (redeem_script_hex_cap));
+    returns 1 on success, 0 on error (including insufficient buffer capacity) */
+diff --git a/src/transaction.c b/src/transaction.c
+index d04f858d..966219aa 100644
+--- a/src/transaction.c
++++ b/src/transaction.c
+@@ -1572,6 +1572,51 @@ int sign_transaction_w_privkey_ex(int  txindex,
+  *
+  * @return 1 on success, 0 on error (including insufficient buffer capacity).
+  */
++/* Derive the P2SH address for an arbitrary redeem script.
++ *
++ * get_p2sh_multisig_address() covers plain M-of-N, which is the only redeem
++ * script a caller could previously reach: dogecoin_script_get_scripthash() and
++ * the script builders live in script.h, which is not installed. A consumer
++ * holding any other redeem script -- a timelocked branch, an escrow, anything
++ * assembled by hand -- had no way to compute the address it pays to.
++ *
++ * Takes the script as hex so no libdogecoin type appears in the signature. */
++int get_p2sh_address_from_script(const char* redeem_script_hex, int is_testnet,
++                                 char* p2sh_addr_out, size_t p2sh_addr_cap)
++{
++    if (!redeem_script_hex || !p2sh_addr_out) return 0;
++    if (p2sh_addr_cap < P2SHLEN) return 0;
++
++    size_t hexlen = strlen(redeem_script_hex);
++    if (hexlen == 0 || (hexlen % 2) != 0) return 0;
++    if (strspn(redeem_script_hex, VALID_HEX_CHARS) != hexlen) return 0;
++
++    /* A P2SH redeem script is pushed as a single stack element, so it cannot
++       exceed MAX_SCRIPT_ELEMENT_SIZE. Reject here rather than return an address
++       for a script that can never be spent. */
++    size_t binlen = hexlen / 2;
++    if (binlen > 520) return 0;
++
++    unsigned char* bin = (unsigned char*)dogecoin_malloc(binlen);
++    size_t outlen = 0;
++    utils_hex_to_bin(redeem_script_hex, bin, hexlen, &outlen);
++    if (outlen != binlen) { dogecoin_free(bin); return 0; }
++
++    cstring* redeem = cstr_new_buf(bin, binlen);
++    dogecoin_free(bin);
++    if (!redeem) return 0;
++
++    uint160_t script_hash;
++    dogecoin_bool ok = dogecoin_script_get_scripthash(redeem, script_hash);
++    cstr_free(redeem, true);
++    if (!ok) return 0;
++
++    const dogecoin_chainparams* chain = is_testnet
++        ? &dogecoin_chainparams_test
++        : &dogecoin_chainparams_main;
++    return dogecoin_p2sh_addr_from_hash160(script_hash, chain, p2sh_addr_out, p2sh_addr_cap) ? 1 : 0;
++}
++
+ int get_p2sh_multisig_address(const char** pubkeys_hex, int n, int m, int is_testnet,
+                                char* p2sh_addr_out, size_t p2sh_addr_cap,
+                                char* redeem_script_hex_out, size_t redeem_script_hex_cap)
+diff --git a/test/transaction_tests.c b/test/transaction_tests.c
+index 1afc752c..35f67ba5 100644
+--- a/test/transaction_tests.c
++++ b/test/transaction_tests.c
+@@ -1117,4 +1117,50 @@ void test_transaction_large(void)
+ 
+     free(txhex_large);
+     free(tx_work_buf);
+-}
+\ No newline at end of file
++}
++/* An arbitrary redeem script must derive the same P2SH address as the
++   multisig helper does for the script it builds, and must reject anything it
++   cannot pay to. get_p2sh_multisig_address() was the only reachable path to a
++   P2SH address, so a hand-assembled script had none. */
++void test_p2sh_address_from_script()
++{
++    const char* pubkeys[2] = {
++        "02c0ded2bc1f1305fb0faac5e6c03ee3a1924234985427b6167ca569d13df435cf",
++        "0339a36013301597daef41fbe593a02cc513d0b55527ec2df1050e2e8ff49c85c2"
++    };
++    char ms_addr[P2SHLEN];
++    char redeem_hex[1024];
++    u_assert_int_eq(get_p2sh_multisig_address(pubkeys, 2, 2, false,
++                                              ms_addr, sizeof(ms_addr),
++                                              redeem_hex, sizeof(redeem_hex)), 1);
++
++    /* same script by the generic route must give the same address */
++    char addr[P2SHLEN];
++    u_assert_int_eq(get_p2sh_address_from_script(redeem_hex, false,
++                                                 addr, sizeof(addr)), 1);
++    u_assert_str_eq(addr, ms_addr);
++
++    /* testnet differs from mainnet for the same script */
++    char taddr[P2SHLEN];
++    u_assert_int_eq(get_p2sh_address_from_script(redeem_hex, true,
++                                                 taddr, sizeof(taddr)), 1);
++    u_assert_true(strcmp(taddr, addr) != 0);
++
++    /* a script the multisig helper cannot build: OP_IF <32 bytes> OP_ENDIF OP_1 */
++    const char* custom = "6320000000000000000000000000000000000000000000000000000000000000006851";
++    char caddr[P2SHLEN];
++    u_assert_int_eq(get_p2sh_address_from_script(custom, false, caddr, sizeof(caddr)), 1);
++    u_assert_true(caddr[0] == 'A' || caddr[0] == '9');
++
++    /* rejections: null, empty, odd length, non-hex, oversized, small buffer */
++    u_assert_int_eq(get_p2sh_address_from_script(NULL, false, caddr, sizeof(caddr)), 0);
++    u_assert_int_eq(get_p2sh_address_from_script("", false, caddr, sizeof(caddr)), 0);
++    u_assert_int_eq(get_p2sh_address_from_script("516", false, caddr, sizeof(caddr)), 0);
++    u_assert_int_eq(get_p2sh_address_from_script("51zz", false, caddr, sizeof(caddr)), 0);
++    u_assert_int_eq(get_p2sh_address_from_script(redeem_hex, false, caddr, P2PKHLEN), 0);
++
++    char big[521 * 2 + 1];
++    memset(big, '5', sizeof(big) - 1);
++    big[sizeof(big) - 1] = '\0';
++    u_assert_int_eq(get_p2sh_address_from_script(big, false, caddr, sizeof(caddr)), 0);
++}
+diff --git a/test/unittester.c b/test/unittester.c
+index b1ecd3f7..3e0617bf 100644
+--- a/test/unittester.c
++++ b/test/unittester.c
+@@ -92,6 +92,7 @@ extern void test_eckey_idx_not_reused();
+ extern void test_tpm();
+ extern void test_psbt();
+ extern void test_transaction();
++extern void test_p2sh_address_from_script();
+ extern void test_transaction_ts_contexts();
+ extern void test_transaction_ts_wrappers();
+ #if !defined(_WIN32)
+@@ -248,6 +249,7 @@ int main()
+ #endif
+     u_run_test(test_psbt);
+     u_run_test(test_transaction);
++    u_run_test(test_p2sh_address_from_script);
+     u_run_test(test_transaction_ts_contexts);
+ #ifndef USE_OPTEE
+     u_run_test(test_transaction_ts_wrappers);
+-- 
+2.34.1
+

@@ -189,7 +189,13 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
     if (r != PC_OK) return send_reject(fd, "will not countersign"), 0;
 
     r = pc_tx_verify_payment(&s->ch, raw, in->to_bob_koinu);
-    if (r != PC_OK) { dogecoin_free(raw); return send_reject(fd, "pays less than it says"), 0; }
+    if (r != PC_OK) {
+        dogecoin_free(raw);
+        /* say which. four of these are nothing to do with the amount, and a
+           customer told "pays less than it says" over a short fee has no route
+           from that to the problem. */
+        return send_reject(fd, pc_strerror(r)), 0;
+    }
 
     r = pc_payment_accept(&s->ch, in->psbt_hex, in->to_bob_koinu);
     if (r != PC_OK) { dogecoin_free(raw); return send_reject(fd, "does not advance the channel"), 0; }

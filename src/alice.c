@@ -159,6 +159,24 @@ int main(int argc, char **argv)
     if (max_s && pc_doge_to_koinu(max_s, &maximum) != PC_OK) {
         fprintf(stderr, "alice: --max is not an amount\n"); goto done;
     }
+
+    /* Bob refuses a payment whose fee no miner would take, and there is no
+       route from his reject back to "raise --fee". She cannot size the final
+       transaction yet, since the psbt is missing the scriptSig he adds, but
+       every payment this channel builds lands near PC_TYPICAL_TX_BYTES, so a
+       fee under that floor could not work on any of them. Say so now rather
+       than after a round trip. */
+    {
+        uint64_t floor_fee = pc_min_fee(PC_TYPICAL_TX_BYTES, 0);
+        if (fee < floor_fee) {
+            char want[32], got[32];
+            pc_koinu_to_doge(floor_fee, want, sizeof(want));
+            pc_koinu_to_doge(fee, got, sizeof(got));
+            fprintf(stderr, "alice: --fee of %s is below the %s a miner needs "
+                            "for a payment this size\n", got, want);
+            goto done;
+        }
+    }
     funding_tx = pc_read_hex_arg(ftx_arg);
     if (!funding_tx) { fprintf(stderr, "alice: cannot read --funding-tx\n"); goto done; }
 

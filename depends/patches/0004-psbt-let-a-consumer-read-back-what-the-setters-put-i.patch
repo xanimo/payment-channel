@@ -1,0 +1,343 @@
+From 57050394f102990e0b61aec762219f1b5ab5a474 Mon Sep 17 00:00:00 2001
+From: bluezr <bluezr@dogecoin.com>
+Date: Fri, 28 Aug 2026 16:57:28 -0700
+Subject: [PATCH 4/7] psbt: let a consumer read back what the setters put in
+
+The struct is not in the installed header set and there were no accessors, so
+of the 23 public PSBT entry points every one wrote or transformed and none
+read. A consumer could set a redeem script, sign, combine and extract, and
+could not learn how many inputs a PSBT it received even had.
+
+That is survivable while the library finalizes for you. It is not once the
+caller supplies its own scriptSig, which the previous commit allows: building
+one means reading the partial signatures and the redeem script the signers
+left behind, and both were unreachable. The finalizer hook shipped without
+them would have been unusable.
+
+Adds counts, version, partial signature count and accessor, redeem script for
+inputs and outputs, final scriptSig, and sighash type. Buffer-and-length
+throughout so no internal type reaches a signature and the struct stays
+opaque. A NULL buffer reports the length needed and returns false, so callers
+size then fetch.
+
+test_psbt_accessors signs, reads the signature back through the accessor,
+assembles a scriptSig from it, installs it with set_final_scriptsig and reads
+that back byte for byte, without touching the struct. It fails on line 1548
+with the partial signature copy stubbed. Covers the size-query path, short
+buffers, out-of-range indices and NULL. 103/103.
+---
+ include/dogecoin/libdogecoin.h |  23 +++++++
+ include/dogecoin/psbt.h        |  24 ++++++++
+ src/psbt.c                     |  99 ++++++++++++++++++++++++++++++
+ test/psbt_tests.c              | 109 +++++++++++++++++++++++++++++++++
+ 4 files changed, 255 insertions(+)
+
+diff --git a/include/dogecoin/libdogecoin.h b/include/dogecoin/libdogecoin.h
+index 064d8d95..272e925c 100644
+--- a/include/dogecoin/libdogecoin.h
++++ b/include/dogecoin/libdogecoin.h
+@@ -1011,6 +1011,29 @@ dogecoin_bool  dogecoin_psbt_input_set_final_scriptsig(dogecoin_psbt* psbt, size
+ dogecoin_bool  dogecoin_psbt_finalize_input(dogecoin_psbt* psbt, size_t idx);
+ 
+ /* extractor role: produce the fully-signed tx; returns NULL if any input lacks final_script_sig */
++/* ── Accessors ────────────────────────────────────────────────
++   The struct is opaque to consumers, so these read back what the setters put
++   in. A caller-supplied finalizer needs them: building a scriptSig means
++   reading the partial signatures and the redeem script.
++   Each getter with a buffer reports the length it needs via (len_out) and
++   returns false when (out) is NULL or (cap) is too small, so size then fetch. */
++size_t dogecoin_psbt_num_inputs(const dogecoin_psbt* psbt);
++size_t dogecoin_psbt_num_outputs(const dogecoin_psbt* psbt);
++uint32_t dogecoin_psbt_get_version(const dogecoin_psbt* psbt);
++size_t dogecoin_psbt_input_num_partial_sigs(const dogecoin_psbt* psbt, size_t idx);
++dogecoin_bool dogecoin_psbt_input_get_partial_sig(
++    const dogecoin_psbt* psbt, size_t idx, size_t n,
++    uint8_t *pubkey_out, size_t pubkey_cap, size_t *pubkey_len_out,
++    uint8_t *sig_out, size_t sig_cap, size_t *sig_len_out);
++dogecoin_bool dogecoin_psbt_input_get_redeemscript(
++    const dogecoin_psbt* psbt, size_t idx, uint8_t *out, size_t cap, size_t *len_out);
++dogecoin_bool dogecoin_psbt_input_get_final_scriptsig(
++    const dogecoin_psbt* psbt, size_t idx, uint8_t *out, size_t cap, size_t *len_out);
++dogecoin_bool dogecoin_psbt_output_get_redeemscript(
++    const dogecoin_psbt* psbt, size_t idx, uint8_t *out, size_t cap, size_t *len_out);
++dogecoin_bool dogecoin_psbt_input_get_sighash(
++    const dogecoin_psbt* psbt, size_t idx, uint32_t *sighash_out);
++
+ dogecoin_tx*   dogecoin_psbt_extract(const dogecoin_psbt* psbt);
+ /* extractor role: the finalized transaction as broadcastable hex; caller frees
+    with dogecoin_free(); NULL if any input lacks a final scriptSig */
+diff --git a/include/dogecoin/psbt.h b/include/dogecoin/psbt.h
+index 996eab74..a562e8d0 100644
+--- a/include/dogecoin/psbt.h
++++ b/include/dogecoin/psbt.h
+@@ -215,6 +215,30 @@ LIBDOGECOIN_API dogecoin_bool dogecoin_psbt_finalize_input(
+  * Extract a fully signed transaction.  Returns NULL if any input
+  * lacks a final_script_sig.  Caller owns the returned tx.
+  */
++
++/* ── Accessors ────────────────────────────────────────────────
++   The struct is opaque to consumers, so these read back what the setters put
++   in. A caller-supplied finalizer needs them: building a scriptSig means
++   reading the partial signatures and the redeem script.
++   Each getter with a buffer reports the length it needs via (len_out) and
++   returns false when (out) is NULL or (cap) is too small, so size then fetch. */
++LIBDOGECOIN_API size_t dogecoin_psbt_num_inputs(const dogecoin_psbt *psbt);
++LIBDOGECOIN_API size_t dogecoin_psbt_num_outputs(const dogecoin_psbt *psbt);
++LIBDOGECOIN_API uint32_t dogecoin_psbt_get_version(const dogecoin_psbt *psbt);
++LIBDOGECOIN_API size_t dogecoin_psbt_input_num_partial_sigs(const dogecoin_psbt *psbt, size_t idx);
++LIBDOGECOIN_API dogecoin_bool dogecoin_psbt_input_get_partial_sig(
++    const dogecoin_psbt *psbt, size_t idx, size_t n,
++    uint8_t *pubkey_out, size_t pubkey_cap, size_t *pubkey_len_out,
++    uint8_t *sig_out, size_t sig_cap, size_t *sig_len_out);
++LIBDOGECOIN_API dogecoin_bool dogecoin_psbt_input_get_redeemscript(
++    const dogecoin_psbt *psbt, size_t idx, uint8_t *out, size_t cap, size_t *len_out);
++LIBDOGECOIN_API dogecoin_bool dogecoin_psbt_input_get_final_scriptsig(
++    const dogecoin_psbt *psbt, size_t idx, uint8_t *out, size_t cap, size_t *len_out);
++LIBDOGECOIN_API dogecoin_bool dogecoin_psbt_output_get_redeemscript(
++    const dogecoin_psbt *psbt, size_t idx, uint8_t *out, size_t cap, size_t *len_out);
++LIBDOGECOIN_API dogecoin_bool dogecoin_psbt_input_get_sighash(
++    const dogecoin_psbt *psbt, size_t idx, uint32_t *sighash_out);
++
+ LIBDOGECOIN_API dogecoin_tx *dogecoin_psbt_extract(const dogecoin_psbt *psbt);
+ 
+ /* extractor role: the finalized transaction as broadcastable hex; caller frees
+diff --git a/src/psbt.c b/src/psbt.c
+index e685c378..53fe8469 100644
+--- a/src/psbt.c
++++ b/src/psbt.c
+@@ -1348,6 +1348,105 @@ char *dogecoin_psbt_extract_hex(const dogecoin_psbt *psbt)
+     return hex;
+ }
+ 
++/* ── Accessors ────────────────────────────────────────────────── */
++/*
++ * The struct is not in the installed header set, so a consumer holding a
++ * dogecoin_psbt could set fields and never read one back. That is survivable
++ * while the library finalizes for you; it is not once the caller supplies its
++ * own scriptSig, because building one means reading the partial signatures and
++ * the redeem script the signers left behind.
++ *
++ * Buffer-and-length throughout so no internal type reaches the signature. Each
++ * getter reports the length it needs when the buffer is too small, so a caller
++ * can size then fetch.
++ */
++
++size_t dogecoin_psbt_num_inputs(const dogecoin_psbt *psbt)
++{
++    return psbt ? psbt->num_inputs : 0;
++}
++
++size_t dogecoin_psbt_num_outputs(const dogecoin_psbt *psbt)
++{
++    return psbt ? psbt->num_outputs : 0;
++}
++
++uint32_t dogecoin_psbt_get_version(const dogecoin_psbt *psbt)
++{
++    return psbt ? psbt->version : 0;
++}
++
++size_t dogecoin_psbt_input_num_partial_sigs(const dogecoin_psbt *psbt, size_t idx)
++{
++    if (!psbt || idx >= psbt->num_inputs) return 0;
++    return psbt->inputs[idx].num_partial_sigs;
++}
++
++dogecoin_bool dogecoin_psbt_input_get_partial_sig(const dogecoin_psbt *psbt, size_t idx,
++                                                  size_t n,
++                                                  uint8_t *pubkey_out, size_t pubkey_cap,
++                                                  size_t *pubkey_len_out,
++                                                  uint8_t *sig_out, size_t sig_cap,
++                                                  size_t *sig_len_out)
++{
++    if (!psbt || idx >= psbt->num_inputs) return false;
++    const dogecoin_psbt_input *in = &psbt->inputs[idx];
++    if (n >= in->num_partial_sigs) return false;
++    const dogecoin_psbt_partialsig *ps = &in->partial_sigs[n];
++
++    if (pubkey_len_out) *pubkey_len_out = ps->pubkey_len;
++    if (sig_len_out)    *sig_len_out    = ps->sig_len;
++    if (!pubkey_out || !sig_out) return false;                 /* size query */
++    if (pubkey_cap < ps->pubkey_len || sig_cap < ps->sig_len) return false;
++
++    memcpy(pubkey_out, ps->pubkey, ps->pubkey_len);
++    memcpy(sig_out, ps->sig, ps->sig_len);
++    return true;
++}
++
++/* shared by the three cstring-valued getters below */
++static dogecoin_bool psbt_copy_cstring(const cstring *src, uint8_t *out, size_t cap,
++                                       size_t *len_out)
++{
++    if (!src) { if (len_out) *len_out = 0; return false; }
++    if (len_out) *len_out = src->len;
++    if (!out) return false;                                    /* size query */
++    if (cap < src->len) return false;
++    memcpy(out, src->str, src->len);
++    return true;
++}
++
++dogecoin_bool dogecoin_psbt_input_get_redeemscript(const dogecoin_psbt *psbt, size_t idx,
++                                                   uint8_t *out, size_t cap, size_t *len_out)
++{
++    if (!psbt || idx >= psbt->num_inputs) return false;
++    return psbt_copy_cstring(psbt->inputs[idx].redeem_script, out, cap, len_out);
++}
++
++dogecoin_bool dogecoin_psbt_input_get_final_scriptsig(const dogecoin_psbt *psbt, size_t idx,
++                                                      uint8_t *out, size_t cap, size_t *len_out)
++{
++    if (!psbt || idx >= psbt->num_inputs) return false;
++    return psbt_copy_cstring(psbt->inputs[idx].final_script_sig, out, cap, len_out);
++}
++
++dogecoin_bool dogecoin_psbt_output_get_redeemscript(const dogecoin_psbt *psbt, size_t idx,
++                                                    uint8_t *out, size_t cap, size_t *len_out)
++{
++    if (!psbt || idx >= psbt->num_outputs) return false;
++    return psbt_copy_cstring(psbt->outputs[idx].redeem_script, out, cap, len_out);
++}
++
++dogecoin_bool dogecoin_psbt_input_get_sighash(const dogecoin_psbt *psbt, size_t idx,
++                                              uint32_t *sighash_out)
++{
++    if (!psbt || idx >= psbt->num_inputs) return false;
++    const dogecoin_psbt_input *in = &psbt->inputs[idx];
++    if (!in->has_sighash_type) return false;
++    if (sighash_out) *sighash_out = in->sighash_type;
++    return true;
++}
++
+ /* ── Validation ───────────────────────────────────────────────── */
+ 
+ dogecoin_bool dogecoin_psbt_is_valid(const dogecoin_psbt *psbt)
+diff --git a/test/psbt_tests.c b/test/psbt_tests.c
+index ab9c8a09..609f933e 100644
+--- a/test/psbt_tests.c
++++ b/test/psbt_tests.c
+@@ -1481,6 +1481,114 @@ static void test_psbt_custom_finalizer(void)
+     dogecoin_tx_free(tx);
+ }
+ 
++/* ── Test: a consumer-side finalizer using only accessors ────── */
++static void test_psbt_accessors(void)
++{
++    dogecoin_key privkey;
++    dogecoin_privkey_init(&privkey);
++    dogecoin_privkey_gen(&privkey);
++    dogecoin_pubkey pubkey;
++    dogecoin_pubkey_init(&pubkey);
++    dogecoin_pubkey_from_key(&privkey, &pubkey);
++
++    uint8_t hash160[20];
++    dogecoin_pubkey_get_hash160(&pubkey, hash160);
++
++    dogecoin_tx *tx = dogecoin_tx_new();
++    tx->version = 1; tx->locktime = 0;
++    dogecoin_tx_in *txin = dogecoin_tx_in_new();
++    memset(txin->prevout.hash, 0x11, sizeof(txin->prevout.hash));
++    txin->prevout.n = 0; txin->sequence = 0xFFFFFFFF;
++    if (txin->script_sig) cstr_free(txin->script_sig, true);
++    txin->script_sig = cstr_new_sz(0);
++    vector_add(tx->vin, txin);
++    dogecoin_tx_out *txout = dogecoin_tx_out_new();
++    txout->value = 5000000000LL;
++    uint8_t dest[20]; memset(dest, 0xCC, 20);
++    txout->script_pubkey = cstr_new_sz(25);
++    dogecoin_script_build_p2pkh(txout->script_pubkey, dest);
++    vector_add(tx->vout, txout);
++
++    dogecoin_psbt *psbt = dogecoin_psbt_create(tx);
++    u_assert_not_null(psbt);
++    dogecoin_tx_free(tx);
++
++    dogecoin_tx *utxo = make_prev_tx(hash160);
++    uint8_t utxo_txid[32];
++    dogecoin_tx_hash(utxo, utxo_txid);
++    dogecoin_tx_in *vin0 = vector_idx(psbt->tx->vin, 0);
++    memcpy(vin0->prevout.hash, utxo_txid, 32);
++    u_assert_true(dogecoin_psbt_input_set_utxo(psbt, 0, utxo));
++    dogecoin_tx_free(utxo);
++
++    /* counts and version, without reaching into the struct */
++    u_assert_int_eq((int)dogecoin_psbt_num_inputs(psbt), 1);
++    u_assert_int_eq((int)dogecoin_psbt_num_outputs(psbt), 1);
++    u_assert_int_eq((int)dogecoin_psbt_get_version(psbt), PSBT_VERSION_0);
++    u_assert_int_eq((int)dogecoin_psbt_num_inputs(NULL), 0);
++
++    u_assert_true(dogecoin_psbt_input_set_sighash(psbt, 0, 1));
++    uint32_t sh = 0;
++    u_assert_true(dogecoin_psbt_input_get_sighash(psbt, 0, &sh));
++    u_assert_int_eq((int)sh, 1);
++
++    /* sign while the input is still plain P2PKH; a redeem script would make the
++       signer treat it as P2SH and the scripts would not agree */
++    u_assert_true(dogecoin_psbt_sign(psbt, &privkey));
++    u_assert_int_eq((int)dogecoin_psbt_input_num_partial_sigs(psbt, 0), 1);
++
++    uint8_t pk[64], sig[128];
++    size_t pklen = 0, siglen = 0;
++    u_assert_true(dogecoin_psbt_input_get_partial_sig(psbt, 0, 0, NULL, 0, &pklen,
++                                                      NULL, 0, &siglen) == false);
++    u_assert_int_eq((int)pklen, DOGECOIN_ECKEY_COMPRESSED_LENGTH);
++    u_assert_true(siglen > 0);
++    u_assert_true(dogecoin_psbt_input_get_partial_sig(psbt, 0, 0, pk, sizeof(pk), &pklen,
++                                                      sig, sizeof(sig), &siglen));
++    u_assert_mem_eq(pk, pubkey.pubkey, DOGECOIN_ECKEY_COMPRESSED_LENGTH);
++    u_assert_true(dogecoin_psbt_input_get_partial_sig(psbt, 0, 9, pk, sizeof(pk), &pklen,
++                                                      sig, sizeof(sig), &siglen) == false);
++
++    /* a redeem script set is a redeem script readable */
++    const uint8_t redeem[] = { 0x63, 0x52, 0x68, 0xae };
++    u_assert_true(dogecoin_psbt_input_set_redeemscript(psbt, 0, redeem, sizeof(redeem)));
++    size_t rlen = 0;
++    u_assert_true(dogecoin_psbt_input_get_redeemscript(psbt, 0, NULL, 0, &rlen) == false);
++    u_assert_int_eq((int)rlen, (int)sizeof(redeem));       /* size query */
++    uint8_t rbuf[16];
++    u_assert_true(dogecoin_psbt_input_get_redeemscript(psbt, 0, rbuf, 2, &rlen) == false);
++    u_assert_true(dogecoin_psbt_input_get_redeemscript(psbt, 0, rbuf, sizeof(rbuf), &rlen));
++    u_assert_mem_eq(rbuf, redeem, sizeof(redeem));
++
++    /* build a scriptSig from what we read, and install it: the whole point */
++    uint8_t ss[256]; size_t sslen = 0;
++    ss[sslen++] = 0x00;                       /* OP_0, multisig off-by-one   */
++    ss[sslen++] = (uint8_t)siglen;            /* push the signature we read  */
++    memcpy(ss + sslen, sig, siglen); sslen += siglen;
++    ss[sslen++] = (uint8_t)rlen;              /* push the redeem script      */
++    memcpy(ss + sslen, rbuf, rlen); sslen += rlen;
++    u_assert_true(dogecoin_psbt_input_set_final_scriptsig(psbt, 0, ss, sslen));
++
++    /* and read it back identically */
++    size_t flen = 0;
++    uint8_t fbuf[256];
++    u_assert_true(dogecoin_psbt_input_get_final_scriptsig(psbt, 0, fbuf, sizeof(fbuf), &flen));
++    u_assert_int_eq((int)flen, (int)sslen);
++    u_assert_mem_eq(fbuf, ss, sslen);
++
++    char *hex = dogecoin_psbt_extract_hex(psbt);
++    u_assert_not_null(hex);
++    if (hex) dogecoin_free(hex);
++
++    /* out-of-range and NULL are refusals, not crashes */
++    u_assert_true(dogecoin_psbt_input_get_redeemscript(psbt, 9, rbuf, sizeof(rbuf), &rlen) == false);
++    u_assert_true(dogecoin_psbt_input_get_sighash(NULL, 0, &sh) == false);
++    u_assert_true(dogecoin_psbt_output_get_redeemscript(psbt, 9, rbuf, sizeof(rbuf), &rlen) == false);
++
++    dogecoin_psbt_free(psbt);
++    dogecoin_privkey_cleanse(&privkey);
++}
++
+ void test_psbt(void)
+ {
+     test_psbt_lifecycle();
+@@ -1491,6 +1599,7 @@ void test_psbt(void)
+     test_psbt_updater();
+     test_psbt_sign_finalize_extract();
+     test_psbt_custom_finalizer();
++    test_psbt_accessors();
+     test_psbt_combiner();
+     test_psbt_combiner_conflict();
+     test_psbt_duplicate_known_keys();
+-- 
+2.34.1
+
