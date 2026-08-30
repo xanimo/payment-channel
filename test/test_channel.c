@@ -210,6 +210,61 @@ int main(void)
                       "trailing bytes are refused");
                 free(extra);
             }
+
+            /* Being addressed correctly is not the same as being spendable.
+               Everything above checks who is paid and how much; these check
+               that what Bob holds would survive a node. */
+            {
+                /* the layout being dissected, asserted first so a change here
+                   fails loudly rather than skipping the checks below */
+                CHECK(rl > 200, "transaction long enough to dissect");
+                CHECK(memcmp(raw + 82, "fd", 2) == 0, "scriptSig has a 2-byte varint");
+                CHECK(memcmp(raw + 88, "00", 2) == 0, "scriptSig opens with OP_0");
+                CHECK(memcmp(raw + 92, "30", 2) == 0, "alice's signature is DER");
+
+                char lo[3] = { raw[84], raw[85], 0 };
+                char hi[3] = { raw[86], raw[87], 0 };
+                size_t sslen = (size_t)strtoul(hi, NULL, 16) * 256 +
+                               (size_t)strtoul(lo, NULL, 16);
+                size_t seq_off = 88 + sslen * 2;
+                CHECK(memcmp(raw + seq_off, "ffffffff", 8) == 0,
+                      "the input is final as built");
+
+                /* any DER-shaped blob keyed to alice would otherwise pass */
+                char *bad = strdup(raw);
+                bad[101] = (bad[101] == 'a') ? 'b' : 'a';
+                CHECK(pc_tx_verify_payment(&ch, bad, 2000000000ULL) != PC_OK,
+                      "a corrupted alice signature is refused");
+                free(bad);
+
+                /* nothing in the ELSE branch executes CLTV, so the script does
+                   not constrain either field and Bob has to */
+                char *lt = strdup(raw);
+                memcpy(lt + rl - 8, "40420f00", 8);
+                CHECK(pc_tx_verify_payment(&ch, lt, 2000000000ULL) == PC_ERR_STATE,
+                      "a future locktime is refused");
+                free(lt);
+
+                char *sq = strdup(raw);
+                memcpy(sq + seq_off, "feffffff", 8);
+                CHECK(pc_tx_verify_payment(&ch, sq, 2000000000ULL) == PC_ERR_STATE,
+                      "a non-final sequence is refused");
+                free(sq);
+            }
+            {   /* what is left over is the fee, and the relay has a floor */
+                pc_channel zero = ch;
+                zero.capacity_koinu = 9900000000ULL;   /* what the outputs spend */
+                CHECK(pc_tx_verify_payment(&zero, raw, 2000000000ULL) == PC_ERR_AMOUNT,
+                      "a zero-fee payment is refused");
+                pc_channel thin = ch;
+                thin.capacity_koinu = 9900000000ULL + 99999ULL;
+                CHECK(pc_tx_verify_payment(&thin, raw, 2000000000ULL) == PC_ERR_AMOUNT,
+                      "a fee one koinu under the floor is refused");
+                pc_channel atfloor = ch;
+                atfloor.capacity_koinu = 9900000000ULL + 100000ULL;
+                CHECK_OK(pc_tx_verify_payment(&atfloor, raw, 2000000000ULL),
+                         "the floor exactly is accepted");
+            }
             dogecoin_free(raw);
         }
 

@@ -41,6 +41,7 @@
 
 #include <ctype.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <unistd.h>
 
 #define MAX_ORDERS 64
@@ -242,6 +243,9 @@ int main(int argc, char **argv)
     }
     if (!wif) { usage(); return 2; }
 
+    /* a peer that closes mid-write must not take the process with it */
+    signal(SIGPIPE, SIG_IGN);
+
     dogecoin_ecc_start();
     int rc = 1;
 
@@ -252,6 +256,11 @@ int main(int argc, char **argv)
     }
     if (want_pubkey) { printf("%s\n", bob_pub); rc = 0; goto done; }
     if (nprices == 0) { usage(); goto done; }
+    if (height == 0) {
+        fprintf(stderr, "bob: --height is required, since the locktime is only "
+                        "meaningful against a height\n");
+        goto done;
+    }
 
     char host[64] = "127.0.0.1";
     int port = PC_DEFAULT_PORT;
@@ -287,6 +296,9 @@ int main(int argc, char **argv)
                 break;
 
             case PC_MSG_OPEN:                         /* [3][4] */
+                /* a second one resets the channel and the amount paid while the
+                   order count and the held transaction survive from the first */
+                if (opened) { alive = send_reject(fd, "channel already open"); break; }
                 alive = handle_open(fd, &s, &in, wif, chain, bob_pub, height, slack);
                 if (alive) {
                     opened = 1;

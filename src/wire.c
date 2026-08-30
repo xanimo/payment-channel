@@ -34,10 +34,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#define PC_WIRE_MAX (PC_MAX_PSBT_HEX + 256)
+/* an open message carries the psbt and the funding transaction that created its
+   input, so the line has to hold both fields plus the json frame */
+#define PC_WIRE_TIMEOUT_SEC 30
+#define PC_WIRE_MAX (2 * PC_MAX_PSBT_HEX + 512)
 
 int pc_wire_split(const char *hostport, char *host, size_t hostcap, int defport)
 {
@@ -86,6 +90,13 @@ int pc_wire_accept(int listen_fd)
     if (fd < 0) return -1;
     int on = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+    /* a peer that connects and never finishes a line would otherwise hold the
+       accept loop open for as long as it likes */
+    {
+        struct timeval tv = { PC_WIRE_TIMEOUT_SEC, 0 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
     return fd;
 }
 
@@ -102,6 +113,13 @@ int pc_wire_connect(const char *host, int port)
     }
     int on = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+    /* a peer that connects and never finishes a line would otherwise hold the
+       accept loop open for as long as it likes */
+    {
+        struct timeval tv = { PC_WIRE_TIMEOUT_SEC, 0 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
     return fd;
 }
 

@@ -43,6 +43,7 @@
 
 #include <ctype.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <unistd.h>
 
 static void usage(void)
@@ -86,6 +87,9 @@ int main(int argc, char **argv)
         #undef NEXT
     }
     if (!wif || !fee_s) { usage(); return 2; }
+
+    /* a peer that closes mid-write must not take the process with it */
+    signal(SIGPIPE, SIG_IGN);
 
     dogecoin_ecc_start();
     int rc = 1, fd = -1;
@@ -147,6 +151,22 @@ int main(int argc, char **argv)
         fprintf(stderr, "alice: peer announced a different pubkey, refusing\n");
         goto done;
     }
+    /* sixty-six hex characters is not a public key. one that is not a point on
+       the curve still builds a fundable p2sh, and nothing can ever spend it. */
+    {
+        dogecoin_pubkey bp;
+        dogecoin_pubkey_init(&bp);
+        bp.compressed = true;
+        size_t bl = 0;
+        if (strlen(in.psbt_hex) != 66) {
+            fprintf(stderr, "alice: peer key is not 33 bytes\n"); goto done;
+        }
+        utils_hex_to_bin(in.psbt_hex, bp.pubkey, 66, &bl);
+        if (bl != 33 || !dogecoin_pubkey_is_valid(&bp)) {
+            fprintf(stderr, "alice: peer key is not a point on the curve\n");
+            goto done;
+        }
+    }
 
     r = pc_channel_init(&ch, alice_pub, in.psbt_hex, locktime, chain);
     if (r != PC_OK) { fprintf(stderr, "alice: channel: %s\n", pc_strerror(r)); goto done; }
@@ -207,7 +227,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "alice: invoice of %" PRIu64 " is over --max, stopping\n", total);
             break;
         }
-        if (total + fee > ch.capacity_koinu) {
+        if (fee > ch.capacity_koinu || total > ch.capacity_koinu - fee) {
             fprintf(stderr, "alice: invoice exceeds the channel\n"); goto done;
         }
 
