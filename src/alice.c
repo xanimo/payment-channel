@@ -284,6 +284,32 @@ int main(int argc, char **argv)
             fprintf(stderr, "alice: invoice exceeds the channel\n"); goto done;
         }
 
+        /* The startup check is about --fee alone and cannot see this. A late
+           payment nearly drains the channel, so her change lands under the soft
+           dust limit and dogecoin charges a full soft limit extra for it, or
+           under the hard limit where the transaction stops being standard at
+           all. Both are properties of this payment rather than of the fee, and
+           she knows total and capacity here, so she can tell before she signs
+           rather than after Bob refuses. */
+        {
+            uint64_t change = ch.capacity_koinu - total - fee;
+            if (change > 0 && change < PC_HARD_DUST_KOINU) {
+                fprintf(stderr, "alice: this would leave %" PRIu64 " koinu change, "
+                        "under the dust limit, and no node would relay it\n", change);
+                goto done;
+            }
+            size_t soft = (total < PC_SOFT_DUST_KOINU ? 1u : 0u)
+                        + (change > 0 && change < PC_SOFT_DUST_KOINU ? 1u : 0u);
+            uint64_t need = pc_min_fee(PC_TYPICAL_TX_BYTES, soft);
+            if (fee < need) {
+                char want[32];
+                pc_koinu_to_doge(need, want, sizeof(want));
+                fprintf(stderr, "alice: an output of this payment falls in the dust "
+                        "band, which needs a fee of %s; raise --fee\n", want);
+                goto done;
+            }
+        }
+
         char amt[32];
         pc_koinu_to_doge(total, amt, sizeof(amt));
         printf("invoice  %s DOGE total, to %s\n", amt, in.addr);
