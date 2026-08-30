@@ -33,9 +33,10 @@ read -r FUNDING_HEX FUNDING_TXID FUNDING_VOUT < <(
 printf '%s' "$FUNDING_HEX" > "$WORK/funding.hex"
 echo "funding: $FUNDING_TXID:$FUNDING_VOUT"
 
-./bob --wif "$BOB_WIF" --peer-pubkey "$ALICE_PUB" --locktime "$LOCKTIME" \
-      --funding "$FUNDING_TXID:$FUNDING_VOUT" --capacity "$CAPACITY" \
-      --listen "127.0.0.1:$PORT" --once > "$WORK/bob.log" 2>&1 &
+# Bob is told nothing about the channel: he learns it from the opening PSBT.
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once \
+      --height 1000 --min-slack 100 \
+      --price 5.0 --price 7.5 --price 17.5 > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!
 
 for _ in $(seq 1 50); do
@@ -44,9 +45,8 @@ for _ in $(seq 1 50); do
 done
 
 ./alice --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$LOCKTIME" \
-        --funding "$FUNDING_TXID:$FUNDING_VOUT" --funding-tx "@$WORK/funding.hex" \
-        --capacity "$CAPACITY" --connect "127.0.0.1:$PORT" \
-        --pay 5.0 --pay 12.5 --pay 30.0 --close | tee "$WORK/alice.log"
+        --funding-tx "@$WORK/funding.hex" --connect "127.0.0.1:$PORT" \
+        --max 100.0 --close | tee "$WORK/alice.log"
 
 wait "$BOB_PID" || true
 BOB_PID=
@@ -55,7 +55,7 @@ echo
 echo "--- bob ---"
 cat "$WORK/bob.log"
 
-grep -q "accepted 3000000000 koinu" "$WORK/bob.log" || {
+grep -q "paid     3000000000 koinu held" "$WORK/bob.log" || {
     echo "FAIL: bob did not accept the final payment" >&2; exit 1; }
 grep -q "closing transaction" "$WORK/alice.log" || {
     echo "FAIL: alice did not get a closing transaction" >&2; exit 1; }

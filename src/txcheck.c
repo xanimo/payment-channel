@@ -80,6 +80,86 @@ static void rd_script(rdr *r, const unsigned char **out, size_t *outlen)
     r->off += (size_t)n;
 }
 
+/* The scriptPubKey a P2SH address stands for: base58check gives back a version
+   byte and the 20-byte script hash, so no hashing is needed to rebuild it. */
+static int p2sh_script_for(const pc_channel *ch, unsigned char out[23])
+{
+    uint8_t raw[64];
+    /* returns the payload plus the 4 checksum bytes it just verified, so a
+       21-byte version+hash160 comes back as 25 */
+    size_t n = dogecoin_base58_decode_check(ch->p2sh_address, raw, sizeof(raw));
+    if (n != 25) return 0;
+    out[0] = 0xa9; out[1] = 0x14;
+    memcpy(out + 2, raw + 1, 20);
+    out[22] = 0x87;
+    return 1;
+}
+
+pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex,
+                                    char txid_out[65], int *vout_out,
+                                    uint64_t *value_out)
+{
+    if (!ch || !raw_tx_hex) return PC_ERR_ARG;
+    if (!ch->p2sh_address[0]) return PC_ERR_STATE;
+
+    unsigned char want[23];
+    if (!p2sh_script_for(ch, want)) return PC_ERR_SCRIPT;
+
+    size_t hl = strlen(raw_tx_hex);
+    if (hl == 0 || (hl % 2)) return PC_ERR_ARG;
+    unsigned char *buf = (unsigned char *)malloc(hl / 2 + 1);
+    if (!buf) return PC_ERR_ARG;
+    size_t blen = 0;
+    utils_hex_to_bin(raw_tx_hex, buf, hl, &blen);
+    if (blen != hl / 2) { free(buf); return PC_ERR_ARG; }
+
+    /* txid over the whole serialization, in display order */
+    dogecoin_tx *tx = dogecoin_tx_new();
+    pc_result rc = PC_ERR_PSBT;
+    if (!tx) { free(buf); return PC_ERR_PSBT; }
+    if (dogecoin_tx_deserialize(buf, blen, tx, NULL) == 0) goto out;
+    {
+        uint256_t h;
+        dogecoin_tx_hash(tx, h);
+        unsigned char disp[32];
+        for (int i = 0; i < 32; i++) disp[i] = h[31 - i];
+        if (txid_out) utils_bin_to_hex(disp, 32, txid_out);
+    }
+
+    /* walk the outputs for the one paying this channel */
+    {
+        rdr r = { buf, blen, 0, 0 };
+        rd_u(&r, 4);
+        uint64_t nin = rd_varint(&r);
+        for (uint64_t i = 0; i < nin && !r.bad; i++) {
+            r.off += 36;
+            need(&r, 0);
+            rd_script(&r, NULL, NULL);
+            rd_u(&r, 4);
+        }
+        uint64_t nout = rd_varint(&r);
+        if (r.bad || nout == 0) goto out;
+        rc = PC_ERR_AMOUNT;
+        for (uint64_t i = 0; i < nout; i++) {
+            uint64_t value = rd_u(&r, 8);
+            const unsigned char *spk = NULL;
+            size_t spklen = 0;
+            rd_script(&r, &spk, &spklen);
+            if (r.bad) { rc = PC_ERR_PSBT; goto out; }
+            if (spklen == sizeof(want) && memcmp(spk, want, sizeof(want)) == 0) {
+                if (vout_out)  *vout_out  = (int)i;
+                if (value_out) *value_out = value;
+                rc = PC_OK;
+                break;                      /* the first one funds the channel */
+            }
+        }
+    }
+out:
+    dogecoin_tx_free(tx);
+    free(buf);
+    return rc;
+}
+
 pc_result pc_tx_verify_payment(const pc_channel *ch,
                                const char *raw_tx_hex,
                                uint64_t claimed_to_bob_koinu)

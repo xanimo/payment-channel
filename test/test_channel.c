@@ -222,7 +222,75 @@ int main(void)
         dogecoin_free(psbt2);
     }
     if (psbt1) dogecoin_free(psbt1);
-    free(funding_hex);
+
+    /* ── the opening handshake ───────────────────────────────── */
+    {
+        /* Bob learns the channel from the script alone */
+        char pa[PUBKEYHEXLEN], pb[PUBKEYHEXLEN];
+        uint32_t lt = 0;
+        CHECK_OK(pc_redeem_parse(ch.redeem_script_hex, pa, pb, &lt), "redeem parses");
+        CHECK(strcmp(pa, alice_pub) == 0, "alice's key recovered");
+        CHECK(strcmp(pb, bob_pub) == 0, "bob's key recovered");
+        CHECK(lt == 300000, "locktime recovered, got %u", lt);
+
+        CHECK(pc_redeem_parse("deadbeef", pa, pb, &lt) == PC_ERR_SCRIPT, "garbage refused");
+        {   /* a trailing byte must not be ignored */
+            char longer[PC_MAX_SCRIPT_HEX + 2];   /* room for the byte appended */
+            snprintf(longer, sizeof(longer), "%s00", ch.redeem_script_hex);
+            CHECK(pc_redeem_parse(longer, pa, pb, &lt) == PC_ERR_SCRIPT,
+                  "trailing byte refused");
+        }
+
+        /* the funding output is derived, not asserted */
+        char ftxid[65] = {0};
+        int fvout = -1;
+        uint64_t fval = 0;
+        CHECK_OK(pc_tx_find_channel_output(&ch, funding_hex, ftxid, &fvout, &fval),
+                 "channel output found");
+        CHECK(strcmp(ftxid, funding_txid) == 0, "txid matches");
+        CHECK(fvout == 0, "vout found, got %d", fvout);
+        CHECK(fval == 10000000000ULL, "capacity read, got %" PRIu64, fval);
+
+        /* a transaction that pays a different channel is not ours */
+        CHECK(pc_tx_find_channel_output(&other, funding_hex, ftxid, &fvout, &fval)
+                  == PC_ERR_AMOUNT, "another channel gets nothing");
+
+        /* the opening psbt, and bob accepting it */
+        char *open_psbt = NULL;
+        CHECK_OK(pc_channel_open_create(&ch, funding_hex, &open_psbt), "open built");
+        CHECK(open_psbt != NULL, "open psbt produced");
+        if (open_psbt) {
+            pc_channel bobs;
+            CHECK_OK(pc_channel_init(&bobs, alice_pub, bob_pub, 300000, 0), "bob's view");
+            uint64_t cap = 0;
+            CHECK_OK(pc_channel_open_accept(&bobs, open_psbt, funding_hex,
+                                            1000, 100, &cap), "bob accepts");
+            CHECK(cap == 10000000000ULL, "bob read the capacity");
+            CHECK(strcmp(bobs.funding_txid, funding_txid) == 0, "bob found the funding");
+
+            /* a locktime that does not outlast the work is refused */
+            pc_channel tight;
+            CHECK_OK(pc_channel_init(&tight, alice_pub, bob_pub, 300000, 0), "tight init");
+            CHECK(pc_channel_open_accept(&tight, open_psbt, funding_hex,
+                                         299950, 100, &cap) == PC_ERR_STATE,
+                  "locktime too near is refused");
+            CHECK_OK(pc_channel_init(&tight, alice_pub, bob_pub, 300000, 0), "reinit");
+            CHECK(pc_channel_open_accept(&tight, open_psbt, funding_hex,
+                                         299899, 100, &cap) == PC_OK,
+                  "one block of slack over the line is enough");
+
+            /* an opening for someone else's channel is refused */
+            pc_channel wrongbob;
+            CHECK_OK(pc_channel_init(&wrongbob, alice_pub, alice_pub, 300000, 0), "wrong bob");
+            CHECK(pc_channel_open_accept(&wrongbob, open_psbt, funding_hex,
+                                         1000, 100, &cap) != PC_OK,
+                  "an opening naming someone else is refused");
+
+            dogecoin_free(open_psbt);
+        }
+    }
+
+    free(funding_hex);   /* the opening checks above still read it */
 
     /* ── amounts ─────────────────────────────────────────────── */
     uint64_t k = 0;
@@ -269,6 +337,28 @@ int main(void)
           "missing psbt refused");
     CHECK(pc_envelope_decode("{\"type\":\"payment\",\"ref\":\"abc\",\"psbt\":\"00\"}",
                              &back) != PC_OK, "short ref refused");
+
+    /* the ack's continuation flag: it ends the payment loop, so a value that
+       silently decodes wrong is a hang rather than an error */
+    memset(&env, 0, sizeof(env));
+    env.type = PC_MSG_ACK;
+    env.more = 1;
+    snprintf(env.psbt_hex, sizeof(env.psbt_hex), "01");
+    CHECK_OK(pc_envelope_encode(&env, wire, sizeof(wire)), "ack encode");
+    CHECK_OK(pc_envelope_decode(wire, &back), "ack decode");
+    CHECK(back.more == 1, "more round-trips set");
+    env.more = 0;
+    CHECK_OK(pc_envelope_encode(&env, wire, sizeof(wire)), "final ack encode");
+    CHECK_OK(pc_envelope_decode(wire, &back), "final ack decode");
+    CHECK(back.more == 0, "more round-trips clear");
+    env.more = 2;
+    CHECK(pc_envelope_encode(&env, wire, sizeof(wire)) != PC_OK,
+          "non-boolean more refused");
+    CHECK(pc_envelope_decode("{\"type\":\"ack\",\"more\":7,\"psbt\":\"01\"}",
+                             &back) != PC_OK, "out-of-range more refused");
+    CHECK_OK(pc_envelope_decode("{\"type\":\"ack\",\"psbt\":\"01\"}", &back),
+             "absent more accepted");
+    CHECK(back.more == 0, "absent more reads as no");
 
 done:
     dogecoin_ecc_stop();

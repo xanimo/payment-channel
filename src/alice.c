@@ -24,16 +24,20 @@
 
 */
 
-/* The paying side.
+/* The customer.
  *
- * Alice's amounts are cumulative: --pay 10 --pay 25 means Bob ends up holding a
- * transaction that pays him 25, not 35. That is the whole trick, and it is why
- * this only works in one direction. Each payment is a fresh transaction
- * spending the same funding output, so the earlier ones simply stop mattering.
+ * Alice asks for a channel, gets back the key Bob will sign with, builds the
+ * P2SH from it, and funds it. From then on she pays what Bob invoices, and the
+ * invoices are cumulative: a bill for 10 then 15 means Bob ends up holding one
+ * transaction paying him 25, not two paying 10 and 15. That is the whole trick,
+ * and it is why the channel only runs one way. Each payment spends the same
+ * funding output, so the earlier ones simply stop mattering.
  *
- * Alice must not sign a payment until the funding transaction is confirmed:
- * without SegWit the funding txid can still change, which would leave every
- * payment she has signed pointing at an output that no longer exists. */
+ * Two modes. --address prints the channel address to fund and stops, because
+ * funding has to confirm before anything is signed against it: without SegWit
+ * the funding txid is still malleable, and a payment signed against an
+ * unconfirmed one points at an outpoint that can cease to exist. --funding-tx
+ * then runs the channel against that confirmed transaction. */
 
 #include "common.h"
 
@@ -44,25 +48,21 @@
 static void usage(void)
 {
     fprintf(stderr,
-      "usage: alice --wif WIF --peer-pubkey HEX --locktime N\n"
-      "             --funding TXID:VOUT --funding-tx HEX|@FILE --capacity DOGE\n"
-      "             --pay DOGE [--pay DOGE ...] [--fee DOGE] [--close]\n"
+      "usage: alice --wif WIF --peer-pubkey HEX --locktime N --address\n"
+      "       alice --wif WIF --locktime N --funding-tx HEX|@FILE\n"
+      "             [--peer-pubkey HEX] [--fee DOGE] [--max DOGE] [--close]\n"
       "             [--connect [HOST:]PORT] [--testnet|--regtest]\n"
       "       alice --wif WIF --pubkey\n"
-      "       alice --wif WIF --peer-pubkey HEX --locktime N --address\n"
       "\n"
-      "  --pay amounts are cumulative totals paid to Bob, and must increase.\n"
-      "  Fund --address first and wait for confirmations before paying.\n");
+      "  Fund --address and let it confirm before running the second form.\n"
+      "  --peer-pubkey pins Bob's key; without it Alice trusts what he answers.\n"
+      "  --max refuses to pay more than that in total.\n");
 }
-
-#define MAX_PAYMENTS 64
 
 int main(int argc, char **argv)
 {
-    const char *wif = NULL, *peer = NULL, *funding = NULL, *cap_s = NULL;
-    const char *ftx_arg = NULL, *connect_to = NULL, *fee_s = "1.0";
-    const char *pays[MAX_PAYMENTS];
-    int npays = 0;
+    const char *wif = NULL, *peer = NULL, *ftx_arg = NULL;
+    const char *connect_to = NULL, *fee_s = "1.0", *max_s = NULL;
     uint32_t locktime = 0;
     pc_chain chain = PC_CHAIN_MAIN;
     int want_pubkey = 0, want_address = 0, want_close = 0;
@@ -72,10 +72,9 @@ int main(int argc, char **argv)
         #define NEXT() (++i < argc ? argv[i] : NULL)
         if      (!strcmp(a, "--wif"))         wif = NEXT();
         else if (!strcmp(a, "--peer-pubkey")) peer = NEXT();
-        else if (!strcmp(a, "--funding"))     funding = NEXT();
         else if (!strcmp(a, "--funding-tx"))  ftx_arg = NEXT();
-        else if (!strcmp(a, "--capacity"))    cap_s = NEXT();
         else if (!strcmp(a, "--fee"))         fee_s = NEXT();
+        else if (!strcmp(a, "--max"))         max_s = NEXT();
         else if (!strcmp(a, "--connect"))     connect_to = NEXT();
         else if (!strcmp(a, "--locktime"))    { const char *v = NEXT(); locktime = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--testnet"))     chain = PC_CHAIN_TEST;
@@ -83,11 +82,6 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--pubkey"))      want_pubkey = 1;
         else if (!strcmp(a, "--address"))     want_address = 1;
         else if (!strcmp(a, "--close"))       want_close = 1;
-        else if (!strcmp(a, "--pay")) {
-            const char *v = NEXT();
-            if (!v || npays == MAX_PAYMENTS) { usage(); return 2; }
-            pays[npays++] = v;
-        }
         else { usage(); return 2; }
         #undef NEXT
     }
@@ -103,53 +97,31 @@ int main(int argc, char **argv)
         goto done;
     }
     if (want_pubkey) { printf("%s\n", alice_pub); rc = 0; goto done; }
-
-    if (!peer || !locktime) { usage(); goto done; }
+    if (!locktime) { usage(); goto done; }
 
     pc_channel ch;
-    pc_result r = pc_channel_init(&ch, alice_pub, peer, locktime, chain);
-    if (r != PC_OK) {
-        fprintf(stderr, "alice: channel: %s\n", pc_strerror(r));
+    pc_result r;
+
+    /* First form: Bob's key is already known, print where to send the money. */
+    if (want_address) {
+        if (!peer) { usage(); goto done; }
+        r = pc_channel_init(&ch, alice_pub, peer, locktime, chain);
+        if (r != PC_OK) { fprintf(stderr, "alice: channel: %s\n", pc_strerror(r)); goto done; }
+        printf("%s\n", ch.p2sh_address);
+        rc = 0;
         goto done;
     }
-    if (want_address) { printf("%s\n", ch.p2sh_address); rc = 0; goto done; }
+    if (!ftx_arg) { usage(); goto done; }
 
-    if (!funding || !ftx_arg || !cap_s || npays == 0) { usage(); goto done; }
-
-    char txid[65];
-    int vout = 0;
-    if (!pc_split_outpoint(funding, txid, &vout)) {
-        fprintf(stderr, "alice: --funding wants TXID:VOUT\n");
-        goto done;
+    uint64_t fee = 0, maximum = UINT64_MAX;
+    if (pc_doge_to_koinu(fee_s, &fee) != PC_OK) {
+        fprintf(stderr, "alice: --fee is not an amount\n"); goto done;
     }
-    uint64_t capacity = 0, fee = 0;
-    if (pc_doge_to_koinu(cap_s, &capacity) != PC_OK ||
-        pc_doge_to_koinu(fee_s, &fee) != PC_OK) {
-        fprintf(stderr, "alice: --capacity or --fee is not an amount\n");
-        goto done;
+    if (max_s && pc_doge_to_koinu(max_s, &maximum) != PC_OK) {
+        fprintf(stderr, "alice: --max is not an amount\n"); goto done;
     }
     funding_tx = pc_read_hex_arg(ftx_arg);
     if (!funding_tx) { fprintf(stderr, "alice: cannot read --funding-tx\n"); goto done; }
-
-    r = pc_channel_set_funding(&ch, txid, vout, capacity);
-    if (r != PC_OK) { fprintf(stderr, "alice: funding: %s\n", pc_strerror(r)); goto done; }
-
-    /* Bob's p2pkh address comes from the pubkey in the channel, so a payment
-       can only ever be addressed to the key the channel was built around. */
-    char bob_addr[P2PKHLEN];
-    {
-        dogecoin_pubkey bp;
-        dogecoin_pubkey_init(&bp);
-        bp.compressed = true;
-        size_t n = 0;
-        utils_hex_to_bin(ch.bob_pubkey_hex, bp.pubkey, 66, &n);
-        if (n != 33 || !dogecoin_pubkey_getaddr_p2pkh(&bp,
-                pc_chainparams(chain),
-                bob_addr)) {
-            fprintf(stderr, "alice: peer pubkey is not a usable key\n");
-            goto done;
-        }
-    }
 
     char host[64] = "127.0.0.1";
     int port = PC_DEFAULT_PORT;
@@ -161,44 +133,92 @@ int main(int argc, char **argv)
     fd = pc_wire_connect(host, port);
     if (fd < 0) { fprintf(stderr, "alice: cannot reach %s:%d\n", host, port); goto done; }
 
-    printf("channel  %s\n", ch.p2sh_address);
-    printf("paying   %s\n", bob_addr);
-    printf("funding  %s:%d\n\n", ch.funding_txid, ch.funding_vout);
-
     pc_envelope out, in;
-    pc_announce(&out, alice_pub, locktime);
+
+    /* [1] ask for a channel, [2] take the key he will sign with */
+    memset(&out, 0, sizeof(out));
+    out.type = PC_MSG_REQUEST;
+    snprintf(out.psbt_hex, sizeof(out.psbt_hex), "01");
     if (!pc_wire_send(fd, &out)) { fprintf(stderr, "alice: send failed\n"); goto done; }
     if (pc_wire_recv(fd, &in) != 1 || in.type != PC_MSG_ANNOUNCE) {
-        fprintf(stderr, "alice: peer did not announce\n");
-        goto done;
+        fprintf(stderr, "alice: peer did not announce a key\n"); goto done;
     }
-    /* The pubkey was pinned on the command line, so a substituted one here is
-       an attacker on the socket rather than a disagreement. */
-    if (strcmp(in.psbt_hex, ch.bob_pubkey_hex) != 0) {
+    if (peer && strcmp(in.psbt_hex, peer) != 0) {
         fprintf(stderr, "alice: peer announced a different pubkey, refusing\n");
         goto done;
     }
 
-    uint64_t last = 0;
-    for (int i = 0; i < npays; i++) {
-        uint64_t total = 0;
-        if (pc_doge_to_koinu(pays[i], &total) != PC_OK) {
-            fprintf(stderr, "alice: --pay %s is not an amount\n", pays[i]);
-            goto done;
+    r = pc_channel_init(&ch, alice_pub, in.psbt_hex, locktime, chain);
+    if (r != PC_OK) { fprintf(stderr, "alice: channel: %s\n", pc_strerror(r)); goto done; }
+
+    /* the funding must be the one this channel was built for */
+    char txid[65] = {0};
+    int vout = 0;
+    uint64_t capacity = 0;
+    r = pc_tx_find_channel_output(&ch, funding_tx, txid, &vout, &capacity);
+    if (r != PC_OK) {
+        fprintf(stderr, "alice: --funding-tx does not pay %s\n", ch.p2sh_address);
+        goto done;
+    }
+    r = pc_channel_set_funding(&ch, txid, vout, capacity);
+    if (r != PC_OK) { fprintf(stderr, "alice: funding: %s\n", pc_strerror(r)); goto done; }
+
+    char cap_s[32];
+    pc_koinu_to_doge(capacity, cap_s, sizeof(cap_s));
+    printf("channel  %s\n", ch.p2sh_address);
+    printf("funding  %s:%d worth %s DOGE\n\n", txid, vout, cap_s);
+    fflush(stdout);
+
+    /* [3] the opening PSBT, [4] his answer */
+    char *open_psbt = NULL;
+    r = pc_channel_open_create(&ch, funding_tx, &open_psbt);
+    if (r != PC_OK) { fprintf(stderr, "alice: open: %s\n", pc_strerror(r)); goto done; }
+
+    memset(&out, 0, sizeof(out));
+    out.type = PC_MSG_OPEN;
+    snprintf(out.ref, sizeof(out.ref), "%s", txid);
+    out.vout = vout;
+    out.to_bob_koinu = locktime;
+    snprintf(out.psbt_hex, sizeof(out.psbt_hex), "%s", open_psbt);
+    snprintf(out.tx_hex, sizeof(out.tx_hex), "%s", funding_tx);
+    dogecoin_free(open_psbt);
+    if (!pc_wire_send(fd, &out)) { fprintf(stderr, "alice: send failed\n"); goto done; }
+
+    if (pc_wire_recv(fd, &in) != 1) { fprintf(stderr, "alice: no answer\n"); goto done; }
+    if (in.type == PC_MSG_REJECT) {
+        fprintf(stderr, "alice: channel refused: %s\n", in.addr); goto done;
+    }
+    if (in.type != PC_MSG_ACCEPT) { fprintf(stderr, "alice: unexpected answer\n"); goto done; }
+    printf("accepted, %" PRIu64 " koinu available\n\n", in.to_bob_koinu);
+
+    /* [5][6] pay what is invoiced, until he stops invoicing */
+    uint64_t paid = 0;
+    for (;;) {
+        int got = pc_wire_recv(fd, &in);
+        if (got != 1) break;
+        if (in.type == PC_MSG_REJECT) {
+            fprintf(stderr, "alice: refused: %s\n", in.addr); goto done;
         }
-        if (total <= last) {
-            fprintf(stderr, "alice: --pay amounts are cumulative and must grow\n");
-            goto done;
+        if (in.type != PC_MSG_INVOICE) break;
+
+        uint64_t total = in.to_bob_koinu;
+        if (total <= paid) { fprintf(stderr, "alice: invoice does not advance\n"); goto done; }
+        if (total > maximum) {
+            fprintf(stderr, "alice: invoice of %" PRIu64 " is over --max, stopping\n", total);
+            break;
         }
-        last = total;
+        if (total + fee > ch.capacity_koinu) {
+            fprintf(stderr, "alice: invoice exceeds the channel\n"); goto done;
+        }
+
+        char amt[32];
+        pc_koinu_to_doge(total, amt, sizeof(amt));
+        printf("invoice  %s DOGE total, to %s\n", amt, in.addr);
 
         char *psbt = NULL;
-        r = pc_payment_create(&ch, funding_tx, wif, alice_addr, bob_addr,
+        r = pc_payment_create(&ch, funding_tx, wif, alice_addr, in.addr,
                               total, fee, &psbt);
-        if (r != PC_OK) {
-            fprintf(stderr, "alice: payment: %s\n", pc_strerror(r));
-            goto done;
-        }
+        if (r != PC_OK) { fprintf(stderr, "alice: payment: %s\n", pc_strerror(r)); goto done; }
 
         memset(&out, 0, sizeof(out));
         out.type = PC_MSG_PAYMENT;
@@ -206,38 +226,40 @@ int main(int argc, char **argv)
         out.to_bob_koinu = total;
         if (strlen(psbt) + 1 > sizeof(out.psbt_hex)) {
             fprintf(stderr, "alice: psbt does not fit an envelope\n");
-            dogecoin_free(psbt);
-            goto done;
+            dogecoin_free(psbt); goto done;
         }
         snprintf(out.psbt_hex, sizeof(out.psbt_hex), "%s", psbt);
         dogecoin_free(psbt);
-
         if (!pc_wire_send(fd, &out)) { fprintf(stderr, "alice: send failed\n"); goto done; }
-        if (pc_wire_recv(fd, &in) != 1 || in.type != PC_MSG_ACK) {
-            fprintf(stderr, "alice: payment of %s was not acknowledged\n", pays[i]);
-            goto done;
+
+        if (pc_wire_recv(fd, &in) != 1) { fprintf(stderr, "alice: no ack\n"); goto done; }
+        if (in.type == PC_MSG_REJECT) {
+            fprintf(stderr, "alice: payment refused: %s\n", in.addr); goto done;
         }
-        if (in.to_bob_koinu != total) {
-            fprintf(stderr, "alice: peer acknowledged %" PRIu64 ", not %" PRIu64 "\n",
-                    in.to_bob_koinu, total);
-            goto done;
+        if (in.type != PC_MSG_ACK || in.to_bob_koinu != total) {
+            fprintf(stderr, "alice: payment was not acknowledged\n"); goto done;
         }
-        printf("paid %s DOGE (cumulative)\n", pays[i]);
+        paid = total;
+        printf("paid     %s DOGE cumulative\n\n", amt);
         fflush(stdout);
+
+        /* He says whether he is invoicing again. Waiting to find out by reading
+           would just block until one of us gives up. */
+        if (!in.more) break;
     }
 
-    if (want_close) {
+    /* [H] */
+    if (want_close && paid) {
         memset(&out, 0, sizeof(out));
         out.type = PC_MSG_CLOSE;
         snprintf(out.ref, sizeof(out.ref), "%s", ch.funding_txid);
-        out.to_bob_koinu = last;
+        out.to_bob_koinu = paid;
         snprintf(out.psbt_hex, sizeof(out.psbt_hex), "01");
         if (!pc_wire_send(fd, &out)) { fprintf(stderr, "alice: send failed\n"); goto done; }
         if (pc_wire_recv(fd, &in) != 1 || in.type != PC_MSG_CLOSE) {
-            fprintf(stderr, "alice: peer would not close\n");
-            goto done;
+            fprintf(stderr, "alice: peer would not close\n"); goto done;
         }
-        printf("\nclosing transaction, either side can broadcast it:\n%s\n", in.psbt_hex);
+        printf("closing transaction, either side can broadcast it:\n%s\n", in.psbt_hex);
     }
 
     rc = 0;
