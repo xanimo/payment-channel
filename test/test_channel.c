@@ -27,6 +27,20 @@ static int checks   = 0;
     }                                                           \
 } while (0)
 
+/* the library's decoder is static, and the test only needs this once */
+static int hex_bytes(const char *hex, unsigned char **out, size_t *outlen)
+{
+    size_t n = strlen(hex);
+    if (n == 0 || (n % 2)) return 0;
+    unsigned char *b = (unsigned char *)malloc(n / 2 + 1);
+    if (!b) return 0;
+    size_t got = 0;
+    utils_hex_to_bin(hex, b, n, &got);
+    if (got != n / 2) { free(b); return 0; }
+    *out = b; *outlen = got;
+    return 1;
+}
+
 #define CHECK_OK(rc, what) do {                                 \
     pc_result _r = (rc);                                        \
     checks++;                                                   \
@@ -215,8 +229,21 @@ int main(void)
                Everything above checks who is paid and how much; these check
                that what Bob holds would survive a node. */
             {
-                /* the layout being dissected, asserted first so a change here
-                   fails loudly rather than skipping the checks below */
+                /* The layout being dissected, asserted first so a change here
+                   fails loudly rather than skipping the checks below. Offsets
+                   are in hex characters from the start of the transaction:
+
+                       0   version          4 bytes
+                       8   input count      1
+                       10  prevout txid     32
+                       74  prevout vout     4
+                       82  scriptSig len    varint, 0xfd + 2 for our length
+                       88  OP_0             the CHECKMULTISIG dummy
+                       90  push length      1
+                       92  alice's sig      DER, starts 0x30
+
+                   a serialization change shifts all of them together, so read
+                   the first failure here rather than the five that follow. */
                 CHECK(rl > 200, "transaction long enough to dissect");
                 CHECK(memcmp(raw + 82, "fd", 2) == 0, "scriptSig has a 2-byte varint");
                 CHECK(memcmp(raw + 88, "00", 2) == 0, "scriptSig opens with OP_0");
@@ -251,19 +278,53 @@ int main(void)
                       "a non-final sequence is refused");
                 free(sq);
             }
-            {   /* what is left over is the fee, and the relay has a floor */
+            {   /* what is left over is the fee, and a miner has a floor that
+                   is ten times the one a relay has. computed here from the
+                   constants rather than from pc_min_fee(), so the test does not
+                   check the code against itself. */
+                const uint64_t OUTPUTS = 9900000000ULL;
+                uint64_t bytes = (uint64_t)(rl / 2);
+                uint64_t relay_floor = 100000ULL  * bytes / 1000;
+                uint64_t block_floor = 1000000ULL * bytes / 1000;
+
                 pc_channel zero = ch;
-                zero.capacity_koinu = 9900000000ULL;   /* what the outputs spend */
+                zero.capacity_koinu = OUTPUTS;         /* what the outputs spend */
                 CHECK(pc_tx_verify_payment(&zero, raw, 2000000000ULL) == PC_ERR_AMOUNT,
                       "a zero-fee payment is refused");
-                pc_channel thin = ch;
-                thin.capacity_koinu = 9900000000ULL + 99999ULL;
-                CHECK(pc_tx_verify_payment(&thin, raw, 2000000000ULL) == PC_ERR_AMOUNT,
-                      "a fee one koinu under the floor is refused");
+
+                /* the one that matters: a fee that relays and never gets mined */
+                pc_channel relayonly = ch;
+                relayonly.capacity_koinu = OUTPUTS + relay_floor;
+                CHECK(pc_tx_verify_payment(&relayonly, raw, 2000000000ULL) == PC_ERR_AMOUNT,
+                      "the relay floor alone is refused");
+
+                pc_channel under = ch;
+                under.capacity_koinu = OUTPUTS + block_floor - 1;
+                CHECK(pc_tx_verify_payment(&under, raw, 2000000000ULL) == PC_ERR_AMOUNT,
+                      "one koinu under the block floor is refused");
+
                 pc_channel atfloor = ch;
-                atfloor.capacity_koinu = 9900000000ULL + 100000ULL;
+                atfloor.capacity_koinu = OUTPUTS + block_floor;
                 CHECK_OK(pc_tx_verify_payment(&atfloor, raw, 2000000000ULL),
-                         "the floor exactly is accepted");
+                         "the block floor exactly is accepted");
+            }
+            {   /* one dusty output makes the whole transaction non-standard, so
+                   the newest state would be worthless and bob would have to
+                   fall back to an older one. patch the change output's value,
+                   which the amount checks read before any signature check. */
+                char *dusty = strdup(raw);
+                char lo[3] = { raw[84], raw[85], 0 };
+                char hi[3] = { raw[86], raw[87], 0 };
+                size_t sslen = (size_t)strtoul(hi, NULL, 16) * 256 +
+                               (size_t)strtoul(lo, NULL, 16);
+                size_t nout_off = 88 + sslen * 2 + 8;      /* past the sequence */
+                CHECK(memcmp(dusty + nout_off, "02", 2) == 0, "two outputs as built");
+                /* value(8) script(1+25) then the second value */
+                size_t val1 = nout_off + 2 + 16 + 2 + 50;
+                memcpy(dusty + val1, "e803000000000000", 16);   /* 1000 koinu */
+                CHECK(pc_tx_verify_payment(&ch, dusty, 2000000000ULL) == PC_ERR_AMOUNT,
+                      "an output under the hard dust limit is refused");
+                free(dusty);
             }
             dogecoin_free(raw);
         }
@@ -368,14 +429,60 @@ int main(void)
             CHECK(memcmp(refund + n2 - 8, ltbuf, 8) == 0,
                   "refund locktime is the channel's");
 
-            /* and the signature in it verifies against that transaction */
-            unsigned char h[32];
-            CHECK_OK(pc_tx_sighash(refund, rb, rl2, h), "refund sighash");
             CHECK(pc_tx_verify_payment(&ch, refund, 1) != PC_OK,
                   "a refund is not a payment to bob");
 
-            /* the branch selector must be OP_1, not the cooperative OP_0 */
-            CHECK(strstr(refund, "51") != NULL, "refund selects the IF branch");
+            /* Parse the scriptSig rather than searching the hex: 0x51 turns up
+               in a txid or inside a signature, so strstr() would pass on almost
+               any transaction of this length.
+                 version(8) inputs(2) txid(64) vout(8) = 82, then the scriptSig
+               length, then <sig> OP_1 <redeem>. */
+            unsigned char *rawb = NULL;
+            size_t rawn = 0;
+            CHECK(hex_bytes(refund, &rawb, &rawn), "refund decodes");
+            if (rawb) {
+                size_t o = 41;                       /* 4 + 1 + 32 + 4 bytes */
+                size_t sslen = rawb[o++];
+                CHECK(sslen < 0xfd, "refund scriptSig is short enough for one byte");
+                size_t end = o + sslen;
+                size_t siglen = rawb[o++];
+                const unsigned char *sig = rawb + o;
+                o += siglen;
+                CHECK(siglen >= 9 && o < rawn, "refund carries one signature");
+                CHECK(rawb[o] == 0x51, "the selector is OP_1, the IF branch");
+                o++;
+                size_t plen = rawb[o] == 0x4c ? (o += 2, rawb[o - 1]) : rawb[o++];
+                CHECK(plen == rl2 && memcmp(rawb + o, rb, rl2) == 0,
+                      "the pushed script is this channel's");
+                CHECK(o + plen == end, "the scriptSig ends where it says");
+
+                /* the signature actually verifies, which the digest alone does
+                   not say */
+                unsigned char h[32];
+                CHECK_OK(pc_tx_sighash(refund, rb, rl2, h), "refund sighash");
+                unsigned char apub[33];
+                size_t an = 0;
+                utils_hex_to_bin(ch.alice_pubkey_hex, apub, 66, &an);
+                CHECK(an == 33, "alice's key decodes");
+                CHECK(sig[siglen - 1] == 0x01, "hashtype is SIGHASH_ALL");
+                CHECK(dogecoin_ecc_verify_sig(apub, true, h,
+                                              (unsigned char *)sig, siglen - 1),
+                      "alice's refund signature verifies");
+                unsigned char h2[32];
+                memcpy(h2, h, sizeof(h2));
+                h2[0] ^= 0xff;
+                CHECK(!dogecoin_ecc_verify_sig(apub, true, h2,
+                                               (unsigned char *)sig, siglen - 1),
+                      "and does not verify against a different digest");
+
+                /* it pays alice's hash160, not merely someone's */
+                uint8_t ad[64];
+                CHECK(dogecoin_base58_decode_check(alice_addr, ad, sizeof(ad)) == 25,
+                      "alice's address decodes");
+                CHECK(memcmp(rawb + rawn - 26, ad + 1, 20) == 0,
+                      "the refund output pays alice's hash160");
+                free(rawb);
+            }
             dogecoin_free(refund);
         }
         CHECK(pc_refund_create(&ch, alice_wif, alice_addr, 0, &refund) == PC_ERR_AMOUNT,

@@ -719,6 +719,26 @@ pc_result pc_refund_create(const pc_channel *ch,
     memcpy(ss + sn, redeem, rlen); sn += rlen;
 
     size_t fn = refund_bytes(ch, h160, value, ss, sn, buf);
+
+    /* Alice builds this when Bob is already gone, so there is nobody on the
+       other end to refuse it and tell her why. Everything Bob would have
+       checked about a payment gets checked here instead, which turns a
+       discovery at the locktime into a discovery at call time. */
+    if (value < PC_HARD_DUST_KOINU) { rc = PC_ERR_AMOUNT; goto out; }
+    if (fee_koinu < pc_min_fee(fn, value < PC_SOFT_DUST_KOINU ? 1 : 0)) {
+        rc = PC_ERR_AMOUNT; goto out;
+    }
+    {
+        unsigned char apub[33];
+        size_t an = 0;
+        if (strlen(ch->alice_pubkey_hex) != 66) { rc = PC_ERR_KEY; goto out; }
+        utils_hex_to_bin(ch->alice_pubkey_hex, apub, 66, &an);
+        if (an != sizeof(apub)) { rc = PC_ERR_KEY; goto out; }
+        if (!dogecoin_ecc_verify_sig(apub, true, hash, sig, siglen - 1)) {
+            rc = PC_ERR_KEY; goto out;
+        }
+    }
+
     /* the caller frees this with dogecoin_free(), which goes through the
        library's mem mapper, so it has to come from dogecoin_malloc() */
     char *outhex = (char *)dogecoin_malloc(fn * 2 + 1);

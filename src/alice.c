@@ -148,7 +148,10 @@ int main(int argc, char **argv)
         char *refund = NULL;
         r = pc_refund_create(&ch, wif, alice_addr, fee, &refund);
         if (r != PC_OK) { fprintf(stderr, "alice: refund: %s\n", pc_strerror(r)); goto done; }
-        printf("refund transaction, spendable from block %u:\n%s\n", locktime, refund);
+        /* IsFinalTx wants nLockTime < nBlockHeight, so a transaction with
+           nLockTime == locktime first becomes final in the block after it */
+        printf("refund transaction, spendable from block %u:\n%s\n",
+               locktime + 1, refund);
         dogecoin_free(refund);
         rc = 0;
         goto done;

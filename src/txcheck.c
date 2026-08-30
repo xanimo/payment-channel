@@ -80,15 +80,30 @@ static void rd_script(rdr *r, const unsigned char **out, size_t *outlen)
     r->off += (size_t)n;
 }
 
-/* Dogecoin's relay floor is 0.001 DOGE per kilobyte. Charged per started kB,
-   which is what a node does when it sizes a transaction. */
-#define PC_MIN_RELAY_KOINU_PER_KB 100000ULL
+/* Dogecoin's fee and dust policy, from src/policy/policy.h and
+   src/dogecoin-fees.cpp. A payment has to clear two separate floors. A node
+   relays it at DEFAULT_MIN_RELAY_TX_FEE per kB plus a full DEFAULT_DUST_LIMIT
+   surcharge for every output under the soft dust limit, and a
+   default-configured miner only includes it at DEFAULT_BLOCK_MIN_TX_FEE per kB,
+   which is ten times the relay rate and carries no surcharge. Checking only the
+   relay floor accepts a payment that propagates, sits in mempools and is never
+   mined, which is the same failure as not checking at all and harder to see. */
+#define PC_RELAY_KOINU_PER_KB   100000ULL   /* DEFAULT_MIN_RELAY_TX_FEE   */
+#define PC_BLOCK_KOINU_PER_KB  1000000ULL   /* DEFAULT_BLOCK_MIN_TX_FEE   */
 
-static uint64_t min_fee_for(size_t txbytes)
+/* CFeeRate::GetFee(), which is proportional rather than per started kB */
+static uint64_t fee_at(uint64_t per_kb, size_t bytes)
 {
-    uint64_t kb = (uint64_t)((txbytes + 999) / 1000);
-    if (kb == 0) kb = 1;
-    return kb * PC_MIN_RELAY_KOINU_PER_KB;
+    uint64_t f = per_kb * (uint64_t)bytes / 1000;
+    return (f == 0 && bytes) ? 1 : f;
+}
+
+uint64_t pc_min_fee(size_t txbytes, size_t soft_dust_outputs)
+{
+    uint64_t relay = fee_at(PC_RELAY_KOINU_PER_KB, txbytes)
+                   + (uint64_t)soft_dust_outputs * PC_SOFT_DUST_KOINU;
+    uint64_t block = fee_at(PC_BLOCK_KOINU_PER_KB, txbytes);
+    return relay > block ? relay : block;
 }
 
 static size_t put_varint(unsigned char *out, uint64_t v)
@@ -122,8 +137,16 @@ static int rd_push(const unsigned char *p, size_t len, size_t *off,
 }
 
 /* The legacy SIGHASH_ALL digest for the one input, with (script_code) standing
-   in where the scriptSig sits. Rolled here because dogecoin_tx_sighash() is
-   LIBDOGECOIN_API but declared in tx.h, which is not an installed header. */
+   in where the scriptSig sits.
+
+   dogecoin_tx_sighash() computes the same thing and is LIBDOGECOIN_API, but it
+   is declared in tx.h, which include_HEADERS does not install, so it cannot be
+   called from what libdogecoin ships. This is a second implementation of a
+   consensus-critical digest and it stays one, so the guard against the two
+   drifting is that verify_sigs() checks Bob's own signature against this hash
+   as well as Alice's. His came from libdogecoin's signer, so if this ever stops
+   agreeing with theirs the honest path fails on the next payment rather than a
+   forgery passing quietly. Do not drop that check to save a verify. */
 static int sighash_all(const unsigned char *tx, size_t txlen,
                        size_t sig_start, size_t sig_end,
                        const unsigned char *script_code, size_t sclen,
@@ -360,6 +383,7 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     if (r.bad || nout == 0 || nout > 16) goto out;
 
     uint64_t to_bob = 0, total = 0;
+    size_t soft_dust = 0;
     for (uint64_t i = 0; i < nout; i++) {
         uint64_t value = rd_u(&r, 8);
         const unsigned char *spk = NULL;
@@ -367,6 +391,14 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
         rd_script(&r, &spk, &spklen);
         if (r.bad) goto out;
         total += value;
+
+        /* IsStandardTx refuses the whole transaction for a single output under
+           the hard limit, so one dusty change output makes the newest state
+           worthless and Bob has to fall back to an older one. This channel only
+           ever builds p2pkh outputs, so none of them are unspendable and the
+           exemption for those does not apply. */
+        if (value < PC_HARD_DUST_KOINU) { rc = PC_ERR_AMOUNT; goto out; }
+        if (value < PC_SOFT_DUST_KOINU) soft_dust++;
 
         if (spklen == sizeof(want) && memcmp(spk, want, sizeof(want)) == 0)
             to_bob += value;
@@ -380,9 +412,8 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
        not cover the outputs would be a transaction no node will relay. */
     if (total > ch->capacity_koinu) { rc = PC_ERR_AMOUNT; goto out; }
     if (to_bob < claimed_to_bob_koinu) { rc = PC_ERR_AMOUNT; goto out; }
-    /* and one that leaves nothing over pays no fee, which the relay drops just
-       the same, so it is not money either */
-    if (ch->capacity_koinu - total < min_fee_for(blen)) {
+    /* and what is left over has to be enough for a miner to take it */
+    if (ch->capacity_koinu - total < pc_min_fee(blen, soft_dust)) {
         rc = PC_ERR_AMOUNT; goto out;
     }
 

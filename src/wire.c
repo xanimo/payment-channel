@@ -35,6 +35,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -155,21 +156,30 @@ int pc_wire_send(int fd, const pc_envelope *env)
 /* One byte at a time. A message here is at most a few tens of kilobytes and
    arrives once per payment, so a read buffer would be state to get wrong for
    no measurable gain. */
+/* The socket timeout bounds one read(), and this reads a byte at a time, so a
+   peer dribbling one byte every timeout-minus-a-second would hold the loop open
+   for as long as it liked. The deadline is on the whole line. */
 static int read_line(int fd, char *buf, size_t cap)
 {
+    time_t deadline = time(NULL) + PC_WIRE_TIMEOUT_SEC;
     size_t n = 0;
     for (;;) {
         char c;
         ssize_t r = read(fd, &c, 1);
         if (r < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) {
+                if (time(NULL) >= deadline) return -1;
+                continue;
+            }
             return -1;
         }
         if (r == 0) return n ? -1 : 0;      /* truncated line is an error */
         if (c == '\n') { buf[n] = '\0'; return 1; }
-        if (c == '\r') continue;
-        if (n + 1 >= cap) return -1;        /* oversized: drop the peer */
-        buf[n++] = c;
+        if (c != '\r') {
+            if (n + 1 >= cap) return -1;    /* oversized: drop the peer */
+            buf[n++] = c;
+        }
+        if (time(NULL) >= deadline) return -1;
     }
 }
 

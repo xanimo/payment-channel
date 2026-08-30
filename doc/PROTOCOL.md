@@ -24,8 +24,18 @@ one json object per line over tcp. every message has the same fields and the
 
 the parser is hand written and refuses anything it does not recognise: no
 escapes, no nesting, fixed field shapes, `ref` either empty or exactly 64 hex
-characters, `psbt` always non-empty hex, `more` absent or 0 or 1. a general json
-parser here would be a dependency and a larger attack surface for no gain.
+characters, `psbt` always non-empty hex, `more` absent or 0 or 1, and a repeated
+key refused rather than resolved to the first of two answers. it does still
+ignore leading and trailing text around the object. a general json parser here
+would be a dependency and a larger attack surface for no gain.
+
+`addr` carries two different things: an address on an invoice and a reason on a
+reject. both are checked only for the alphabet a hand-rolled encoder needs,
+alphanumeric and space, because a reason has spaces in it and an address does
+not. that is deliberately weaker than address validation, and it is safe only
+because nothing trusts the field: bob derives his payee from the redeem script
+rather than from `addr`, so a malformed one can make alice fail locally and
+cannot misdirect a payment.
 
 ## exchange
 
