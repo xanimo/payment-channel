@@ -586,15 +586,20 @@ int main(void)
     /* the surcharge is what makes the fee and the dust checks not independent,
        and it is what alice's fixed --fee is not sized for when a late payment
        leaves her change in the band */
+    /* Proportionality is pinned by the sizes that are not whole kilobytes.
+       400 bytes would cost a full 1000000 under per-started-kB and 1500 would
+       cost 2000000, so both of these fail under that formula. A multiple of
+       1000 would agree under either and prove nothing, which is why there is
+       not one here. */
     CHECK(pc_min_fee(400, 0) == 400000ULL,
-          "block floor at 400 bytes, got %" PRIu64, pc_min_fee(400, 0));
+          "proportional at 400 bytes, got %" PRIu64, pc_min_fee(400, 0));
+    CHECK(pc_min_fee(1500, 0) == 1500000ULL,
+          "proportional at 1500 bytes, where per started kB gives 2000000, got %"
+          PRIu64, pc_min_fee(1500, 0));
     CHECK(pc_min_fee(400, 1) == 1040000ULL,
           "one band output adds a soft limit, got %" PRIu64, pc_min_fee(400, 1));
     CHECK(pc_min_fee(400, 2) == 2040000ULL,
           "and two add two, got %" PRIu64, pc_min_fee(400, 2));
-    CHECK(pc_min_fee(4000, 0) == 4000000ULL,
-          "the rate is proportional, not per started kB, got %" PRIu64,
-          pc_min_fee(4000, 0));
 
     /* bob sends pc_strerror() as a reject reason, so every one of them has to
        survive the envelope. a comma in one of these is how the reject path went

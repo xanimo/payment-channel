@@ -292,6 +292,16 @@ int main(int argc, char **argv)
            she knows total and capacity here, so she can tell before she signs
            rather than after Bob refuses. */
         {
+            /* Bob's output is the invoiced total, and an invoice under the
+               hard limit is one no fee can rescue: the transaction is not
+               standard at any price. Say that rather than pointing at --fee. */
+            if (total < PC_HARD_DUST_KOINU) {
+                fprintf(stderr, "alice: an invoice of %" PRIu64 " koinu is under the "
+                        "dust limit, and no fee would make it standard\n", total);
+                goto done;
+            }
+            /* make_change() emits no output when the whole input is spent, so
+               a change of zero is not a dust output, it is no output at all. */
             uint64_t change = ch.capacity_koinu - total - fee;
             if (change > 0 && change < PC_HARD_DUST_KOINU) {
                 fprintf(stderr, "alice: this would leave %" PRIu64 " koinu change, "
