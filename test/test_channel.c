@@ -583,16 +583,36 @@ int main(void)
     CHECK(pc_envelope_decode("{\"type\":\"ack\",\"to_bob\":12x,\"psbt\":\"01\"}",
                              &back) != PC_OK, "a bad amount terminator is refused");
 
+    /* the surcharge is what makes the fee and the dust checks not independent,
+       and it is what alice's fixed --fee is not sized for when a late payment
+       leaves her change in the band */
+    CHECK(pc_min_fee(400, 0) == 400000ULL,
+          "block floor at 400 bytes, got %" PRIu64, pc_min_fee(400, 0));
+    CHECK(pc_min_fee(400, 1) == 1040000ULL,
+          "one band output adds a soft limit, got %" PRIu64, pc_min_fee(400, 1));
+    CHECK(pc_min_fee(400, 2) == 2040000ULL,
+          "and two add two, got %" PRIu64, pc_min_fee(400, 2));
+    CHECK(pc_min_fee(4000, 0) == 4000000ULL,
+          "the rate is proportional, not per started kB, got %" PRIu64,
+          pc_min_fee(4000, 0));
+
     /* bob sends pc_strerror() as a reject reason, so every one of them has to
        survive the envelope. a comma in one of these is how the reject path went
        dead the first time. */
     for (int e = PC_OK; e <= PC_ERR_FINAL + 1; e++) {
+        const char *why = pc_strerror((pc_result)e);
+        /* Assert on the source, not on the copy. send_reject() snprintf()s into
+           this field, so testing the copy reproduces any truncation before
+           looking at it and reports that the damage encodes fine. */
+        CHECK(strlen(why) < sizeof(env.addr),
+              "pc_strerror(%d) fits the reason field: %zu of %zu, %s",
+              e, strlen(why), sizeof(env.addr) - 1, why);
         memset(&env, 0, sizeof(env));
         env.type = PC_MSG_REJECT;
-        snprintf(env.addr, sizeof(env.addr), "%s", pc_strerror((pc_result)e));
+        snprintf(env.addr, sizeof(env.addr), "%s", why);
         snprintf(env.psbt_hex, sizeof(env.psbt_hex), "01");
         CHECK(pc_envelope_encode(&env, wire, sizeof(wire)) == PC_OK,
-              "pc_strerror(%d) survives the envelope: %s", e, pc_strerror((pc_result)e));
+              "pc_strerror(%d) survives the envelope: %s", e, why);
     }
 
 done:

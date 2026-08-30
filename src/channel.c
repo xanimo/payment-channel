@@ -39,15 +39,19 @@ const char *pc_strerror(pc_result r)
     case PC_ERR_ARG:     return "bad argument";
     case PC_ERR_KEY:     return "key would not decode";
     case PC_ERR_SCRIPT:  return "redeem script would not build";
-    /* these travel on the wire as reject reasons, so they are held to the
-       envelope's alphabet: no commas, no punctuation */
+    /* These travel on the wire as reject reasons, so they are held to the
+       envelope's alphabet, no commas or punctuation, and to the size of the
+       field they are copied into: under P2PKHLEN characters, or send_reject()
+       truncates them mid-word and Alice gets a damaged reason rather than none.
+       test_channel.c asserts both against the string here, not against a copy
+       of it. */
     case PC_ERR_PSBT:    return "psbt would not parse or sign";
-    case PC_ERR_STATE:   return "channel not in a state that allows this";
+    case PC_ERR_STATE:   return "not in a state that allows this";
     case PC_ERR_AMOUNT:  return "pays less than it claims to";
     case PC_ERR_CAPACITY: return "spends more than the channel holds";
-    case PC_ERR_DUST:    return "carries an output under the dust limit";
+    case PC_ERR_DUST:    return "an output is under the dust limit";
     case PC_ERR_FEE:     return "leaves too little fee to be mined";
-    case PC_ERR_FINAL:   return "is not final and cannot be mined yet";
+    case PC_ERR_FINAL:   return "not final and cannot be mined yet";
     }
     return "unknown";
 }
