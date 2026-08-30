@@ -12,7 +12,7 @@ LIBDOGECOIN ?= /usr/local
 
 CC       ?= cc
 CFLAGS   ?= -std=gnu99 -O2 -g -Wall -Wextra -Wno-unused-parameter
-CPPFLAGS += -Iinclude -I$(LIBDOGECOIN)/include
+CPPFLAGS += -Iinclude -Isrc -I$(LIBDOGECOIN)/include
 LDFLAGS  += -L$(LIBDOGECOIN)/lib
 LDLIBS   += $(LIBDOGECOIN)/lib/libdogecoin.a -levent -levent_core -levent_extra \
             -levent_pthreads -lpthread -lm
@@ -21,7 +21,7 @@ CORE_SRC = src/channel.c src/envelope.c src/txcheck.c src/wire.c
 CORE_OBJ = $(CORE_SRC:.c=.o)
 
 BINS = alice bob
-TESTS = test_channel test/mkfunding
+TESTS = test_channel test/mkfunding test/adversary
 
 all: $(BINS)
 
@@ -32,6 +32,9 @@ bob: src/bob.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test_channel: test/test_channel.o $(CORE_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test/adversary: test/adversary.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test/mkfunding: test/mkfunding.o $(CORE_OBJ)

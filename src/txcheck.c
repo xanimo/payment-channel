@@ -391,3 +391,36 @@ out:
     free(buf);
     return rc;
 }
+
+pc_result pc_tx_sighash(const char *raw_tx_hex,
+                        const unsigned char *script_code, size_t sclen,
+                        unsigned char out[32])
+{
+    if (!raw_tx_hex || !script_code || !out) return PC_ERR_ARG;
+    size_t hl = strlen(raw_tx_hex);
+    if (hl == 0 || (hl % 2)) return PC_ERR_ARG;
+    unsigned char *buf = (unsigned char *)malloc(hl / 2 + 1);
+    if (!buf) return PC_ERR_ARG;
+    size_t blen = 0;
+    utils_hex_to_bin(raw_tx_hex, buf, hl, &blen);
+
+    pc_result rc = PC_ERR_PSBT;
+    if (blen != hl / 2) goto out;
+
+    rdr r = { buf, blen, 0, 0 };
+    rd_u(&r, 4);                                  /* version */
+    if (rd_varint(&r) != 1 || r.bad) goto out;    /* the channel spends one */
+    need(&r, 36);
+    if (r.bad) goto out;
+    r.off += 36;                                  /* outpoint */
+    size_t s0 = r.off;
+    rd_script(&r, NULL, NULL);
+    size_t s1 = r.off;
+    if (r.bad) goto out;
+
+    if (!sighash_all(buf, blen, s0, s1, script_code, sclen, out)) goto out;
+    rc = PC_OK;
+out:
+    free(buf);
+    return rc;
+}

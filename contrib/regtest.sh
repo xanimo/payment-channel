@@ -128,4 +128,45 @@ print(t)
 ' "$BOB_ADDR")
 echo "bob paid $PAID DOGE, expected 30"
 [ "$PAID" = "30.0" ] || { echo "FAIL: bob was not paid 30" >&2; exit 1; }
+
+# The cooperative close is one of two transactions this scheme produces. The
+# other is Alice's unilateral refund through the CLTV branch, and it is the one
+# that gets her money back when Bob stops answering. "should work" is not the
+# standard to hold a recovery path to, so broadcast one.
+echo
+R_LOCKTIME=$(( $("${RPC[@]}" getblockcount) + 5 ))
+R_CHANNEL=$(./alice $NET --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" \
+                         --locktime "$R_LOCKTIME" --address)
+echo "refund   channel $R_CHANNEL  locktime $R_LOCKTIME"
+R_TXID=$("${RPC[@]}" sendtoaddress "$R_CHANNEL" "$CAPACITY")
+"${RPC[@]}" generate 6 >/dev/null          # confirm it, and pass the locktime
+"${RPC[@]}" getrawtransaction "$R_TXID" > "$WORK/refund_funding.hex"
+
+REFUND=$(./alice $NET --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" \
+                      --locktime "$R_LOCKTIME" --fee "$FEE" --refund \
+                      --funding-tx "@$WORK/refund_funding.hex" | tail -1)
+[ -n "$REFUND" ] || { echo "FAIL: no refund transaction" >&2; exit 1; }
+
+R_SENT=$("${RPC[@]}" sendrawtransaction "$REFUND") || {
+    echo "FAIL: the node would not accept the refund" >&2; exit 1; }
+"${RPC[@]}" generate 1 >/dev/null
+R_CONFS=$("${RPC[@]}" getrawtransaction "$R_SENT" 1 | python3 -c \
+          'import json,sys; print(json.load(sys.stdin).get("confirmations",0))')
+echo "refund   $R_SENT  confirmations $R_CONFS"
+[ "$R_CONFS" -ge 1 ] || { echo "FAIL: refund did not confirm" >&2; exit 1; }
+
+R_PAID=$("${RPC[@]}" getrawtransaction "$R_SENT" 1 | python3 -c '
+import json,sys
+tx=json.load(sys.stdin)
+want=sys.argv[1]
+t=0
+for o in tx["vout"]:
+    spk=o.get("scriptPubKey",{})
+    if want in spk.get("addresses",[]) or spk.get("address")==want:
+        t+=o["value"]
+print(t)
+' "$ALICE_ADDR")
+echo "refund   returned $R_PAID DOGE to alice, expected 99"
+[ "$R_PAID" = "99.0" ] || { echo "FAIL: refund did not return the balance" >&2; exit 1; }
+
 echo "regtest ok"

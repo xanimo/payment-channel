@@ -57,7 +57,9 @@ static void usage(void)
       "\n"
       "  Fund --address and let it confirm before running the second form.\n"
       "  --peer-pubkey pins Bob's key; without it Alice trusts what he answers.\n"
-      "  --max refuses to pay more than that in total.\n");
+      "  --max refuses to pay more than that in total.\n"
+      "  --refund builds Alice's unilateral close, valid once --locktime\n"
+      "  passes. It needs no peer, which is the situation it is for.\n");
 }
 
 int main(int argc, char **argv)
@@ -66,7 +68,7 @@ int main(int argc, char **argv)
     const char *connect_to = NULL, *fee_s = "1.0", *max_s = NULL;
     uint32_t locktime = 0;
     pc_chain chain = PC_CHAIN_MAIN;
-    int want_pubkey = 0, want_address = 0, want_close = 0;
+    int want_pubkey = 0, want_address = 0, want_close = 0, want_refund = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -83,6 +85,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--pubkey"))      want_pubkey = 1;
         else if (!strcmp(a, "--address"))     want_address = 1;
         else if (!strcmp(a, "--close"))       want_close = 1;
+        else if (!strcmp(a, "--refund"))      want_refund = 1;
         else { usage(); return 2; }
         #undef NEXT
     }
@@ -120,6 +123,35 @@ int main(int argc, char **argv)
     uint64_t fee = 0, maximum = UINT64_MAX;
     if (pc_doge_to_koinu(fee_s, &fee) != PC_OK) {
         fprintf(stderr, "alice: --fee is not an amount\n"); goto done;
+    }
+
+    /* The refund needs no peer on the other end, which is the whole point of
+       it: Bob is gone. It needs his key only to rebuild the script. */
+    if (want_refund) {
+        if (!peer) { usage(); goto done; }
+        funding_tx = pc_read_hex_arg(ftx_arg);
+        if (!funding_tx) { fprintf(stderr, "alice: cannot read --funding-tx\n"); goto done; }
+        r = pc_channel_init(&ch, alice_pub, peer, locktime, chain);
+        if (r != PC_OK) { fprintf(stderr, "alice: channel: %s\n", pc_strerror(r)); goto done; }
+
+        char rtxid[65] = {0};
+        int rvout = 0;
+        uint64_t rcap = 0;
+        r = pc_tx_find_channel_output(&ch, funding_tx, rtxid, &rvout, &rcap);
+        if (r != PC_OK) {
+            fprintf(stderr, "alice: --funding-tx does not pay %s\n", ch.p2sh_address);
+            goto done;
+        }
+        r = pc_channel_set_funding(&ch, rtxid, rvout, rcap);
+        if (r != PC_OK) { fprintf(stderr, "alice: funding: %s\n", pc_strerror(r)); goto done; }
+
+        char *refund = NULL;
+        r = pc_refund_create(&ch, wif, alice_addr, fee, &refund);
+        if (r != PC_OK) { fprintf(stderr, "alice: refund: %s\n", pc_strerror(r)); goto done; }
+        printf("refund transaction, spendable from block %u:\n%s\n", locktime, refund);
+        dogecoin_free(refund);
+        rc = 0;
+        goto done;
     }
     if (max_s && pc_doge_to_koinu(max_s, &maximum) != PC_OK) {
         fprintf(stderr, "alice: --max is not an amount\n"); goto done;

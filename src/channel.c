@@ -164,13 +164,13 @@ pc_result pc_channel_init(pc_channel *ch,
     if (!hexcat(s, cap, &p, "b1")) return PC_ERR_SCRIPT;            /* CLTV    */
     if (!hexcat(s, cap, &p, "75")) return PC_ERR_SCRIPT;            /* OP_DROP */
     if (!hexcat(s, cap, &p, "21%s", ch->alice_pubkey_hex)) return PC_ERR_SCRIPT;
-    if (!hexcat(s, cap, &p, "ad")) return PC_ERR_SCRIPT;            /* CHECKSIGVERIFY */
+    if (!hexcat(s, cap, &p, "ac")) return PC_ERR_SCRIPT;            /* CHECKSIG */
     if (!hexcat(s, cap, &p, "67")) return PC_ERR_SCRIPT;            /* OP_ELSE */
     if (!hexcat(s, cap, &p, "52")) return PC_ERR_SCRIPT;            /* OP_2    */
-    if (!hexcat(s, cap, &p, "68")) return PC_ERR_SCRIPT;            /* OP_ENDIF*/
     if (!hexcat(s, cap, &p, "21%s", ch->alice_pubkey_hex)) return PC_ERR_SCRIPT;
     if (!hexcat(s, cap, &p, "21%s", ch->bob_pubkey_hex))   return PC_ERR_SCRIPT;
     if (!hexcat(s, cap, &p, "52ae")) return PC_ERR_SCRIPT;          /* OP_2 CHECKMULTISIG */
+    if (!hexcat(s, cap, &p, "68")) return PC_ERR_SCRIPT;            /* OP_ENDIF*/
 
     /* the helper takes a boolean, and regtest shares testnet's 0xc4 script
        prefix, so either non-main chain wants the same argument here */
@@ -223,10 +223,9 @@ pc_result pc_redeem_parse(const char *redeem_hex, char alice_pubkey_hex[PUBKEYHE
     TAKE(0x21);
     if (i + 33 > n) goto out;
     size_t alice_at = i; i += 33;
-    TAKE(0xad);                                       /* CHECKSIGVERIFY */
+    TAKE(0xac);                                       /* CHECKSIG */
     TAKE(0x67);                                       /* OP_ELSE */
     TAKE(0x52);                                       /* OP_2 */
-    TAKE(0x68);                                       /* OP_ENDIF */
     TAKE(0x21);
     if (i + 33 > n) goto out;
     size_t alice2_at = i; i += 33;
@@ -235,6 +234,7 @@ pc_result pc_redeem_parse(const char *redeem_hex, char alice_pubkey_hex[PUBKEYHE
     size_t bob_at = i; i += 33;
     TAKE(0x52);                                       /* OP_2 */
     TAKE(0xae);                                       /* CHECKMULTISIG */
+    TAKE(0x68);                                       /* OP_ENDIF */
     if (i != n) goto out;                             /* trailing bytes */
     #undef TAKE
 
@@ -600,5 +600,137 @@ pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
 out:
     free(rbytes);
     if (psbt) dogecoin_psbt_free(psbt);
+    return rc;
+}
+
+/* ── Alice: take the money back if Bob goes away ─────────────── */
+
+static size_t put_u(unsigned char *o, uint64_t v, size_t n)
+{
+    for (size_t i = 0; i < n; i++) o[i] = (unsigned char)((v >> (8 * i)) & 0xff);
+    return n;
+}
+
+/* Serialize the refund with (ss) as the input's scriptSig, or empty when (ss)
+   is NULL, which is the form the signature is taken over. */
+static size_t refund_bytes(const pc_channel *ch, const unsigned char h160[20],
+                           uint64_t value, const unsigned char *ss, size_t sslen,
+                           unsigned char *o)
+{
+    size_t n = 0;
+    n += put_u(o + n, 1, 4);                       /* version */
+    o[n++] = 0x01;                                 /* one input */
+
+    /* the txid is stored reversed from the way it is displayed */
+    unsigned char txid[32];
+    size_t tn = 0;
+    utils_hex_to_bin(ch->funding_txid, txid, 64, &tn);
+    for (int i = 0; i < 32; i++) o[n + i] = txid[31 - i];
+    n += 32;
+    n += put_u(o + n, (uint64_t)ch->funding_vout, 4);
+
+    if (ss) {
+        if (sslen < 0xfd) o[n++] = (unsigned char)sslen;
+        else { o[n++] = 0xfd; n += put_u(o + n, sslen, 2); }
+        memcpy(o + n, ss, sslen); n += sslen;
+    } else {
+        o[n++] = 0x00;
+    }
+
+    /* non-final, because CHECKLOCKTIMEVERIFY refuses to run against a final
+       input and would let the refund be mined immediately if it did not */
+    n += put_u(o + n, 0xfffffffeu, 4);
+
+    o[n++] = 0x01;                                 /* one output */
+    n += put_u(o + n, value, 8);
+    o[n++] = 25;
+    o[n++] = 0x76; o[n++] = 0xa9; o[n++] = 0x14;
+    memcpy(o + n, h160, 20); n += 20;
+    o[n++] = 0x88; o[n++] = 0xac;
+
+    n += put_u(o + n, ch->locktime, 4);            /* what CLTV checks against */
+    return n;
+}
+
+pc_result pc_refund_create(const pc_channel *ch,
+                           const char *alice_wif,
+                           const char *alice_addr,
+                           uint64_t fee_koinu,
+                           char **raw_tx_hex_out)
+{
+    if (!ch || !alice_wif || !alice_addr || !raw_tx_hex_out) return PC_ERR_ARG;
+    if (!ch->funding_txid[0]) return PC_ERR_STATE;
+    if (fee_koinu == 0 || fee_koinu >= ch->capacity_koinu) return PC_ERR_AMOUNT;
+    *raw_tx_hex_out = NULL;
+
+    uint8_t decoded[64];
+    if (dogecoin_base58_decode_check(alice_addr, decoded, sizeof(decoded)) != 25)
+        return PC_ERR_ARG;
+    unsigned char h160[20];
+    memcpy(h160, decoded + 1, sizeof(h160));
+
+    unsigned char *redeem = NULL;
+    size_t rlen = 0;
+    if (!hex_to_bytes(ch->redeem_script_hex, &redeem, &rlen)) return PC_ERR_SCRIPT;
+
+    pc_result rc = PC_ERR_PSBT;
+    unsigned char *buf = NULL, *ss = NULL;
+    char *hex = NULL;
+    uint64_t value = ch->capacity_koinu - fee_koinu;
+
+    size_t cap = 256 + rlen * 2;
+    buf = (unsigned char *)malloc(cap);
+    if (!buf) { rc = PC_ERR_ARG; goto out; }
+
+    /* what the signature covers: the redeem script stands in for the scriptSig */
+    size_t un = refund_bytes(ch, h160, value, NULL, 0, buf);
+    hex = (char *)malloc(un * 2 + 1);
+    if (!hex) { rc = PC_ERR_ARG; goto out; }
+    utils_bin_to_hex(buf, un, hex);
+
+    unsigned char hash[32];
+    rc = pc_tx_sighash(hex, redeem, rlen, hash);
+    if (rc != PC_OK) goto out;
+    rc = PC_ERR_PSBT;
+
+    dogecoin_key key;
+    dogecoin_privkey_init(&key);
+    if (!dogecoin_privkey_decode_wif((char *)alice_wif, pc_chainparams(ch->chain), &key)) {
+        rc = PC_ERR_KEY; goto out;
+    }
+    unsigned char sig[80];
+    size_t siglen = sizeof(sig);
+    int signed_ok = dogecoin_ecc_sign(key.privkey, hash, sig, &siglen);
+    dogecoin_privkey_cleanse(&key);
+    if (!signed_ok || siglen == 0 || siglen > 74) goto out;
+    sig[siglen++] = 0x01;                          /* SIGHASH_ALL */
+
+    /* <alice sig> OP_1 <redeem script>, where OP_1 takes the IF branch */
+    size_t sscap = 2 + siglen + 3 + rlen;
+    ss = (unsigned char *)malloc(sscap);
+    if (!ss) { rc = PC_ERR_ARG; goto out; }
+    size_t sn = 0;
+    if (siglen > 75) goto out;
+    ss[sn++] = (unsigned char)siglen;
+    memcpy(ss + sn, sig, siglen); sn += siglen;
+    ss[sn++] = 0x51;                               /* OP_1 */
+    if (rlen < 76) ss[sn++] = (unsigned char)rlen;
+    else { ss[sn++] = 0x4c; ss[sn++] = (unsigned char)rlen; }
+    memcpy(ss + sn, redeem, rlen); sn += rlen;
+
+    size_t fn = refund_bytes(ch, h160, value, ss, sn, buf);
+    /* the caller frees this with dogecoin_free(), which goes through the
+       library's mem mapper, so it has to come from dogecoin_malloc() */
+    char *outhex = (char *)dogecoin_malloc(fn * 2 + 1);
+    if (!outhex) { rc = PC_ERR_ARG; goto out; }
+    utils_bin_to_hex(buf, fn, outhex);
+
+    *raw_tx_hex_out = outhex;
+    rc = PC_OK;
+out:
+    free(hex);
+    free(ss);
+    free(buf);
+    free(redeem);
     return rc;
 }

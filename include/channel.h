@@ -91,11 +91,15 @@ typedef struct {
 
 /* Build the channel's redeem script and P2SH address from both pubkeys.
  *
- *   OP_IF <locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP <alice> OP_CHECKSIGVERIFY
- *   OP_ELSE OP_2 OP_ENDIF <alice> <bob> OP_2 OP_CHECKMULTISIG
+ *   OP_IF <locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP <alice> OP_CHECKSIG
+ *   OP_ELSE OP_2 <alice> <bob> OP_2 OP_CHECKMULTISIG OP_ENDIF
  *
- * The ELSE branch pushes OP_2 so the cooperative close is a plain 2-of-2. The
- * IF branch gates Alice's unilateral refund on the locktime. */
+ * Each branch is self contained. The IF branch gates Alice's unilateral refund
+ * on the locktime and needs one signature; the ELSE branch is a plain 2-of-2.
+ * Closing the ENDIF after the multisig rather than before it is what keeps them
+ * apart: with a shared tail the refund would fall through into the multisig,
+ * which the IF branch pushes no m for, and Alice's scriptSig would have to
+ * carry the same signature twice and an m of its own to feed it. */
 pc_result pc_channel_init(pc_channel *ch,
                           const char *alice_pubkey_hex,
                           const char *bob_pubkey_hex,
@@ -200,6 +204,34 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
 pc_result pc_tx_verify_payment(const pc_channel *ch,
                                const char *raw_tx_hex,
                                uint64_t claimed_to_bob_koinu);
+
+/* The legacy SIGHASH_ALL digest for the single input of (raw_tx_hex), with
+ * (script_code) standing in where the scriptSig sits. Computed here because
+ * dogecoin_tx_sighash() is LIBDOGECOIN_API but declared in tx.h, which is not
+ * an installed header. */
+pc_result pc_tx_sighash(const char *raw_tx_hex,
+                        const unsigned char *script_code, size_t sclen,
+                        unsigned char out[32]);
+
+/* ── Alice: take the money back if Bob goes away ─────────────── */
+
+/* Spend the funding output through the IF branch, paying everything but
+ * (fee_koinu) to (alice_addr). The scriptSig is
+ *
+ *   <alice sig> OP_1 <redeem script>
+ *
+ * where OP_1 selects the refund branch. nLockTime is the channel's locktime and
+ * the input is non-final, both of which CHECKLOCKTIMEVERIFY requires, so no
+ * node will mine this until the locktime passes. Returns the transaction as
+ * hex; caller frees with dogecoin_free().
+ *
+ * This is the only way Alice gets her money back, so it is the one branch worth
+ * broadcasting on regtest before trusting it. */
+pc_result pc_refund_create(const pc_channel *ch,
+                           const char *alice_wif,
+                           const char *alice_addr,
+                           uint64_t fee_koinu,
+                           char **raw_tx_hex_out);
 
 /* ── Wire envelope ───────────────────────────────────────────── */
 
