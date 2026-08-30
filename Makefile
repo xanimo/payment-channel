@@ -12,6 +12,13 @@ LIBDOGECOIN ?= /usr/local
 
 CC       ?= cc
 CFLAGS   ?= -std=gnu99 -O2 -g -Wall -Wextra -Wno-unused-parameter
+
+# An implicit declaration here means a libdogecoin entry point that is exported
+# from the archive but missing from the installed header. It links, and then it
+# returns int where the real one returns dogecoin_bool. That is a warning in a
+# wall of output and a bug at runtime, so make it stop the build. Overridden
+# rather than appended so it survives a CFLAGS= on the command line.
+override CFLAGS += -Werror=implicit-function-declaration
 CPPFLAGS += -Iinclude -Isrc -I$(LIBDOGECOIN)/include
 LDFLAGS  += -L$(LIBDOGECOIN)/lib
 LDLIBS   += $(LIBDOGECOIN)/lib/libdogecoin.a -levent -levent_core -levent_extra \

@@ -205,6 +205,19 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
                                const char *raw_tx_hex,
                                uint64_t claimed_to_bob_koinu);
 
+/* Dogecoin's dust limits, from src/policy/policy.h. An output under the hard
+ * limit makes the whole transaction non-standard; one under the soft limit adds
+ * a full soft limit to the fee the transaction has to pay. */
+#define PC_HARD_DUST_KOINU  100000ULL   /* DEFAULT_HARD_DUST_LIMIT */
+#define PC_SOFT_DUST_KOINU 1000000ULL   /* DEFAULT_DUST_LIMIT      */
+
+/* What a transaction of (txbytes) carrying (soft_dust_outputs) outputs under the
+ * soft limit has to pay before a default-configured miner will include it. This
+ * is the higher of the relay floor plus its dust surcharge and the block floor,
+ * because clearing only the first gets a transaction that propagates and is
+ * never mined. */
+uint64_t pc_min_fee(size_t txbytes, size_t soft_dust_outputs);
+
 /* The legacy SIGHASH_ALL digest for the single input of (raw_tx_hex), with
  * (script_code) standing in where the scriptSig sits. Computed here because
  * dogecoin_tx_sighash() is LIBDOGECOIN_API but declared in tx.h, which is not

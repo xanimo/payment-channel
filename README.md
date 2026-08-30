@@ -116,12 +116,23 @@ bob at least what was claimed, spends no more than the capacity, and pays him
 strictly more than the previous one.
 
 being addressed correctly is not the same as being spendable, so it also has to
-carry two signatures that verify, leave a fee at or above the relay floor, and
-be final. a non-zero locktime or a sequence under `0xffffffff` is a transaction
-no node will mine yet, and neither field is constrained by the script, since the
-else branch never executes `OP_CHECKLOCKTIMEVERIFY`. the sighash those
-signatures are checked against is computed in src/txcheck.c, because
-`dogecoin_tx_sighash` is `LIBDOGECOIN_API` but declared in `tx.h`, which is not
-an installed header. bob's own signature is verified alongside alice's: his came
-from libdogecoin's signer, so a digest that verifies his is a digest computed
-the same way libdogecoin computes it.
+carry two signatures that verify, pay a large enough fee, carry no dust, and be
+final. a non-zero locktime or a sequence under `0xffffffff` is a transaction no
+node will mine yet, and neither field is constrained by the script, since the
+else branch never executes `OP_CHECKLOCKTIMEVERIFY`.
+
+the fee is measured against the floor a miner uses, `DEFAULT_BLOCK_MIN_TX_FEE`,
+not the one a relay uses. they differ by ten times, so checking only the relay
+floor accepts a payment that propagates, sits in mempools and is never mined,
+which is the same failure as not checking and harder to notice. an output under
+`DEFAULT_HARD_DUST_LIMIT` makes the whole transaction non-standard, so one dusty
+change output would leave bob's newest state worthless and send him back to an
+older one, and an output under the soft limit adds a full soft limit to the fee
+the transaction owes.
+
+the sighash those signatures are checked against is computed in src/txcheck.c,
+because `dogecoin_tx_sighash` is `LIBDOGECOIN_API` but declared in `tx.h`, which
+is not an installed header. that makes this a second implementation of a
+consensus-critical digest, so bob's own signature is verified alongside alice's:
+his came from libdogecoin's signer, so if the two ever stop agreeing the honest
+path fails on the next payment rather than a forgery passing quietly.
