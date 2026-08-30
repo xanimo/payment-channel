@@ -369,7 +369,7 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
        constrain either field. A non-final input or a future locktime is a
        transaction no node will mine until then, which is money that arrives
        whenever Alice chose rather than now. */
-    if (sequence != 0xffffffffu) { rc = PC_ERR_STATE; goto out; }
+    if (sequence != 0xffffffffu) { rc = PC_ERR_FINAL; goto out; }
 
     /* txids are displayed reversed */
     unsigned char disp[32];
@@ -394,10 +394,14 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
 
         /* IsStandardTx refuses the whole transaction for a single output under
            the hard limit, so one dusty change output makes the newest state
-           worthless and Bob has to fall back to an older one. This channel only
-           ever builds p2pkh outputs, so none of them are unspendable and the
-           exemption for those does not apply. */
-        if (value < PC_HARD_DUST_KOINU) { rc = PC_ERR_AMOUNT; goto out; }
+           worthless and Bob has to fall back to an older one.
+
+           This is deliberately stricter than the policy it mirrors. IsDust()
+           exempts unspendable outputs, and an honest Alice never builds one, but
+           what arrives on the socket is not bound by what she builds: a hostile
+           one can attach a zero-value OP_RETURN a node would accept and this
+           refuses. Refusing is the safe direction, so the difference stands. */
+        if (value < PC_HARD_DUST_KOINU) { rc = PC_ERR_DUST; goto out; }
         if (value < PC_SOFT_DUST_KOINU) soft_dust++;
 
         if (spklen == sizeof(want) && memcmp(spk, want, sizeof(want)) == 0)
@@ -406,15 +410,15 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     uint32_t locktime = (uint32_t)rd_u(&r, 4);
     if (r.bad) goto out;
     if (r.off != r.len) goto out;                 /* trailing bytes: not our tx */
-    if (locktime != 0) { rc = PC_ERR_STATE; goto out; }
+    if (locktime != 0) { rc = PC_ERR_FINAL; goto out; }
 
     /* The fee is capacity minus what the outputs spend, so an input that does
        not cover the outputs would be a transaction no node will relay. */
-    if (total > ch->capacity_koinu) { rc = PC_ERR_AMOUNT; goto out; }
+    if (total > ch->capacity_koinu) { rc = PC_ERR_CAPACITY; goto out; }
     if (to_bob < claimed_to_bob_koinu) { rc = PC_ERR_AMOUNT; goto out; }
     /* and what is left over has to be enough for a miner to take it */
     if (ch->capacity_koinu - total < pc_min_fee(blen, soft_dust)) {
-        rc = PC_ERR_AMOUNT; goto out;
+        rc = PC_ERR_FEE; goto out;
     }
 
     rc = verify_sigs(ch, buf, blen, sig_start, sig_end, ss, sslen);

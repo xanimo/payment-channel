@@ -1,0 +1,179 @@
+From cf629ac38b1fc786ab0a4b3da2c52578ad41b47c Mon Sep 17 00:00:00 2001
+From: bluezr <bluezr@dogecoin.com>
+Date: Fri, 28 Aug 2026 17:35:13 -0700
+Subject: [PATCH 5/7] include: declare six exported symbols the public header
+ omitted
+
+Each is already LIBDOGECOIN_API and present in the shipped archive, so the
+library exports them and no consumer can call them: the declaration is only in
+a header pack.sh does not ship.
+
+    dogecoin_malloc, dogecoin_realloc   dogecoin_calloc and dogecoin_free are
+                                        public, so a consumer can free what the
+                                        library allocated but not allocate the
+                                        same way
+    dogecoin_pubkey_get_hash160         referencing a pubkey by hash in a script
+    dogecoin_pubkey_get_hex             pubkey to hex
+    utils_reverse_hex                   display and internal byte order
+    utils_uint256_sethex                a hex txid to 32 bytes
+
+dogecoin_hash and dogecoin_dblhash are deliberately excluded. Both are declared
+LIBDOGECOIN_API static inline, which is a contradiction: static wins, no symbol
+is emitted, and nm confirms neither is in the archive. Declaring them would
+compile for a consumer and fail at link. Left alone rather than papered over.
+
+Also documents that the sizeout of pubkey_from_privatekey and
+getPubkeyFromPrivkey is in/out. It must be set to the buffer capacity first;
+such.c does, the header never said so, and a caller passing a zeroed variable
+gets a bare failure with nothing to explain it.
+
+test_consumer_surface_links calls all six and asserts what they produce,
+including that get_hex refuses a zero sizeout. Compiled against a staged
+install with only the five headers pack.sh ships, all six link. 104/104.
+---
+ include/dogecoin/libdogecoin.h | 19 +++++++++++
+ test/transaction_tests.c       | 59 ++++++++++++++++++++++++++++++++++
+ test/unittester.c              |  2 ++
+ 3 files changed, 80 insertions(+)
+
+diff --git a/include/dogecoin/libdogecoin.h b/include/dogecoin/libdogecoin.h
+index 272e925c..1aed4a33 100644
+--- a/include/dogecoin/libdogecoin.h
++++ b/include/dogecoin/libdogecoin.h
+@@ -232,6 +232,8 @@ dogecoin_bool addresses_from_pubkey(const dogecoin_chainparams* chain, const cha
+ int getAddressFromPubkey(const char pubkey_hex[PUBKEYHEXLEN], const dogecoin_bool is_testnet, char p2pkh_address[P2PKHLEN]);
+ 
+ /* generate the hex publickey from a given WIF private key */
++/* (sizeout) is in/out: set it to the capacity of (pubkey_hex) before calling.
++   Left at zero these return failure, since the hex conversion has no room. */
+ dogecoin_bool pubkey_from_privatekey(const dogecoin_chainparams* chain, const char privkey_wif[PRIVKEYWIFLEN], char pubkey_hex[PUBKEYHEXLEN], size_t* sizeout);
+ int getPubkeyFromPrivkey(const char privkey_wif[PRIVKEYWIFLEN], const dogecoin_bool is_testnet, char pubkey_hex[PUBKEYHEXLEN], size_t* sizeout);
+ 
+@@ -393,6 +395,11 @@ dogecoin_bool deriveBIP44ExtendedPublicKey(
+ /* utilities */
+ uint8_t* utils_hex_to_uint8(const char* str);
+ char* utils_uint8_to_hex(const uint8_t* bin, size_t l);
++/* reverse a hex string in place, (len) is the string length in characters;
++   converts between display and internal byte order for txids and hashes */
++void utils_reverse_hex(char* h, size_t len);
++/* parse a 64-character hex hash into 32 bytes, reversing to internal order */
++void utils_uint256_sethex(char* psz, uint8_t* out);
+ void utils_hex_to_bin(const char* str, unsigned char* out, size_t inLen, size_t* outLen);
+ void utils_bin_to_hex(const unsigned char* bin_in, size_t inlen, char* hex_out);
+ char* getpass(const char *prompt);
+@@ -670,6 +677,10 @@ uint64_t coins_to_koinu_str(char* coins);
+ --------------------------------------------------------------------------
+ */
+ char* dogecoin_char_vla(size_t size);
++/* allocate memory through the library's mapper; pair with dogecoin_free */
++void* dogecoin_malloc(size_t size);
++/* resize memory allocated through the library's mapper */
++void* dogecoin_realloc(void* ptr, size_t size);
+ /* allocate zero-initialized memory for count elements of size bytes each */
+ void* dogecoin_calloc(size_t count, size_t size);
+ /* allocate an unsigned char variable-length array */
+@@ -695,6 +706,14 @@ dogecoin_bool dogecoin_pubkey_is_valid(const dogecoin_pubkey* pubkey);
+ void dogecoin_pubkey_cleanse(dogecoin_pubkey* pubkey);
+ /* derive a public key from a private key */
+ void dogecoin_pubkey_from_key(const dogecoin_key* privkey, dogecoin_pubkey* pubkey_inout);
++
++/* hash160 of a public key, for building scripts that reference it by hash */
++void dogecoin_pubkey_get_hash160(const dogecoin_pubkey* pubkey, uint160_t hash160);
++
++/* hex form of a public key; (strsize) is in/out: set it to the capacity of
++   (str) before calling, it is updated to the length written */
++dogecoin_bool dogecoin_pubkey_get_hex(const dogecoin_pubkey* pubkey, char* str, size_t* strsize);
++
+ /* sign a 32-byte hash and return a 64-byte compact signature with recovery id (fixed compression) */
+ dogecoin_bool dogecoin_key_sign_hash_compact_recoverable_fcomp(const dogecoin_key* privkey, const uint256_t hash, unsigned char* sigout, size_t* outlen, int* recid);
+ /* recover a public key from a compact signature and recovery id */
+diff --git a/test/transaction_tests.c b/test/transaction_tests.c
+index 35f67ba5..e39f4966 100644
+--- a/test/transaction_tests.c
++++ b/test/transaction_tests.c
+@@ -1164,3 +1164,62 @@ void test_p2sh_address_from_script()
+     big[sizeof(big) - 1] = '\0';
+     u_assert_int_eq(get_p2sh_address_from_script(big, false, caddr, sizeof(caddr)), 0);
+ }
++
++/* Every symbol the public header declares must exist in the shipped archive.
++   dogecoin_hash and dogecoin_dblhash are LIBDOGECOIN_API static inline, which
++   is a contradiction: static wins, no symbol is emitted, and declaring them
++   would compile for a consumer and fail at link. They are excluded for that
++   reason; this pins the ones that are real. */
++void test_consumer_surface_links(void)
++{
++    /* memory: allocate and free through the library's mapper */
++    void *p = dogecoin_malloc(32);
++    u_assert_not_null(p);
++    memset(p, 0xAB, 32);
++    p = dogecoin_realloc(p, 64);
++    u_assert_not_null(p);
++    u_assert_int_eq(((unsigned char *)p)[0], 0xAB);
++    dogecoin_free(p);
++
++    /* pubkey helpers */
++    dogecoin_key key;
++    dogecoin_privkey_init(&key);
++    dogecoin_privkey_gen(&key);
++    dogecoin_pubkey pub;
++    dogecoin_pubkey_init(&pub);
++    dogecoin_pubkey_from_key(&key, &pub);
++
++    uint160_t h160;
++    dogecoin_pubkey_get_hash160(&pub, h160);
++    int nonzero = 0;
++    for (size_t i = 0; i < sizeof(uint160_t); i++) if (h160[i]) nonzero = 1;
++    u_assert_int_eq(nonzero, 1);
++
++    char pubhex[PUBKEYHEXLEN];
++    size_t hexlen = sizeof(pubhex);
++    u_assert_true(dogecoin_pubkey_get_hex(&pub, pubhex, &hexlen));
++    u_assert_int_eq((int)strlen(pubhex), DOGECOIN_ECKEY_COMPRESSED_LENGTH * 2);
++
++    /* sizeout left at zero must fail, which is why the header now says so */
++    char pubhex2[PUBKEYHEXLEN];
++    size_t zero = 0;
++    u_assert_true(dogecoin_pubkey_get_hex(&pub, pubhex2, &zero) == false);
++
++    /* hex helpers */
++    char txid[65] = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
++    char copy[65];
++    memcpy(copy, txid, sizeof(txid));
++    utils_reverse_hex(copy, 64);
++    u_assert_true(strcmp(copy, txid) != 0);
++    utils_reverse_hex(copy, 64);
++    u_assert_str_eq(copy, txid);
++
++    uint8_t out[32];
++    utils_uint256_sethex(txid, out);
++    /* sethex reverses, so the first byte is the last of the display form */
++    u_assert_int_eq(out[0], 0x20);
++    u_assert_int_eq(out[31], 0x01);
++
++    dogecoin_privkey_cleanse(&key);
++    dogecoin_pubkey_cleanse(&pub);
++}
+diff --git a/test/unittester.c b/test/unittester.c
+index 3e0617bf..7af65776 100644
+--- a/test/unittester.c
++++ b/test/unittester.c
+@@ -93,6 +93,7 @@ extern void test_tpm();
+ extern void test_psbt();
+ extern void test_transaction();
+ extern void test_p2sh_address_from_script();
++extern void test_consumer_surface_links();
+ extern void test_transaction_ts_contexts();
+ extern void test_transaction_ts_wrappers();
+ #if !defined(_WIN32)
+@@ -250,6 +251,7 @@ int main()
+     u_run_test(test_psbt);
+     u_run_test(test_transaction);
+     u_run_test(test_p2sh_address_from_script);
++    u_run_test(test_consumer_surface_links);
+     u_run_test(test_transaction_ts_contexts);
+ #ifndef USE_OPTEE
+     u_run_test(test_transaction_ts_wrappers);
+-- 
+2.34.1
+

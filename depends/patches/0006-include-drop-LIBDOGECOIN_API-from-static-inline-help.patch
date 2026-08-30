@@ -1,0 +1,195 @@
+From dc1714a9f6f534700c1c844313251aec87fc69b7 Mon Sep 17 00:00:00 2001
+From: bluezr <bluezr@dogecoin.com>
+Date: Fri, 28 Aug 2026 18:23:04 -0700
+Subject: [PATCH 6/7] include: drop LIBDOGECOIN_API from static inline helpers
+
+LIBDOGECOIN_API marks what is meant to be callable from outside the library.
+On these 21 that intent cannot be met: static gives them internal linkage, so
+no symbol is emitted for anything to call. Twelve are the byte-order helpers
+in common.h, nine the hash helpers in hash.h.
+
+Acting on the annotation produces a library that builds and installs cleanly
+and a consumer that fails to link. Declaring dogecoin_dblhash in libdogecoin.h
+on an otherwise unmodified tree, then compiling against a staged install:
+
+    compile only (-c)            rc=0   no warning
+    link against libdogecoin.a   rc=1   undefined reference to `dogecoin_dblhash'
+
+In-tree callers never see it, because they get the definition from the header.
+
+Removes the annotation rather than making them real exports: nothing outside
+the library needs them, and a released public API cannot be withdrawn.
+
+No symbol table changes. The shared object exports the same 1182 names before
+and after, byte for byte. That count is every global symbol rather than the 556
+annotated ones, because the build does not pass -fvisibility=hidden, so on GCC
+the attribute expands to visibility("default"), which is already the default.
+It does real work only on Windows, as __declspec(dllexport). 103/103.
+---
+ include/dogecoin/common.h | 24 ++++++++++++------------
+ include/dogecoin/hash.h   | 18 +++++++++---------
+ 2 files changed, 21 insertions(+), 21 deletions(-)
+
+diff --git a/include/dogecoin/common.h b/include/dogecoin/common.h
+index 28ad2c5e..1db5bbe5 100644
+--- a/include/dogecoin/common.h
++++ b/include/dogecoin/common.h
+@@ -21,79 +21,79 @@ LIBDOGECOIN_BEGIN_DECL
+ #include <dogecoin/portable_endian.h>
+ #include <dogecoin/utils.h>
+ 
+-LIBDOGECOIN_API static inline uint16_t read_le16(const unsigned char* ptr)
++static inline uint16_t read_le16(const unsigned char* ptr)
+ {
+     uint16_t x;
+     memcpy_safe((char*)&x, ptr, 2);
+     return le16toh(x);
+ }
+ 
+-LIBDOGECOIN_API static inline uint32_t read_le32(const unsigned char* ptr)
++static inline uint32_t read_le32(const unsigned char* ptr)
+ {
+     uint32_t x;
+     memcpy_safe((char*)&x, ptr, 4);
+     return le32toh(x);
+ }
+ 
+-LIBDOGECOIN_API static inline uint64_t read_le64(const unsigned char* ptr)
++static inline uint64_t read_le64(const unsigned char* ptr)
+ {
+     uint64_t x;
+     memcpy_safe((char*)&x, ptr, 8);
+     return le64toh(x);
+ }
+ 
+-LIBDOGECOIN_API static inline void write_le8(unsigned char* ptr, uint8_t x)
++static inline void write_le8(unsigned char* ptr, uint8_t x)
+ {
+     uint8_t v = htole8(x);
+     memcpy_safe(ptr, (char*)&v, 1);
+ }
+ 
+-LIBDOGECOIN_API static inline void write_le16(unsigned char* ptr, uint16_t x)
++static inline void write_le16(unsigned char* ptr, uint16_t x)
+ {
+     uint16_t v = htole16(x);
+     memcpy_safe(ptr, (char*)&v, 2);
+ }
+ 
+-LIBDOGECOIN_API static inline void write_le32(unsigned char* ptr, uint32_t x)
++static inline void write_le32(unsigned char* ptr, uint32_t x)
+ {
+     uint32_t v = htole32(x);
+     memcpy_safe(ptr, (char*)&v, 4);
+ }
+ 
+-LIBDOGECOIN_API static inline void write_le64(unsigned char* ptr, uint64_t x)
++static inline void write_le64(unsigned char* ptr, uint64_t x)
+ {
+     uint64_t v = htole64(x);
+     memcpy_safe(ptr, (char*)&v, 8);
+ }
+ 
+-LIBDOGECOIN_API static inline uint32_t read_be32(const unsigned char* ptr)
++static inline uint32_t read_be32(const unsigned char* ptr)
+ {
+     uint32_t x;
+     memcpy_safe((char*)&x, ptr, 4);
+     return be32toh(x);
+ }
+ 
+-LIBDOGECOIN_API static inline uint64_t read_be64(const unsigned char* ptr)
++static inline uint64_t read_be64(const unsigned char* ptr)
+ {
+     uint64_t x;
+     memcpy_safe((char*)&x, ptr, 8);
+     return be64toh(x);
+ }
+ 
+-LIBDOGECOIN_API static inline void write_be32(unsigned char* ptr, uint32_t x)
++static inline void write_be32(unsigned char* ptr, uint32_t x)
+ {
+     uint32_t v = htobe32(x);
+     memcpy_safe(ptr, (char*)&v, 4);
+ }
+ 
+-LIBDOGECOIN_API static inline void write_be64(unsigned char* ptr, uint64_t x)
++static inline void write_be64(unsigned char* ptr, uint64_t x)
+ {
+     uint64_t v = htobe64(x);
+     memcpy_safe(ptr, (char*)&v, 8);
+ }
+ 
+ /** Return the smallest number n such that (x >> n) == 0 (or 64 if the highest bit in x is set. */
+-LIBDOGECOIN_API static inline uint64_t count_bits(uint64_t x)
++static inline uint64_t count_bits(uint64_t x)
+ {
+ #if HAVE_BUILTIN_CLZL
+     if (sizeof(unsigned long) >= sizeof(uint64_t)) {
+diff --git a/include/dogecoin/hash.h b/include/dogecoin/hash.h
+index b3943df1..afb835fe 100644
+--- a/include/dogecoin/hash.h
++++ b/include/dogecoin/hash.h
+@@ -41,50 +41,50 @@
+ 
+ LIBDOGECOIN_BEGIN_DECL
+ 
+-LIBDOGECOIN_API static inline dogecoin_bool dogecoin_hash_is_empty(uint256_t hash)
++static inline dogecoin_bool dogecoin_hash_is_empty(uint256_t hash)
+ {
+     return hash[0] == 0 && !memcmp(hash, hash + 1, 19);
+ }
+ 
+-LIBDOGECOIN_API static inline void dogecoin_hash_clear(uint256_t hash)
++static inline void dogecoin_hash_clear(uint256_t hash)
+ {
+     dogecoin_mem_zero(hash, DOGECOIN_HASH_LENGTH);
+ }
+ 
+-LIBDOGECOIN_API static inline dogecoin_bool dogecoin_hash_equal(uint256_t hash_a, uint256_t hash_b)
++static inline dogecoin_bool dogecoin_hash_equal(uint256_t hash_a, uint256_t hash_b)
+ {
+     return (memcmp(hash_a, hash_b, DOGECOIN_HASH_LENGTH) == 0);
+ }
+ 
+-LIBDOGECOIN_API static inline void dogecoin_hash_set(uint256_t hash_dest, const uint256_t hash_src)
++static inline void dogecoin_hash_set(uint256_t hash_dest, const uint256_t hash_src)
+ {
+     memcpy_safe(hash_dest, hash_src, DOGECOIN_HASH_LENGTH);
+ }
+ 
+-LIBDOGECOIN_API static inline void dogecoin_hash(const unsigned char* datain, size_t length, uint256_t hashout)
++static inline void dogecoin_hash(const unsigned char* datain, size_t length, uint256_t hashout)
+ {
+     sha256_raw(datain, length, hashout);
+     sha256_raw(hashout, SHA256_DIGEST_LENGTH, hashout); // dogecoin double sha256 hash
+ }
+ 
+-LIBDOGECOIN_API static inline dogecoin_bool dogecoin_dblhash(const unsigned char* datain, size_t length, uint256_t hashout)
++static inline dogecoin_bool dogecoin_dblhash(const unsigned char* datain, size_t length, uint256_t hashout)
+ {
+     sha256_raw(datain, length, hashout);
+     sha256_raw(hashout, SHA256_DIGEST_LENGTH, hashout); // dogecoin double sha256 hash
+     return true;
+ }
+ 
+-LIBDOGECOIN_API static inline void dogecoin_hash_2_inputs(const uint8_t* left, const uint8_t* right, uint256_t hashout)
++static inline void dogecoin_hash_2_inputs(const uint8_t* left, const uint8_t* right, uint256_t hashout)
+ {
+     sha256d_2_input(left, right, hashout);
+ }
+ 
+-LIBDOGECOIN_API static inline void dogecoin_hash_sngl_sha256(const unsigned char* datain, size_t length, uint256_t hashout)
++static inline void dogecoin_hash_sngl_sha256(const unsigned char* datain, size_t length, uint256_t hashout)
+ {
+     sha256_raw(datain, length, hashout); // single sha256 hash
+ }
+ 
+-LIBDOGECOIN_API static inline void dogecoin_get_auxpow_hash(const uint32_t version, uint256_t hashout)
++static inline void dogecoin_get_auxpow_hash(const uint32_t version, uint256_t hashout)
+ {
+     scrypt_1024_1_1_256(BEGIN(version), BEGIN(hashout));
+ }
+-- 
+2.34.1
+

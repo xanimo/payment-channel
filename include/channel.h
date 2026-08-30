@@ -60,8 +60,17 @@ typedef enum {
     PC_ERR_SCRIPT,       /* the redeem script would not build or hash         */
     PC_ERR_PSBT,         /* a PSBT would not parse, sign, or finalize         */
     PC_ERR_STATE,        /* the channel is not in a state that allows this    */
-    PC_ERR_AMOUNT        /* the payment does not respect the channel balance  */
+    PC_ERR_AMOUNT,       /* it pays Bob less than it claims to                */
+    PC_ERR_CAPACITY,     /* its outputs spend more than the channel holds     */
+    PC_ERR_DUST,         /* an output is under the hard dust limit            */
+    PC_ERR_FEE,          /* what is left over is below the miner's floor      */
+    PC_ERR_FINAL         /* a non-zero locktime or a non-final input          */
 } pc_result;
+
+/* Four of these are nothing to do with the amount Bob is paid, and a merchant
+ * refusing a customer over a fee a fraction of a koinu short, while saying the
+ * payment pays less than it claims, is its own kind of broken. They are
+ * separate so the reject can say which. */
 
 const char *pc_strerror(pc_result r);
 
@@ -217,6 +226,12 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
  * because clearing only the first gets a transaction that propagates and is
  * never mined. */
 uint64_t pc_min_fee(size_t txbytes, size_t soft_dust_outputs);
+
+/* Roughly what a payment on this channel serializes to: one input carrying two
+ * signatures and the redeem script, and two p2pkh outputs. Alice cannot know
+ * the real size before Bob countersigns, so this is what she sizes her fee
+ * against to catch one that could never work. */
+#define PC_TYPICAL_TX_BYTES 400
 
 /* The legacy SIGHASH_ALL digest for the single input of (raw_tx_hex), with
  * (script_code) standing in where the scriptSig sits. Computed here because

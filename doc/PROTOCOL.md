@@ -100,6 +100,14 @@ negotiation: this is a prototype and a message bob will not take means something
 is broken or hostile. anything worse than that, a message that does not parse or
 a peer that stops talking, closes the connection and logs why.
 
+## timing
+
+a peer has thirty seconds to finish a message. that is a protocol constraint and
+not only a socket setting: it is the longest a session may sit idle, including a
+merchant waiting on a customer who is deciding. the deadline covers a whole line
+rather than one read, so a peer sending a byte at a time cannot hold a
+connection open by staying under it.
+
 ## refund
 
 if bob stops responding, alice waits for the locktime and spends the funding
