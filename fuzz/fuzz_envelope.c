@@ -57,9 +57,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
            round trip the wire actually performs. A field that decodes but will
            not encode is one that gets a peer dropped mid-conversation, which is
            how the reject path died twice. */
-        char *out = (char *)malloc(PC_MAX_PSBT_HEX * 2 + 1024);
+        size_t cap = PC_MAX_PSBT_HEX * 2 + 1024;
+        char *out = (char *)malloc(cap);
         if (out) {
-            pc_envelope_encode(&env, out, PC_MAX_PSBT_HEX * 2 + 1024);
+            /* Checked, not called. Ignoring this makes the round trip a code
+               path rather than a property, and PC_ERR_ARG here is exactly the
+               failure being hunted: a field that decoded and will not encode is
+               a peer dropped mid-conversation. */
+            if (pc_envelope_encode(&env, out, cap) != PC_OK) abort();
             free(out);
         }
     }
