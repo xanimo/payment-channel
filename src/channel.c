@@ -150,6 +150,27 @@ pc_result pc_channel_init(pc_channel *ch,
         return PC_ERR_ARG;   /* compressed pubkeys only */
     if (locktime == 0) return PC_ERR_ARG;
 
+    /* Sixty-six hex characters is not a public key. Bob reaches here with a key
+       he parsed out of a redeem script Alice wrote, and pc_redeem_parse() checks
+       the shape of that script rather than what is in its pushes, so this is
+       where an off-curve blob has to stop. Alice already checks the key Bob
+       announces; without this the check only runs in one direction. */
+    for (int i = 0; i < 2; i++) {
+        const char *hex = i ? bob_pubkey_hex : alice_pubkey_hex;
+        dogecoin_pubkey pk;
+        dogecoin_pubkey_init(&pk);
+        pk.compressed = true;
+        size_t n = 0;
+        utils_hex_to_bin(hex, pk.pubkey, 66, &n);
+        if (n != 33 || !dogecoin_pubkey_is_valid(&pk)) return PC_ERR_KEY;
+    }
+
+    /* A channel is between two parties. One key in both slots builds a script
+       whose 2-of-2 is one signer twice, which no payment on this channel can
+       ever satisfy from both sides, so accepting it only buys Bob a session
+       that cannot pay him. */
+    if (strcmp(alice_pubkey_hex, bob_pubkey_hex) == 0) return PC_ERR_ARG;
+
     memset(ch, 0, sizeof(*ch));
     snprintf(ch->alice_pubkey_hex, sizeof(ch->alice_pubkey_hex), "%s", alice_pubkey_hex);
     snprintf(ch->bob_pubkey_hex,   sizeof(ch->bob_pubkey_hex),   "%s", bob_pubkey_hex);

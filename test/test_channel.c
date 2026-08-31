@@ -528,9 +528,15 @@ int main(void)
                                          299899, 100, &cap) == PC_OK,
                   "one block of slack over the line is enough");
 
-            /* an opening for someone else's channel is refused */
+            /* an opening for someone else's channel is refused. carol is a
+               real third key rather than alice's used twice, because a channel
+               between one party is now refused at construction. */
+            char cwif[PRIVKEYWIFLEN], caddr[P2PKHLEN], cpub[PUBKEYHEXLEN];
+            size_t cn = sizeof(cpub);
+            generatePrivPubKeypair(cwif, caddr, false);
+            getPubkeyFromPrivkey(cwif, false, cpub, &cn);
             pc_channel wrongbob;
-            CHECK_OK(pc_channel_init(&wrongbob, alice_pub, alice_pub, 300000, 0), "wrong bob");
+            CHECK_OK(pc_channel_init(&wrongbob, alice_pub, cpub, 300000, 0), "wrong bob");
             CHECK(pc_channel_open_accept(&wrongbob, open_psbt, funding_hex,
                                          1000, 100, &cap) != PC_OK,
                   "an opening naming someone else is refused");
@@ -646,6 +652,41 @@ int main(void)
         uint64_t back = 0;
         CHECK_OK(pc_doge_to_koinu(buf, &back), "round trip parses");
         CHECK(back == 123456789ULL, "round trip is exact");
+    }
+
+    /* ── what Bob will accept out of a redeem script ─────────── */
+    {
+        /* pc_redeem_parse() checks the shape of the script, not what is inside
+           its pushes, so the constructor is where a non-key has to stop. Bob
+           reaches it with whatever Alice wrote. */
+        const char *offcurve =
+            "02ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        pc_channel bad;
+        CHECK(pc_channel_init(&bad, offcurve, bob_pub, 300000, 0) == PC_ERR_KEY,
+              "an off-curve alice key is refused");
+        CHECK(pc_channel_init(&bad, alice_pub, offcurve, 300000, 0) == PC_ERR_KEY,
+              "an off-curve bob key is refused");
+        CHECK(pc_channel_init(&bad, alice_pub, alice_pub, 300000, 0) == PC_ERR_ARG,
+              "a channel between one party is refused");
+        CHECK_OK(pc_channel_init(&bad, alice_pub, bob_pub, 300000, 0),
+                 "and two real distinct keys still build");
+
+        /* The locktime push is not checked for minimal encoding, so a script
+           can parse to a locktime it does not canonically encode. What refuses
+           it is Bob rebuilding the script and comparing, which is load-bearing
+           rather than belt-and-braces: pin that the rebuild differs. */
+        char padded[PC_MAX_SCRIPT_HEX];
+        snprintf(padded, sizeof(padded), "6304e0930400b17521%sac675221%s21%s52ae68",
+                 alice_pub, alice_pub, bob_pub);
+        char pa2[PUBKEYHEXLEN], pb2[PUBKEYHEXLEN];
+        uint32_t lt2 = 0;
+        CHECK_OK(pc_redeem_parse(padded, pa2, pb2, &lt2),
+                 "a non-minimal locktime push still parses");
+        CHECK(lt2 == 300000, "and yields the same locktime, got %u", lt2);
+        pc_channel rebuilt;
+        CHECK_OK(pc_channel_init(&rebuilt, pa2, pb2, lt2, 0), "rebuilds");
+        CHECK(strcmp(padded, rebuilt.redeem_script_hex) != 0,
+              "the rebuild differs, which is what refuses it at open");
     }
 
     /* ── envelope ────────────────────────────────────────────── */

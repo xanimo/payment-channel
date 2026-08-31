@@ -22,6 +22,27 @@ what it discovers to the scratch directory and leaves the seeds alone:
 passing the seed directory on its own makes libFuzzer write every input it likes
 back into it, which is how a four file corpus becomes two hundred.
 
+## ASLR has to be off too
+
+with `kernel.randomize_va_space=2`, address sanitizer's shadow mapping
+occasionally collides with a randomized mapping and the process dies **before
+libFuzzer prints its banner**. it presents as an intermittent segfault with an
+empty log, no crash artefact, and no ASan report, at roughly one run in three,
+on every harness here — including ones that have logged tens of millions of
+executions. it is not a finding and it is not harness-specific.
+
+    ASAN_OPTIONS=detect_leaks=0 setarch -R ./fuzz/fuzz_opening /tmp/work \
+        fuzz/corpus/opening -max_total_time=300
+
+`setarch -R` disables ASLR for that process and makes the mapping
+deterministic: 24 consecutive clean startups across all three harnesses, where
+without it 3 of 6 died.
+
+**diagnosing this class:** redirecting stdout to a file block-buffers it, so a
+crash loses the buffer and the log looks empty either way. run under
+`stdbuf -o0` before concluding anything about *where* it died — if the banner
+is missing entirely, the crash is before your code ever ran.
+
 ## leak detection has to be off
 
 LeakSanitizer dies at exit on this setup, after the target has run, which shows
@@ -76,6 +97,11 @@ own reader will not accept. regenerate both together:
 paste the constants into `fuzz_txcheck.c` and the last line into
 `fuzz/corpus/txcheck/closing-tx.hex`.
 
+`fuzz_opening` drives the two parsers Bob meets at open: `pc_redeem_parse` on a
+hand-rolled walk of a length prefix and three 33-byte pushes, and
+`pc_channel_open_accept` on a PSBT straight off the wire. the input's first byte
+splits it between the two so one corpus feeds both.
+
 ## what they cover
 
 `fuzz_envelope` decodes the input as a line, and re-encodes anything that
@@ -92,6 +118,7 @@ transaction rather than the channel.
 
     fuzz_envelope   26,107,081 runs   no crashes
     fuzz_txcheck     6,910,275 runs   no crashes
+    fuzz_opening     6,279,289 runs   no crashes
 
 the txcheck number is against the generated seed, so it is the first one that
 reached verify_sigs at all. the abort() on the envelope round trip never fired.

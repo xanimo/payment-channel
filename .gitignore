@@ -8,3 +8,4 @@ fuzz/fuzz_envelope
 fuzz/fuzz_txcheck
 fuzz/mkseed
 test/attack
+fuzz/fuzz_opening
