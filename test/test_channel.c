@@ -41,6 +41,107 @@ static int hex_bytes(const char *hex, unsigned char **out, size_t *outlen)
     return 1;
 }
 
+/* Builds a two-output payment with arbitrary values and signs it properly with
+   both keys, which is what Alice can do for any numbers she likes. The library
+   will not build one of these, so the adversary has to be written by hand. */
+static size_t put_u64le(unsigned char *o, uint64_t v, size_t n)
+{
+    for (size_t i = 0; i < n; i++) o[i] = (unsigned char)((v >> (8 * i)) & 0xff);
+    return n;
+}
+
+static size_t adversary_bytes(const pc_channel *ch, const unsigned char *bob160,
+                              const unsigned char *alice160,
+                              uint64_t v_bob, uint64_t v_chg,
+                              const unsigned char *ss, size_t sslen,
+                              unsigned char *o)
+{
+    size_t n = 0;
+    n += put_u64le(o + n, 1, 4);
+    o[n++] = 0x01;
+    unsigned char txid[32];
+    size_t tn = 0;
+    utils_hex_to_bin(ch->funding_txid, txid, 64, &tn);
+    for (int i = 0; i < 32; i++) o[n + i] = txid[31 - i];
+    n += 32;
+    n += put_u64le(o + n, (uint64_t)ch->funding_vout, 4);
+    if (ss) {
+        if (sslen < 0xfd) o[n++] = (unsigned char)sslen;
+        else { o[n++] = 0xfd; n += put_u64le(o + n, sslen, 2); }
+        memcpy(o + n, ss, sslen); n += sslen;
+    } else o[n++] = 0x00;
+    n += put_u64le(o + n, 0xffffffffu, 4);
+    o[n++] = 0x02;
+    const unsigned char *h[2] = { bob160, alice160 };
+    uint64_t v[2] = { v_bob, v_chg };
+    for (int k = 0; k < 2; k++) {
+        n += put_u64le(o + n, v[k], 8);
+        o[n++] = 25;
+        o[n++] = 0x76; o[n++] = 0xa9; o[n++] = 0x14;
+        memcpy(o + n, h[k], 20); n += 20;
+        o[n++] = 0x88; o[n++] = 0xac;
+    }
+    n += put_u64le(o + n, 0, 4);
+    return n;
+}
+
+static char *build_adversary(const pc_channel *ch, const char *alice_wif,
+                             const char *bob_wif, const char *bob_addr,
+                             const char *alice_addr,
+                             uint64_t v_bob, uint64_t v_chg)
+{
+    unsigned char bh[64], ah[64];
+    if (dogecoin_base58_decode_check(bob_addr, bh, sizeof(bh)) != 25) return NULL;
+    if (dogecoin_base58_decode_check(alice_addr, ah, sizeof(ah)) != 25) return NULL;
+
+    unsigned char redeem[520];
+    size_t rlen = 0;
+    utils_hex_to_bin(ch->redeem_script_hex, redeem,
+                     strlen(ch->redeem_script_hex), &rlen);
+
+    unsigned char buf[2048];
+    size_t un = adversary_bytes(ch, bh + 1, ah + 1, v_bob, v_chg, NULL, 0, buf);
+    char *uhex = (char *)malloc(un * 2 + 1);
+    if (!uhex) return NULL;
+    utils_bin_to_hex(buf, un, uhex);
+
+    unsigned char hash[32];
+    if (pc_tx_sighash(uhex, redeem, rlen, hash) != PC_OK) { free(uhex); return NULL; }
+    free(uhex);
+
+    unsigned char sig[2][80];
+    size_t sl[2] = { sizeof(sig[0]), sizeof(sig[1]) };
+    const char *wifs[2] = { alice_wif, bob_wif };
+    for (int k = 0; k < 2; k++) {
+        dogecoin_key key;
+        dogecoin_privkey_init(&key);
+        if (!dogecoin_privkey_decode_wif((char *)wifs[k],
+                                         pc_chainparams(ch->chain), &key)) return NULL;
+        int ok = dogecoin_ecc_sign(key.privkey, hash, sig[k], &sl[k]);
+        dogecoin_privkey_cleanse(&key);
+        if (!ok) return NULL;
+        sig[k][sl[k]++] = 0x01;
+    }
+
+    unsigned char ss[1024];
+    size_t sn = 0;
+    ss[sn++] = 0x00;
+    for (int k = 0; k < 2; k++) {
+        ss[sn++] = (unsigned char)sl[k];
+        memcpy(ss + sn, sig[k], sl[k]); sn += sl[k];
+    }
+    ss[sn++] = 0x00;
+    if (rlen < 76) ss[sn++] = (unsigned char)rlen;
+    else { ss[sn++] = 0x4c; ss[sn++] = (unsigned char)rlen; }
+    memcpy(ss + sn, redeem, rlen); sn += rlen;
+
+    size_t fn = adversary_bytes(ch, bh + 1, ah + 1, v_bob, v_chg, ss, sn, buf);
+    char *hex = (char *)malloc(fn * 2 + 1);
+    if (!hex) return NULL;
+    utils_bin_to_hex(buf, fn, hex);
+    return hex;
+}
+
 #define CHECK_OK(rc, what) do {                                 \
     pc_result _r = (rc);                                        \
     checks++;                                                   \
@@ -277,6 +378,38 @@ int main(void)
                 CHECK(pc_tx_verify_payment(&ch, sq, 2000000000ULL) == PC_ERR_FINAL,
                       "a non-final sequence is refused");
                 free(sq);
+            }
+            {   /* An honestly signed payment whose output values wrap the
+                   64-bit accumulator. Nothing bounds a single output before it
+                   is added, and the capacity check happens after the loop, so
+                   total comes back down to something that passes while bob's
+                   output claims more than the money supply. Every check runs.
+                   None of them constrains it. */
+                uint64_t fee_needed = pc_min_fee(400, 0);
+                char *ovf = build_adversary(&ch, alice_wif, bob_wif,
+                                            bob_addr, alice_addr,
+                                            0xFFFFFFFFFFFFFFFFULL,
+                                            ch.capacity_koinu + 1 - fee_needed);
+                CHECK(ovf != NULL, "adversarial payment built");
+                if (ovf) {
+                    CHECK(pc_tx_verify_payment(&ch, ovf, 1000000000ULL)
+                              == PC_ERR_CAPACITY,
+                          "an output that wraps the total is refused");
+                    free(ovf);
+                }
+                /* and the honest shape of the same builder still passes, so the
+                   check above is about the values and not about the builder */
+                char *fine = build_adversary(&ch, alice_wif, bob_wif,
+                                             bob_addr, alice_addr,
+                                             2000000000ULL,
+                                             ch.capacity_koinu - 2000000000ULL
+                                                 - 100000000ULL);
+                CHECK(fine != NULL, "honest payment built the same way");
+                if (fine) {
+                    CHECK_OK(pc_tx_verify_payment(&ch, fine, 2000000000ULL),
+                             "the same builder's honest payment is accepted");
+                    free(fine);
+                }
             }
             {   /* what is left over is the fee, and a miner has a floor that
                    is ten times the one a relay has. computed here from the

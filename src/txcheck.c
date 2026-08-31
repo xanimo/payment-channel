@@ -106,16 +106,25 @@ uint64_t pc_min_fee(size_t txbytes, size_t soft_dust_outputs)
     return relay > block ? relay : block;
 }
 
+/* The 0xff case is unreachable from here, since every caller passes a script of
+   at most 520 bytes, but leaving it out made a length at or above 2^32 encode
+   as a truncated 0xfe rather than refuse. Silently wrong is the wrong direction
+   for something feeding a consensus digest. */
 static size_t put_varint(unsigned char *out, uint64_t v)
 {
     if (v < 0xfd)   { out[0] = (unsigned char)v; return 1; }
     if (v <= 0xffff) {
         out[0] = 0xfd; out[1] = v & 0xff; out[2] = (v >> 8) & 0xff; return 3;
     }
-    out[0] = 0xfe;
-    out[1] = v & 0xff;        out[2] = (v >> 8) & 0xff;
-    out[3] = (v >> 16) & 0xff; out[4] = (v >> 24) & 0xff;
-    return 5;
+    if (v <= 0xffffffffULL) {
+        out[0] = 0xfe;
+        out[1] = v & 0xff;         out[2] = (v >> 8) & 0xff;
+        out[3] = (v >> 16) & 0xff; out[4] = (v >> 24) & 0xff;
+        return 5;
+    }
+    out[0] = 0xff;
+    for (int i = 0; i < 8; i++) out[1 + i] = (unsigned char)((v >> (8 * i)) & 0xff);
+    return 9;
 }
 
 /* Read one plain data push, refusing anything else. The scriptSig this channel
@@ -264,6 +273,11 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
     utils_hex_to_bin(raw_tx_hex, buf, hl, &blen);
     if (blen != hl / 2) { free(buf); return PC_ERR_ARG; }
 
+    /* held until the walk finishes, so a refusal leaves the caller's outputs
+       alone rather than filled in from a call that failed */
+    int found_vout = 0;
+    uint64_t found_value = 0;
+
     /* txid over the whole serialization, in display order */
     dogecoin_tx *tx = dogecoin_tx_new();
     pc_result rc = PC_ERR_PSBT;
@@ -299,15 +313,22 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
             if (r.bad) { rc = PC_ERR_PSBT; goto out; }
             if (spklen == sizeof(want) && memcmp(spk, want, sizeof(want)) == 0) {
                 /* two outputs paying the channel means the capacity is not a
-                   fact about the transaction, so refuse rather than pick */
+                   fact about the transaction, so refuse rather than pick.
+                   Held locally until the walk finishes: writing through on the
+                   first match and then refusing on the second leaves the caller
+                   with values from a call that failed. */
                 if (rc == PC_OK) { rc = PC_ERR_AMOUNT; goto out; }
-                if (vout_out)  *vout_out  = (int)i;
-                if (value_out) *value_out = value;
+                found_vout  = (int)i;
+                found_value = value;
                 rc = PC_OK;
             }
         }
     }
 out:
+    if (rc == PC_OK) {
+        if (vout_out)  *vout_out  = found_vout;
+        if (value_out) *value_out = found_value;
+    }
     dogecoin_tx_free(tx);
     free(buf);
     return rc;
@@ -390,6 +411,15 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
         size_t spklen = 0;
         rd_script(&r, &spk, &spklen);
         if (r.bad) goto out;
+
+        /* Bound the output before adding it, not the sum afterwards. value is a
+           full 64-bit read off the wire and nout runs to 16, so an honestly
+           signed payment carrying one output of 0xFFFFFFFFFFFFFFFF and a second
+           tuned to suit wraps total back under the capacity while to_bob stays
+           enormous: every check below then passes and Bob ships against a
+           transaction no node will accept. Per output this is also the stronger
+           statement, since nothing that went in can come out larger. */
+        if (value > ch->capacity_koinu) { rc = PC_ERR_CAPACITY; goto out; }
         total += value;
 
         /* IsStandardTx refuses the whole transaction for a single output under
