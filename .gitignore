@@ -7,3 +7,4 @@ test/adversary
 fuzz/fuzz_envelope
 fuzz/fuzz_txcheck
 fuzz/mkseed
+test/attack

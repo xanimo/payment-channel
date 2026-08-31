@@ -64,7 +64,9 @@ typedef enum {
     PC_ERR_CAPACITY,     /* its outputs spend more than the channel holds     */
     PC_ERR_DUST,         /* an output is under the hard dust limit            */
     PC_ERR_FEE,          /* what is left over is below the miner's floor      */
-    PC_ERR_FINAL         /* a non-zero locktime or a non-final input          */
+    PC_ERR_FINAL,        /* a non-zero locktime or a non-final input          */
+    PC_ERR_VERSION,      /* the transaction version is outside 1..2            */
+    PC_ERR_NONSTANDARD   /* an output script is not a type a node will relay   */
 } pc_result;
 
 /* Four of these are nothing to do with the amount Bob is paid, and a merchant
@@ -186,9 +188,17 @@ pc_result pc_channel_open_create(const pc_channel *ch, const char *funding_tx_he
  * expires while Bob is holding a payment is one Alice can refund out from under
  * him. On success the channel is funded and (capacity_out) is what it is worth.
  *
- * Bob cannot read the funding transaction back out of the PSBT: no published
- * accessor reports an input's previous transaction, so it travels beside it and
- * is checked against the outpoint the PSBT actually spends. */
+ * The funding transaction travels beside the PSBT rather than inside it because
+ * no published accessor reports a PSBT input's previous transaction, or its
+ * outpoint at all. So this does not, and cannot, check that the PSBT spends the
+ * output it derived: the PSBT is checked only for the redeem script and for
+ * carrying no signatures and no outputs yet.
+ *
+ * What binds the channel to that outpoint is the payment rather than the
+ * opening. pc_tx_verify_payment() requires the assembled transaction to spend
+ * (funding_txid, funding_vout) exactly, so an opening that named a different
+ * outpoint buys Alice nothing: she still has to produce a payment spending the
+ * one Bob recorded. */
 pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
                                  const char *funding_tx_hex,
                                  uint32_t chain_height, uint32_t min_slack,
@@ -213,6 +223,13 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
 pc_result pc_tx_verify_payment(const pc_channel *ch,
                                const char *raw_tx_hex,
                                uint64_t claimed_to_bob_koinu);
+
+/* MAX_MONEY from src/amount.h: 10,000,000,000 coins. Every value that crosses
+ * this API is held to it, which is what makes the per-output bound in
+ * pc_tx_verify_payment() mean something: sixteen outputs of at most MAX_MONEY
+ * sum to 1.6e19, still inside a uint64, so the total cannot wrap however the
+ * capacity was arrived at. */
+#define PC_MAX_MONEY_KOINU 1000000000000000000ULL
 
 /* Dogecoin's dust limits, from src/policy/policy.h. An output under the hard
  * limit makes the whole transaction non-standard; one under the soft limit adds

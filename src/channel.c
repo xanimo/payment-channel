@@ -52,6 +52,8 @@ const char *pc_strerror(pc_result r)
     case PC_ERR_DUST:    return "an output is under the dust limit";
     case PC_ERR_FEE:     return "leaves too little fee to be mined";
     case PC_ERR_FINAL:   return "not final and cannot be mined yet";
+    case PC_ERR_VERSION: return "version is not a standard one";
+    case PC_ERR_NONSTANDARD: return "an output script is not standard";
     }
     return "unknown";
 }
@@ -116,6 +118,9 @@ pc_result pc_doge_to_koinu(const char *doge, uint64_t *koinu_out)
     uint64_t v = whole * 100000000ULL;
     if (v > UINT64_MAX - frac) return PC_ERR_ARG;
     *koinu_out = v + frac;
+    /* nothing above MAX_MONEY is an amount. bounding it here is also what
+       keeps every running total downstream inside a uint64. */
+    if (*koinu_out > PC_MAX_MONEY_KOINU) return PC_ERR_AMOUNT;
     return PC_OK;
 }
 
@@ -196,6 +201,9 @@ pc_result pc_channel_set_funding(pc_channel *ch, const char *txid_hex,
                                  int vout, uint64_t capacity_koinu)
 {
     if (!ch || !txid_hex || vout < 0 || capacity_koinu == 0) return PC_ERR_ARG;
+    /* a capacity above what money exists is not a channel, and leaving it
+       unbounded is what would let the per-output bound stop bounding */
+    if (capacity_koinu > PC_MAX_MONEY_KOINU) return PC_ERR_AMOUNT;
     if (strlen(txid_hex) != 64) return PC_ERR_ARG;
     if (!ch->p2sh_address[0]) return PC_ERR_STATE;
 

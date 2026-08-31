@@ -145,7 +145,10 @@ static int invoice_due(const session *s, const char **prices, int nprices,
     if (s->order >= nprices) return 0;
     uint64_t amount = 0;
     if (pc_doge_to_koinu(prices[s->order], &amount) != PC_OK) return 0;
-    if (s->owed + amount > s->ch.capacity_koinu) return 0;
+    /* subtraction, like every other amount guard here. bounded inputs make the
+       addition safe today; the shape is the point. */
+    if (amount > s->ch.capacity_koinu || s->owed > s->ch.capacity_koinu - amount)
+        return 0;
     if (total_out) *total_out = s->owed + amount;
     return 1;
 }

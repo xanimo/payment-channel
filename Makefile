@@ -28,7 +28,7 @@ CORE_SRC = src/channel.c src/envelope.c src/txcheck.c src/wire.c
 CORE_OBJ = $(CORE_SRC:.c=.o)
 
 BINS = alice bob
-TESTS = test_channel test/mkfunding test/adversary
+TESTS = test_channel test/mkfunding test/adversary test/attack
 
 all: $(BINS)
 
@@ -39,6 +39,9 @@ bob: src/bob.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test_channel: test/test_channel.o $(CORE_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test/attack: test/attack.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test/adversary: test/adversary.o $(CORE_OBJ)
@@ -69,6 +72,7 @@ fuzz/fuzz_%: fuzz/fuzz_%.c $(CORE_SRC)
 
 check: $(TESTS) $(BINS)
 	./test_channel
+	./test/attack
 	./test/loopback.sh
 
 clean:
