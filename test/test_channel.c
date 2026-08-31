@@ -606,16 +606,20 @@ int main(void)
        both arguments, and never below the block floor. */
     {
         uint64_t prev = 0;
+        int size_ok = 1;
+        size_t bad_at = 0;
         for (size_t b = 0; b <= 20000; b += 137) {
             uint64_t f = pc_min_fee(b, 0);
             if (f < prev || f < 1000000ULL * (uint64_t)b / 1000) {
-                CHECK(0, "pc_min_fee(%zu, 0) = %" PRIu64 " breaks monotonicity "
-                         "or the block floor", b, f);
-                break;
+                size_ok = 0; bad_at = b; break;
             }
             prev = f;
         }
-        CHECK(1, "pc_min_fee is monotonic in size and never under the block floor");
+        /* one verdict, like the dust loop below. reporting a failure and then
+           an unconditional success claiming the property holds is worse than
+           either on its own. */
+        CHECK(size_ok, "pc_min_fee is monotonic in size and never under the "
+                       "block floor, first break at %zu", bad_at);
 
         int dust_ok = 1;
         for (size_t d = 1; d < 8; d++)

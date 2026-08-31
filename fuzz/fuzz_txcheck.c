@@ -47,9 +47,9 @@ static pc_channel ch;
 /* two fixed compressed keys, so the harness is deterministic and needs no
    keygen per input */
 static const char *ALICE_PUB =
-    "0211485fec5321a333bbb350f50c2c71cc149d4e8ec61cc525fa76d968df4daa6b";
+    "03199a3c0690b04deef10fd11946eab6082729ad96f4a5f2a76bf0f20bd721dab7";
 static const char *BOB_PUB =
-    "0318b32845384410357f8a241df6834c3ecb2cd399eefc8cb4f59f315ca3b24b74";
+    "039655edd029af90333a96c8da354e33a932b860c9d6c2f3588e6235e7f8d10a77";
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -61,7 +61,7 @@ static void setup(void)
     /* a funding outpoint, so the reader gets past its state guard and reaches
        the parsing it is here to exercise */
     if (pc_channel_set_funding(&ch,
-            "d9eda69119c8b4f9480be1d6bc4bd9d8b6969262df9a87be515261a9d3d52e77",
+            "91ef9c45881a64dc29c8e52fd335b410e8ac318c292fb56a191693d5dcb544b9",
             0, 10000000000ULL) != PC_OK)
         abort();
     ready = 1;
@@ -81,9 +81,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     pc_tx_verify_payment(&ch, hex, 1000000000ULL);
     pc_tx_find_channel_output(&ch, hex, NULL, NULL, NULL);
 
+    /* Take the script code length from the input as well. A fixed four bytes
+       only ever exercises put_varint's single byte branch, and verify_sigs
+       passes redeem scripts up to 520, so the 0xfd branch is reachable in
+       production and was not reachable here. */
     unsigned char digest[32];
-    unsigned char script[4] = { 0x51, 0x21, 0x00, 0xae };
-    pc_tx_sighash(hex, script, sizeof(script), digest);
+    unsigned char script[520];
+    size_t sclen = size ? (size_t)(data[0] * 3) : 0;
+    if (sclen > sizeof(script)) sclen = sizeof(script);
+    for (size_t i = 0; i < sclen; i++) script[i] = data[i % (size ? size : 1)];
+    pc_tx_sighash(hex, script, sclen, digest);
 
     free(hex);
     return 0;

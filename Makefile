@@ -54,6 +54,9 @@ test/mkfunding: test/mkfunding.o $(CORE_OBJ)
 FUZZ_SAN = -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer
 FUZZERS  = fuzz/fuzz_envelope fuzz/fuzz_txcheck
 
+fuzz/mkseed: fuzz/mkseed.o $(CORE_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
 fuzz: $(FUZZERS)
 
 fuzz/fuzz_%: fuzz/fuzz_%.c $(CORE_SRC)
