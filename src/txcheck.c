@@ -240,6 +240,27 @@ static pc_result verify_sigs(const pc_channel *ch,
     return PC_OK;
 }
 
+/* IsStandardTx refuses a transaction whose version is outside 1..2 and one
+   carrying any output whose script is not a standard type. Bob checks the
+   output paying him and had nothing to say about either, so Alice could sign an
+   honest-looking payment that no node would relay and he would ack it.
+
+   Narrower than the policy it mirrors: IsStandard also takes bare pubkey, bare
+   multisig up to three keys and a single OP_RETURN. A channel has no reason to
+   pay any of those, and refusing what it cannot be sure of is the safe
+   direction for the party who ships the goods. */
+#define PC_TX_VERSION_MIN 1u
+#define PC_TX_VERSION_MAX 2u
+
+static int standard_spk(const unsigned char *spk, size_t len)
+{
+    if (len == 25 && spk[0] == 0x76 && spk[1] == 0xa9 && spk[2] == 0x14 &&
+        spk[23] == 0x88 && spk[24] == 0xac) return 1;          /* p2pkh */
+    if (len == 23 && spk[0] == 0xa9 && spk[1] == 0x14 &&
+        spk[22] == 0x87) return 1;                              /* p2sh  */
+    return 0;
+}
+
 /* The scriptPubKey a P2SH address stands for: base58check gives back a version
    byte and the 20-byte script hash, so no hashing is needed to rebuild it. */
 static int p2sh_script_for(const pc_channel *ch, unsigned char out[23])
@@ -311,6 +332,7 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
             size_t spklen = 0;
             rd_script(&r, &spk, &spklen);
             if (r.bad) { rc = PC_ERR_PSBT; goto out; }
+            if (value > PC_MAX_MONEY_KOINU) { rc = PC_ERR_AMOUNT; goto out; }
             if (spklen == sizeof(want) && memcmp(spk, want, sizeof(want)) == 0) {
                 /* two outputs paying the channel means the capacity is not a
                    fact about the transaction, so refuse rather than pick.
@@ -367,7 +389,11 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     rdr r = { buf, blen, 0, 0 };
     pc_result rc = PC_ERR_PSBT;
 
-    rd_u(&r, 4);                                  /* version */
+    uint32_t version = (uint32_t)rd_u(&r, 4);
+    if (r.bad) goto out;
+    if (version < PC_TX_VERSION_MIN || version > PC_TX_VERSION_MAX) {
+        rc = PC_ERR_VERSION; goto out;
+    }
 
     uint64_t nin = rd_varint(&r);
     if (r.bad || nin != 1) goto out;              /* the channel spends one utxo */
@@ -411,6 +437,12 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
         size_t spklen = 0;
         rd_script(&r, &spk, &spklen);
         if (r.bad) goto out;
+
+        /* every output, not only the one paying Bob: one non-standard script
+           anywhere makes the whole transaction unrelayable */
+        if (!standard_spk(spk, spklen)) { rc = PC_ERR_NONSTANDARD; goto out; }
+
+        if (value > PC_MAX_MONEY_KOINU) { rc = PC_ERR_CAPACITY; goto out; }
 
         /* Bound the output before adding it, not the sum afterwards. value is a
            full 64-bit read off the wire and nout runs to 16, so an honestly
