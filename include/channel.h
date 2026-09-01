@@ -226,10 +226,18 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
 
 /* MAX_MONEY from src/amount.h: 10,000,000,000 coins. Every value that crosses
  * this API is held to it, which is what makes the per-output bound in
- * pc_tx_verify_payment() mean something: sixteen outputs of at most MAX_MONEY
- * sum to 1.6e19, still inside a uint64, so the total cannot wrap however the
- * capacity was arrived at. */
+ * pc_tx_verify_payment() mean something: the outputs sum inside a uint64, so
+ * the total cannot wrap however the capacity was arrived at. */
 #define PC_MAX_MONEY_KOINU 1000000000000000000ULL
+
+/* How many outputs pc_tx_verify_payment() reads. The bound above only stops the
+ * running total wrapping while this many of it still fit in a uint64, so that
+ * relation is asserted rather than described: at 1e18 the ceiling is eighteen,
+ * and raising this to nineteen fails the build instead of quietly making the
+ * sum unsound. */
+#define PC_MAX_OUTPUTS 16
+_Static_assert(PC_MAX_OUTPUTS <= UINT64_MAX / PC_MAX_MONEY_KOINU,
+               "PC_MAX_OUTPUTS outputs of PC_MAX_MONEY_KOINU would wrap");
 
 /* Dogecoin's dust limits, from src/policy/policy.h. An output under the hard
  * limit makes the whole transaction non-standard; one under the soft limit adds
