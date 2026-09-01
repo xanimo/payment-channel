@@ -427,7 +427,7 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     if (vout != (uint32_t)ch->funding_vout)       goto out;
 
     uint64_t nout = rd_varint(&r);
-    if (r.bad || nout == 0 || nout > 16) goto out;
+    if (r.bad || nout == 0 || nout > PC_MAX_OUTPUTS) goto out;
 
     uint64_t to_bob = 0, total = 0;
     size_t soft_dust = 0;
@@ -445,12 +445,12 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
         if (value > PC_MAX_MONEY_KOINU) { rc = PC_ERR_CAPACITY; goto out; }
 
         /* Bound the output before adding it, not the sum afterwards. value is a
-           full 64-bit read off the wire and nout runs to 16, so an honestly
-           signed payment carrying one output of 0xFFFFFFFFFFFFFFFF and a second
-           tuned to suit wraps total back under the capacity while to_bob stays
-           enormous: every check below then passes and Bob ships against a
-           transaction no node will accept. Per output this is also the stronger
-           statement, since nothing that went in can come out larger. */
+           full 64-bit read off the wire, so an honestly signed payment carrying
+           one output of 0xFFFFFFFFFFFFFFFF and a second tuned to suit wraps
+           total back under the capacity while to_bob stays enormous: every
+           check below then passes and Bob ships against a transaction no node
+           will accept. Per output this is also the stronger statement, since
+           nothing that went in can come out larger. */
         if (value > ch->capacity_koinu) { rc = PC_ERR_CAPACITY; goto out; }
         total += value;
 
