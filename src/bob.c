@@ -42,9 +42,18 @@
 #include <ctype.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define MAX_ORDERS 64
+
+/* A stalled peer must not starve the rest, so each connection is handled in its
+   own process. The accept loop returns to accept() the moment it has forked,
+   and a peer that holds its socket only holds its own child, reaped by the wire
+   timeout. Bounded so the fork-per-connection is not itself a way to exhaust
+   pids: past the cap new connections are dropped rather than served. */
+#define MAX_CONNS 64
 
 static void usage(void)
 {
@@ -206,7 +215,10 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
     if (s->best) dogecoin_free(s->best);
     s->best = raw;
     s->best_amount = in->to_bob_koinu;
-    printf("paid     %" PRIu64 " koinu held (%zu byte tx)\n",
+    /* "held" is not "confirmed": Bob cannot see the chain, so this is money only
+       once the funding output is buried. Do not ship against this line alone. */
+    printf("paid     %" PRIu64 " koinu held (%zu byte tx), "
+           "unconfirmed until funding is buried\n",
            s->best_amount, strlen(s->best) / 2);
     fflush(stdout);
 
@@ -220,6 +232,80 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
     out.more = more_to_come;
     snprintf(out.psbt_hex, sizeof(out.psbt_hex), "01");
     return pc_wire_send(fd, &out);
+}
+
+/* One connection, start to finish. Runs in a child, so its state is its own and
+   nothing it does can touch another peer's session. */
+static void serve_connection(int fd, const char *wif, pc_chain chain,
+                             const char *bob_pub, const char *bob_addr,
+                             uint32_t height, uint32_t slack,
+                             const char **prices, int nprices)
+{
+    session s;
+    memset(&s, 0, sizeof(s));
+
+    pc_envelope in, out;
+    int alive = 1, opened = 0;
+    while (alive && pc_wire_recv(fd, &in) == 1) {
+        switch (in.type) {
+        case PC_MSG_REQUEST:                      /* [1][2] */
+            memset(&out, 0, sizeof(out));
+            out.type = PC_MSG_ANNOUNCE;
+            snprintf(out.psbt_hex, sizeof(out.psbt_hex), "%s", bob_pub);
+            snprintf(out.addr, sizeof(out.addr), "%s", bob_addr);
+            alive = pc_wire_send(fd, &out);
+            break;
+
+        case PC_MSG_OPEN:                         /* [3][4] */
+            /* a second one resets the channel and the amount paid while the
+               order count and the held transaction survive from the first */
+            if (opened) { alive = send_reject(fd, "channel already open"); break; }
+            alive = handle_open(fd, &s, &in, wif, chain, bob_pub, height, slack);
+            if (alive) {
+                opened = 1;
+                if (!send_invoice(fd, &s, bob_addr, prices, nprices)) {
+                    send_reject(fd, "nothing to invoice");
+                    alive = 0;
+                }
+            }
+            break;
+
+        case PC_MSG_PAYMENT: {                    /* [6][G] */
+            if (!opened) { alive = send_reject(fd, "no channel"); break; }
+            int more = invoice_due(&s, prices, nprices, NULL);
+            if (!more && s.order < nprices)
+                fprintf(stderr, "order %d would exceed the channel\n", s.order + 1);
+            alive = handle_payment(fd, &s, &in, wif, more);
+            /* Not fatal when nothing more is due: Alice still has a close
+               to send, and Bob has the transaction she wants back. */
+            if (alive && more)
+                alive = send_invoice(fd, &s, bob_addr, prices, nprices);
+            break;
+        }
+
+        case PC_MSG_CLOSE:                        /* [H] */
+            if (!s.best) { alive = send_reject(fd, "nothing to close on"); break; }
+            memset(&out, 0, sizeof(out));
+            out.type = PC_MSG_CLOSE;
+            snprintf(out.ref, sizeof(out.ref), "%s", s.ch.funding_txid);
+            out.to_bob_koinu = s.best_amount;
+            snprintf(out.psbt_hex, sizeof(out.psbt_hex), "%s", s.best);
+            pc_wire_send(fd, &out);
+            printf("closed   at %" PRIu64 " koinu\n", s.best_amount);
+            alive = 0;
+            break;
+
+        default:
+            alive = send_reject(fd, "unexpected message");
+            break;
+        }
+    }
+
+    if (s.best) {
+        printf("\nbroadcast this to take the money:\n%s\n\n", s.best);
+        fflush(stdout);
+        dogecoin_free(s.best);
+    }
 }
 
 int main(int argc, char **argv)
@@ -285,77 +371,35 @@ int main(int argc, char **argv)
     printf("listening on %s:%d\n\n", host, port);
     fflush(stdout);
 
+    int live = 0;
     do {
         int fd = pc_wire_accept(lfd);
         if (fd < 0) continue;
 
-        session s;
-        memset(&s, 0, sizeof(s));
-
-        pc_envelope in, out;
-        int alive = 1, opened = 0;
-        while (alive && pc_wire_recv(fd, &in) == 1) {
-            switch (in.type) {
-            case PC_MSG_REQUEST:                      /* [1][2] */
-                memset(&out, 0, sizeof(out));
-                out.type = PC_MSG_ANNOUNCE;
-                snprintf(out.psbt_hex, sizeof(out.psbt_hex), "%s", bob_pub);
-                snprintf(out.addr, sizeof(out.addr), "%s", bob_addr);
-                alive = pc_wire_send(fd, &out);
-                break;
-
-            case PC_MSG_OPEN:                         /* [3][4] */
-                /* a second one resets the channel and the amount paid while the
-                   order count and the held transaction survive from the first */
-                if (opened) { alive = send_reject(fd, "channel already open"); break; }
-                alive = handle_open(fd, &s, &in, wif, chain, bob_pub, height, slack);
-                if (alive) {
-                    opened = 1;
-                    if (!send_invoice(fd, &s, bob_addr, prices, nprices)) {
-                        send_reject(fd, "nothing to invoice");
-                        alive = 0;
-                    }
-                }
-                break;
-
-            case PC_MSG_PAYMENT: {                    /* [6][G] */
-                if (!opened) { alive = send_reject(fd, "no channel"); break; }
-                int more = invoice_due(&s, prices, nprices, NULL);
-                if (!more && s.order < nprices)
-                    fprintf(stderr, "order %d would exceed the channel\n", s.order + 1);
-                alive = handle_payment(fd, &s, &in, wif, more);
-                /* Not fatal when nothing more is due: Alice still has a close
-                   to send, and Bob has the transaction she wants back. */
-                if (alive && more)
-                    alive = send_invoice(fd, &s, bob_addr, prices, nprices);
-                break;
-            }
-
-            case PC_MSG_CLOSE:                        /* [H] */
-                if (!s.best) { alive = send_reject(fd, "nothing to close on"); break; }
-                memset(&out, 0, sizeof(out));
-                out.type = PC_MSG_CLOSE;
-                snprintf(out.ref, sizeof(out.ref), "%s", s.ch.funding_txid);
-                out.to_bob_koinu = s.best_amount;
-                snprintf(out.psbt_hex, sizeof(out.psbt_hex), "%s", s.best);
-                pc_wire_send(fd, &out);
-                printf("closed   at %" PRIu64 " koinu\n", s.best_amount);
-                alive = 0;
-                break;
-
-            default:
-                alive = send_reject(fd, "unexpected message");
-                break;
-            }
+        /* Reap finished children and reclaim their slots, then refuse rather
+           than fork past the cap: an unbounded fork-per-connection is its own
+           denial of service. Reaping here (not via SIG_IGN) is what keeps the
+           count honest, so the cap tracks connections that are actually live. */
+        if (!once) while (waitpid(-1, NULL, WNOHANG) > 0) live--;
+        if (live >= MAX_CONNS) {
+            send_reject(fd, "too many connections");
+            close(fd);
+            continue;
         }
 
-        if (s.best) {
-            printf("\nbroadcast this to take the money:\n%s\n\n", s.best);
-            fflush(stdout);
-            dogecoin_free(s.best);
+        pid_t pid = fork();
+        if (pid < 0) { close(fd); continue; }
+        if (pid == 0) {
+            close(lfd);
+            serve_connection(fd, wif, chain, bob_pub, bob_addr,
+                             height, slack, prices, nprices);
+            close(fd);
+            _exit(0);
         }
-        close(fd);
-    } while (!once);
+        live++;
+        close(fd);                 /* the child owns it now */
+        if (once) { waitpid(pid, NULL, 0); break; }
+    } while (1);
 
     close(lfd);
     rc = 0;
