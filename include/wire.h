@@ -40,8 +40,10 @@
 /* Listen on (host):(port). Returns a listening fd, or -1. */
 int pc_wire_listen(const char *host, int port);
 
-/* Accept one connection. Returns a connected fd, or -1. */
-int pc_wire_accept(int listen_fd);
+/* Accept one connection. Returns a connected fd, or -1. On success, if
+ * (peer_ip) is non-NULL it receives the peer's IPv4 address in network byte
+ * order (0 for a non-IPv4 peer), for per-source connection accounting. */
+int pc_wire_accept(int listen_fd, uint32_t *peer_ip);
 
 /* Connect to (host):(port). Returns a connected fd, or -1. */
 int pc_wire_connect(const char *host, int port);

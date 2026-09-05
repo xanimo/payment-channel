@@ -149,3 +149,34 @@ is not an installed header. that makes this a second implementation of a
 consensus-critical digest, so bob's own signature is verified alongside alice's:
 his came from libdogecoin's signer, so if the two ever stop agreeing the honest
 path fails on the next payment rather than a forgery passing quietly.
+
+## deployment
+
+bob is a merchant daemon, so most of what keeps him safe is around the code
+rather than in it.
+
+pass the key as `--wif @path` or `--wif -`, never as a bare argument: a key on
+the command line sits in `ps` and the shell history for any local user to read.
+the file should be mode 0600, and alice takes the same forms.
+
+do not put the listen port on the open internet. the wire protocol is plaintext
+and unauthenticated, so anyone on the path reads every amount, address and txid,
+and an active man in the middle can substitute the announced pubkey during the
+handshake and stand up a channel to a key it controls. terminate tls or a tunnel
+(wireguard, ssh, tor) in front of bob and keep `--listen` on loopback.
+`contrib/bob.service` runs him that way, unprivileged and sandboxed, with the key
+read from a file.
+
+a held payment is not a confirmed one. bob cannot see the chain, so
+`paid ... koinu held` means the transaction verifies, not that the funding output
+exists or is buried, so do not release goods against it: wait until the funding
+transaction and the close are both confirmed. this is the one thing that actually
+loses money, and no amount of transport hardening changes it.
+
+each connection is served in its own process, capped at 64 live children with at
+most `--max-per-ip` (16 by default) from any one source, so a single peer cannot
+stall or starve the rest and a runaway child is bounded by an address-space and
+cpu rlimit. behind a tunnel every peer shares the tunnel's address, so set
+`--max-per-ip 0` there and bound connections at the firewall instead. a
+distributed flood still wants a firewall connlimit, since the caps here are not a
+substitute for one.

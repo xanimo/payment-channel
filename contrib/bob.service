@@ -1,0 +1,61 @@
+# Hardened unit for the merchant daemon. Runs bob unprivileged, sandboxed, and
+# with its key read from a file rather than the command line so it never appears
+# in ps. Adjust the WIF path, the listen address, the height source, and the
+# prices, then:
+#
+#   useradd --system --no-create-home --shell /usr/sbin/nologin bob
+#   install -o bob -g bob -m 0600 /dev/stdin /etc/payment-channel/bob.wif <<< "$WIF"
+#   install -o root -g root -m 0755 bob /usr/local/bin/bob
+#   systemctl enable --now bob
+#
+# This does not put bob on a public port. Terminate TLS or a tunnel (wireguard,
+# ssh, tor) in front of it and keep --listen on loopback: the wire protocol is
+# plaintext and unauthenticated, so a public port exposes every channel to any
+# observer and to an active man in the middle. See README "deployment".
+
+[Unit]
+Description=unidirectional payment channel merchant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bob
+Group=bob
+# --height must track the chain; wire it to your node rather than pinning it.
+ExecStart=/usr/local/bin/bob --wif @/etc/payment-channel/bob.wif \
+    --listen 127.0.0.1:9876 --height 5100000 --min-slack 100 \
+    --price 5.0 --price 7.5 --price 17.5
+Restart=on-failure
+RestartSec=2
+
+# Only the key file is readable, and nothing is writable.
+ReadOnlyPaths=/etc/payment-channel/bob.wif
+
+# Sandbox: no privileges, no new ones, minimal view of the system.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# bob forks a child per connection over an inet stream socket; nothing else.
+RestrictAddressFamilies=AF_INET
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+# cgroup bounds on the whole service, alongside the per-connection rlimits bob
+# sets on each child. MAX_CONNS children plus the parent is well under this.
+TasksMax=128
+MemoryMax=512M
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

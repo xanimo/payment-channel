@@ -49,12 +49,14 @@
 static void usage(void)
 {
     fprintf(stderr,
-      "usage: alice --wif WIF --peer-pubkey HEX --locktime N --address\n"
-      "       alice --wif WIF --locktime N --funding-tx HEX|@FILE\n"
+      "usage: alice --wif WIF|@FILE|- --peer-pubkey HEX --locktime N --address\n"
+      "       alice --wif WIF|@FILE|- --locktime N --funding-tx HEX|@FILE\n"
       "             [--peer-pubkey HEX] [--fee DOGE] [--max DOGE] [--close]\n"
       "             [--connect [HOST:]PORT] [--testnet|--regtest]\n"
-      "       alice --wif WIF --pubkey\n"
+      "       alice --wif WIF|@FILE|- --pubkey\n"
       "\n"
+      "  --wif @FILE reads the key from a file (mode 0600), - from stdin; a\n"
+      "  bare key is left in argv where ps can read it, so prefer @FILE.\n"
       "  Fund --address and let it confirm before running the second form.\n"
       "  --peer-pubkey pins Bob's key; without it Alice trusts what he answers.\n"
       "  --max refuses to pay more than that in total.\n"
@@ -64,7 +66,7 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    const char *wif = NULL, *peer = NULL, *ftx_arg = NULL;
+    const char *wif_arg = NULL, *peer = NULL, *ftx_arg = NULL;
     const char *connect_to = NULL, *fee_s = "1.0", *max_s = NULL;
     uint32_t locktime = 0;
     pc_chain chain = PC_CHAIN_MAIN;
@@ -73,7 +75,7 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         #define NEXT() (++i < argc ? argv[i] : NULL)
-        if      (!strcmp(a, "--wif"))         wif = NEXT();
+        if      (!strcmp(a, "--wif"))         wif_arg = NEXT();
         else if (!strcmp(a, "--peer-pubkey")) peer = NEXT();
         else if (!strcmp(a, "--funding-tx"))  ftx_arg = NEXT();
         else if (!strcmp(a, "--fee"))         fee_s = NEXT();
@@ -89,7 +91,12 @@ int main(int argc, char **argv)
         else { usage(); return 2; }
         #undef NEXT
     }
-    if (!wif || !fee_s) { usage(); return 2; }
+    if (!wif_arg || !fee_s) { usage(); return 2; }
+
+    /* Pull the key out of argv immediately, so it is not sitting in ps for the
+       life of the process. @FILE reads it from a file, - from stdin. */
+    char *wif = pc_read_secret_arg(wif_arg);
+    if (!wif) { fprintf(stderr, "alice: cannot read --wif\n"); return 2; }
 
     /* a peer that closes mid-write must not take the process with it */
     signal(SIGPIPE, SIG_IGN);
@@ -375,6 +382,7 @@ int main(int argc, char **argv)
 done:
     if (fd >= 0) close(fd);
     free(funding_tx);
+    pc_secret_free(wif);
     dogecoin_ecc_stop();
     return rc;
 }
