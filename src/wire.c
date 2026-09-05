@@ -42,6 +42,12 @@
 /* an open message carries the psbt and the funding transaction that created its
    input, so the line has to hold both fields plus the json frame */
 #define PC_WIRE_TIMEOUT_SEC 30
+/* Per read()/write() budget, so a peer that connects and never sends is dropped
+   in PC_WIRE_IO_SEC rather than holding a slot for the whole-line deadline. The
+   line deadline above still caps a peer that dribbles a byte at a time. Every
+   message in this protocol is answered in well under a second, so this is only
+   ever hit by a stalled peer. */
+#define PC_WIRE_IO_SEC 5
 #define PC_WIRE_MAX (2 * PC_MAX_PSBT_HEX + 512)
 
 int pc_wire_split(const char *hostport, char *host, size_t hostcap, int defport)
@@ -94,7 +100,7 @@ int pc_wire_accept(int listen_fd)
     /* a peer that connects and never finishes a line would otherwise hold the
        accept loop open for as long as it likes */
     {
-        struct timeval tv = { PC_WIRE_TIMEOUT_SEC, 0 };
+        struct timeval tv = { PC_WIRE_IO_SEC, 0 };
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     }
@@ -117,7 +123,7 @@ int pc_wire_connect(const char *host, int port)
     /* a peer that connects and never finishes a line would otherwise hold the
        accept loop open for as long as it likes */
     {
-        struct timeval tv = { PC_WIRE_TIMEOUT_SEC, 0 };
+        struct timeval tv = { PC_WIRE_IO_SEC, 0 };
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     }
