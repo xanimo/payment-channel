@@ -1,0 +1,130 @@
+# Every job needs the patched libdogecoin, so one job stages it (cached on the
+# pinned commit plus the patch series) and the three scenarios fan out from it:
+# make check, contrib/regtest.sh against a real node, and a fuzz smoke.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  LIBDOGECOIN_COMMIT: bf3f9df41263a67bf54e6ca6329fa74432c05067
+  # xanimo/docker feat/1.14.9: the 1.14.9-on-bookworm image, release binaries
+  # verified against pinned sha256sums and the release signer key
+  DOCKER_COMMIT: 208ac5a0a5f682a67f3b6e594029d7c37ea06717
+
+jobs:
+  libdogecoin:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: staged
+          key: libdogecoin-${{ env.LIBDOGECOIN_COMMIT }}-${{ hashFiles('depends/patches/*.patch') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends autoconf automake libtool libevent-dev
+          git clone https://github.com/dogecoinfoundation/libdogecoin
+          cd libdogecoin
+          git checkout "$LIBDOGECOIN_COMMIT"
+          git -c user.name=ci -c user.email=ci@localhost am ../depends/patches/*.patch
+          ./autogen.sh
+          ./configure --prefix="$GITHUB_WORKSPACE/staged"
+          make -j"$(nproc)"
+          make install
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staged
+          path: staged
+
+  # test_channel, test/attack, then loopback.sh: alice against bob over a
+  # socket, plus the adversary cases that exercise bob's refusals
+  check:
+    needs: libdogecoin
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: staged
+          path: staged
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev
+      - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" -j"$(nproc)"
+      - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" check
+
+  # the only job that proves the transactions are valid: broadcasts the close
+  # and the refund to a released 1.14.9 and checks both confirm and pay out
+  regtest:
+    needs: libdogecoin
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: staged
+          path: staged
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev
+      - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" -j"$(nproc)" alice bob test/mkfunding
+      - name: build the node image
+        run: |
+          git clone https://github.com/xanimo/docker dogecoin-docker
+          git -C dogecoin-docker checkout "$DOCKER_COMMIT"
+          docker build -t dogecoin-regtest dogecoin-docker/1.14.9/bookworm
+      - name: start the node
+        run: |
+          docker run -d --name doge-ci dogecoin-regtest \
+              dogecoind -regtest -txindex=1 -printtoconsole
+          printf '#!/bin/sh\nexec docker exec doge-ci dogecoin-cli "$@"\n' > doge-cli
+          chmod +x doge-cli
+          for _ in $(seq 1 120); do
+              ./doge-cli -regtest getblockcount >/dev/null 2>&1 && break
+              sleep 0.5
+          done
+          ./doge-cli -regtest getblockcount
+          ./doge-cli -regtest generate 200 >/dev/null
+      - run: CLI="$GITHUB_WORKSPACE/doge-cli" ./contrib/regtest.sh
+      - if: failure()
+        run: docker logs doge-ci
+
+  # both peer-facing parsers under asan and ubsan. setarch -R because asan's
+  # shadow mapping collides with aslr before libFuzzer prints its banner.
+  fuzz:
+    needs: libdogecoin
+    runs-on: ubuntu-24.04
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: staged
+          path: staged
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev clang
+      - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" fuzz
+      - run: |
+          for f in envelope txcheck opening; do
+              mkdir -p "work-$f"
+              setarch -R "./fuzz/fuzz_$f" "work-$f" "fuzz/corpus/$f" \
+                  -max_total_time=60 -print_final_stats=1
+          done
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: |
+            crash-*
+            timeout-*
+            work-*
