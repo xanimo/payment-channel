@@ -100,6 +100,49 @@ static inline char *pc_read_hex_arg(const char *arg)
     return buf;
 }
 
+/* Load a secret (a WIF) without leaving it in argv, where ps and the shell
+   history expose it to any local user. "@path" reads one line from a file, which
+   should be mode 0600; "-" reads one line from stdin. A bare value still works
+   for the tests, but it is the insecure form and the docs say so. Caller frees
+   with pc_secret_free(), which wipes the copy first. */
+static inline char *pc_read_secret_arg(const char *arg)
+{
+    if (!arg) return NULL;
+    FILE *f = NULL;
+    int owned = 0;
+    if (!strcmp(arg, "-")) {
+        f = stdin;
+    } else if (arg[0] == '@') {
+        f = fopen(arg + 1, "r");
+        if (!f) return NULL;
+        owned = 1;
+    } else {
+        return strdup(arg);
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n = getline(&line, &cap, f);
+    if (owned) fclose(f);
+    if (n < 0) { free(line); return NULL; }
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' ||
+                     line[n - 1] == ' '  || line[n - 1] == '\t'))
+        line[--n] = '\0';
+    if (n == 0) { free(line); return NULL; }
+    return line;
+}
+
+/* Wipe through a volatile pointer so the clear is not optimized away, then free.
+   Only the string itself is wiped; getline may have over-allocated, but the
+   secret ends at the NUL. */
+static inline void pc_secret_free(char *s)
+{
+    if (!s) return;
+    volatile char *p = (volatile char *)s;
+    size_t n = strlen(s);
+    while (n--) *p++ = 0;
+    free(s);
+}
+
 static inline void pc_announce(pc_envelope *env, const char *pubkey_hex, uint32_t locktime)
 {
     memset(env, 0, sizeof(*env));

@@ -42,6 +42,7 @@
 #include <ctype.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -55,16 +56,41 @@
    pids: past the cap new connections are dropped rather than served. */
 #define MAX_CONNS 64
 
+/* Default cap on live connections from any one source address, so a single
+   host cannot take every slot. Distributed sources defeat it and a proxy or
+   tunnel makes every peer share one address, so it is overridable with
+   --max-per-ip (0 disables). It does not replace a firewall connlimit. */
+#define DEFAULT_MAX_PER_IP 16
+
+/* Per-connection resource bounds, set in the child so one connection cannot
+   run the box out of CPU or address space. Generous: an honest session uses
+   milliseconds of CPU and a few tens of MB, so only a runaway trips these. */
+#define CHILD_CPU_SECONDS   30
+#define CHILD_AS_BYTES      (512UL * 1024 * 1024)
+
+static void limit_child(void)
+{
+    struct rlimit rl;
+    rl.rlim_cur = rl.rlim_max = CHILD_CPU_SECONDS;
+    setrlimit(RLIMIT_CPU, &rl);
+    rl.rlim_cur = rl.rlim_max = CHILD_AS_BYTES;
+    setrlimit(RLIMIT_AS, &rl);
+}
+
 static void usage(void)
 {
     fprintf(stderr,
-      "usage: bob --wif WIF [--listen [HOST:]PORT] [--testnet|--regtest]\n"
-      "           [--height N] [--min-slack N] [--price DOGE ...] [--once]\n"
-      "       bob --wif WIF --pubkey\n"
+      "usage: bob --wif WIF|@FILE|- [--listen [HOST:]PORT] [--testnet|--regtest]\n"
+      "           [--height N] [--min-slack N] [--price DOGE ...]\n"
+      "           [--max-per-ip N] [--once]\n"
+      "       bob --wif WIF|@FILE|- --pubkey\n"
       "\n"
+      "  --wif @FILE reads the key from a file (mode 0600) and - from stdin;\n"
+      "  a bare key is left in argv where ps can read it, so prefer @FILE.\n"
       "  --price is what each order costs, charged in the order given.\n"
       "  --height is the current chain height; Bob cannot see the chain and\n"
-      "  refuses a channel whose locktime is not --min-slack blocks above it.\n");
+      "  refuses a channel whose locktime is not --min-slack blocks above it.\n"
+      "  --max-per-ip caps live connections per source address (0 disables).\n");
 }
 
 /* Everything one connection knows. */
@@ -310,20 +336,22 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
 
 int main(int argc, char **argv)
 {
-    const char *wif = NULL, *listen_at = NULL;
+    const char *wif_arg = NULL, *listen_at = NULL;
     const char *prices[MAX_ORDERS];
     int nprices = 0;
     uint32_t height = 0, slack = 100;
+    int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
     int want_pubkey = 0, once = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         #define NEXT() (++i < argc ? argv[i] : NULL)
-        if      (!strcmp(a, "--wif"))       wif = NEXT();
+        if      (!strcmp(a, "--wif"))       wif_arg = NEXT();
         else if (!strcmp(a, "--listen"))    listen_at = NEXT();
         else if (!strcmp(a, "--height"))    { const char *v = NEXT(); height = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--min-slack")) { const char *v = NEXT(); slack  = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
+        else if (!strcmp(a, "--max-per-ip")){ const char *v = NEXT(); max_per_ip = v ? (int)strtol(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--testnet"))   chain = PC_CHAIN_TEST;
         else if (!strcmp(a, "--regtest"))   chain = PC_CHAIN_REGTEST;
         else if (!strcmp(a, "--pubkey"))    want_pubkey = 1;
@@ -336,7 +364,13 @@ int main(int argc, char **argv)
         else { usage(); return 2; }
         #undef NEXT
     }
-    if (!wif) { usage(); return 2; }
+    if (!wif_arg) { usage(); return 2; }
+    if (max_per_ip < 0) { usage(); return 2; }
+
+    /* Pull the key out of argv immediately, so it is not sitting in ps for the
+       life of the process. */
+    char *wif = pc_read_secret_arg(wif_arg);
+    if (!wif) { fprintf(stderr, "bob: cannot read --wif\n"); return 2; }
 
     /* a peer that closes mid-write must not take the process with it */
     signal(SIGPIPE, SIG_IGN);
@@ -371,31 +405,53 @@ int main(int argc, char **argv)
     printf("listening on %s:%d\n\n", host, port);
     fflush(stdout);
 
+    struct { pid_t pid; uint32_t ip; } kids[MAX_CONNS];
     int live = 0;
     do {
-        int fd = pc_wire_accept(lfd);
+        uint32_t peer_ip = 0;
+        int fd = pc_wire_accept(lfd, &peer_ip);
         if (fd < 0) continue;
 
-        /* Reap finished children and reclaim their slots, then refuse rather
-           than fork past the cap: an unbounded fork-per-connection is its own
-           denial of service. Reaping here (not via SIG_IGN) is what keeps the
-           count honest, so the cap tracks connections that are actually live. */
-        if (!once) while (waitpid(-1, NULL, WNOHANG) > 0) live--;
+        /* Reap finished children and reclaim their slots, then enforce the
+           caps. Reaping here (not via SIG_IGN) is what keeps the counts honest,
+           so the caps track connections that are actually live. */
+        if (!once) {
+            pid_t gone;
+            while ((gone = waitpid(-1, NULL, WNOHANG)) > 0)
+                for (int k = 0; k < live; k++)
+                    if (kids[k].pid == gone) { kids[k] = kids[--live]; break; }
+        }
+
+        /* Global cap first: an unbounded fork-per-connection is its own denial
+           of service. Then the per-source cap, so one address cannot take every
+           slot. Both refuse rather than fork past the limit. */
         if (live >= MAX_CONNS) {
             send_reject(fd, "too many connections");
             close(fd);
             continue;
+        }
+        if (max_per_ip > 0 && peer_ip) {
+            int from_ip = 0;
+            for (int k = 0; k < live; k++) if (kids[k].ip == peer_ip) from_ip++;
+            if (from_ip >= max_per_ip) {
+                send_reject(fd, "too many from one address");
+                close(fd);
+                continue;
+            }
         }
 
         pid_t pid = fork();
         if (pid < 0) { close(fd); continue; }
         if (pid == 0) {
             close(lfd);
+            limit_child();
             serve_connection(fd, wif, chain, bob_pub, bob_addr,
                              height, slack, prices, nprices);
             close(fd);
             _exit(0);
         }
+        kids[live].pid = pid;
+        kids[live].ip  = peer_ip;
         live++;
         close(fd);                 /* the child owns it now */
         if (once) { waitpid(pid, NULL, 0); break; }
@@ -404,6 +460,7 @@ int main(int argc, char **argv)
     close(lfd);
     rc = 0;
 done:
+    pc_secret_free(wif);
     dogecoin_ecc_stop();
     return rc;
 }

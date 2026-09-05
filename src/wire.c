@@ -91,10 +91,15 @@ int pc_wire_listen(const char *host, int port)
     return fd;
 }
 
-int pc_wire_accept(int listen_fd)
+int pc_wire_accept(int listen_fd, uint32_t *peer_ip)
 {
-    int fd = accept(listen_fd, NULL, NULL);
+    struct sockaddr_in peer;
+    socklen_t plen = sizeof(peer);
+    int fd = accept(listen_fd, (struct sockaddr *)&peer, &plen);
     if (fd < 0) return -1;
+    if (peer_ip)
+        *peer_ip = (plen >= sizeof(peer) && peer.sin_family == AF_INET)
+                 ? peer.sin_addr.s_addr : 0;
     int on = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
     /* a peer that connects and never finishes a line would otherwise hold the
