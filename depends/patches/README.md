@@ -1,7 +1,7 @@
 # libdogecoin patches
 
 this channel does not build against any released libdogecoin. it needs entry
-points that are in the tree but not in a release, and one behaviour fix. the
+points that are in the tree but not in a release, and two behaviour fixes. the
 patches are archived here so the build is reproducible from this repo alone
 rather than depending on what upstream does or when.
 
@@ -37,6 +37,16 @@ consumer that declared them would compile and fail to link.
 conversion in the library shares. without it `finalize_transaction` returns a
 pointer that the next call overwrites, and freeing it aborts.
 
+0009 stops `utils_hex_to_bin` reading past the string it was given. it ran
+`inLen / 2` iterations without consulting the NUL, left a non-hex nibble as the
+zero it was pre-set to, and assigned `*outLen` to `inLen / 2` at the end
+regardless, so an empty string with `inLen` 8 returned four bytes off the stack
+and reported four bytes written. every caller checking the out-count against the
+length it asked for was comparing that length to itself, across 191 call sites.
+this channel does not need it: `src/hex.h` converts strictly and the suite is
+green with or without 0009. it is here because the reproducer belongs next to
+the fix.
+
 0008 makes `chain_from_b58_prefix` read the version byte instead of the first
 character. regtest's 0x6f encodes to 'm' or 'n' and testnet's 0x71 is only ever
 'n', so a regtest address in the upper part of the range was read as testnet and
@@ -49,6 +59,8 @@ generated address begins with 'n'.
 0001 through 0007 correspond to libdogecoin #454, #455, #456, #457 and #459, and
 0008 to #461. none are merged and none have a timeline. build against a tree
 carrying them; nothing here should be written as though they will land.
+
+0009 has not been proposed upstream and no issue has been opened for it.
 
 libdogecoin #460 publishes `dogecoin_tx_sighash` and `dogecoin_pubkey_verify_sig`
 through the installed header. it is not in this series and this channel does not
