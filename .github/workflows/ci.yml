@@ -115,7 +115,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends libevent-dev clang
       - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" fuzz
       - run: |
-          for f in envelope txcheck opening; do
+          for f in envelope txcheck opening refund; do
               mkdir -p "work-$f"
               setarch -R "./fuzz/fuzz_$f" "work-$f" "fuzz/corpus/$f" \
                   -max_total_time=60 -print_final_stats=1

@@ -9,3 +9,4 @@ fuzz/fuzz_txcheck
 fuzz/mkseed
 test/attack
 fuzz/fuzz_opening
+fuzz/fuzz_refund
