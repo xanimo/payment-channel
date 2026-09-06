@@ -587,13 +587,20 @@ pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
        the redeem script, which is Alice then Bob. */
     unsigned char sigs[2][128];
     size_t siglen[2] = { 0, 0 };
-    unsigned char pk[2][64];
+    /* 33, not sizeof(pk[i]) as a larger buffer would allow. pkhex holds
+       PUBKEYHEXLEN, which is exactly 33 bytes hexed plus a NUL and no more, so
+       a cap above 33 here advertises room the destination does not have. What
+       keeps that from being an overflow today is that the PSBT parser refuses a
+       partial-sig key that is not 34 bytes, which is a fact about libdogecoin
+       rather than about this function. */
+    unsigned char pk[2][33];
     size_t pklen[2] = { 0, 0 };
     for (size_t i = 0; i < 2; i++) {
         if (!dogecoin_psbt_input_get_partial_sig(psbt, 0, i,
                                                  pk[i], sizeof(pk[i]), &pklen[i],
                                                  sigs[i], sizeof(sigs[i]), &siglen[i]))
             goto out;
+        if (pklen[i] != sizeof(pk[i])) goto out;
     }
     char pkhex[2][PUBKEYHEXLEN];
     for (size_t i = 0; i < 2; i++) utils_bin_to_hex(pk[i], pklen[i], pkhex[i]);

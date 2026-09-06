@@ -10,6 +10,7 @@ fuzz/mkseed
 test/attack
 fuzz/fuzz_opening
 fuzz/fuzz_refund
+fuzz/fuzz_payment
 
 # libFuzzer writes artefacts to the cwd when -artifact_prefix is unset
 crash-*
