@@ -60,6 +60,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends libevent-dev
       - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" -j"$(nproc)"
       - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" check
+      # the dribble case outlasts the whole-line deadline, so it is
+      # skipped in make check and run once here
+      - run: SLOW=1 ./test/slowpeer.sh
 
   # the only job that proves the transactions are valid: broadcasts the close
   # and the refund to a released 1.14.9 and checks both confirm and pay out

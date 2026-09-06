@@ -781,6 +781,29 @@ pc_result pc_refund_create(const pc_channel *ch,
        checked before the signing rather than after it */
     if (value < PC_HARD_DUST_KOINU) { rc = PC_ERR_DUST; goto out; }
 
+    /* The refund writes nLockTime from ch->locktime and spends a script whose
+       CHECKLOCKTIMEVERIFY came from ch->redeem_script_hex. Nothing kept those
+       two in step, so a caller holding a channel whose locktime had moved got a
+       transaction this function called ok and no node will ever mine: CLTV
+       compares the script's height against the nLockTime and fails. Alice
+       builds this when Bob is already gone, so the discovery would come at the
+       timeout with nothing to fall back on, which is the failure the rest of
+       these checks exist to pull forward.
+    
+       Rebuilding the canonical script and comparing covers the keys as well:
+       signing with a key the script does not name is the same defect one field
+       over. */
+    {
+        pc_channel canon;
+        if (pc_channel_init(&canon, ch->alice_pubkey_hex, ch->bob_pubkey_hex,
+                            ch->locktime, ch->chain) != PC_OK) {
+            rc = PC_ERR_SCRIPT; goto out;
+        }
+        if (strcmp(canon.redeem_script_hex, ch->redeem_script_hex) != 0) {
+            rc = PC_ERR_SCRIPT; goto out;
+        }
+    }
+
     size_t cap = 256 + rlen * 2;
     buf = (unsigned char *)malloc(cap);
     if (!buf) { rc = PC_ERR_ARG; goto out; }

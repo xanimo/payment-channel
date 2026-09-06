@@ -338,37 +338,40 @@ int main(void)
                    "a funding txid short of 64 hex\n");
         }
 
-        /* The canonical script is 116 bytes, so it always pushes via
-           OP_PUSHDATA1 and the direct-push branch of the check is never taken
-           by a real channel. A short script takes it, which is what pins that
-           the encoding is required to be the minimal one. */
-        bad = ch;
-        r = NULL;
-        controls++;
-        memset(bad.redeem_script_hex, '5', 80);
-        bad.redeem_script_hex[80] = '\0';
-        if (pc_refund_create(&bad, awif, aaddr, fee, &r) == PC_OK) {
-            printf("  accepted      a 40 byte script, pushed the minimal way\n");
-            dogecoin_free(r);
-        } else {
-            printf("  REFUSED       a 40 byte script, pushed the minimal way\n");
-            failures++;
-        }
-
+        /* Any script that is not the one this channel's keys and locktime
+           build. The canonical rebuild refuses it before the assembly does,
+           which is why the minimal-push rule is now pinned against
+           pc_refund_walk() directly in test_channel.c rather than here: no
+           input to pc_refund_create() can reach it any more. */
         bad = ch;
         r = NULL;
         checks++;
-        /* 260 bytes of script: past what a one-byte OP_PUSHDATA1 operand can
-           carry, and still inside redeem_script_hex */
         memset(bad.redeem_script_hex, '5', 520);
         bad.redeem_script_hex[520] = '\0';
         if (pc_refund_create(&bad, awif, aaddr, fee, &r) == PC_OK) {
-            printf("  ACCEPTED      a redeem script past the pushdata operand\n");
+            printf("  ACCEPTED      a redeem script that is not this channel's\n");
             failures++;
             dogecoin_free(r);
         } else {
-            printf("  refused (redeem script over 255 bytes         ) "
-                   "a redeem script past the pushdata operand\n");
+            printf("  refused (script is not this channel's         ) "
+                   "a redeem script that is not this channel's\n");
+        }
+
+        /* The locktime the refund writes and the CHECKLOCKTIMEVERIFY it has to
+           satisfy came from two places that nothing reconciled. A refund built
+           against a moved locktime is one no node will mine, discovered at the
+           timeout when there is nothing to fall back on. */
+        bad = ch;
+        r = NULL;
+        checks++;
+        bad.locktime = 1;
+        if (pc_refund_create(&bad, awif, aaddr, fee, &r) == PC_OK) {
+            printf("  ACCEPTED      a locktime the redeem script does not carry\n");
+            failures++;
+            dogecoin_free(r);
+        } else {
+            printf("  refused (locktime is not the script's        ) "
+                   "a locktime the redeem script does not carry\n");
         }
     }
 
