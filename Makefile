@@ -74,6 +74,7 @@ check: $(TESTS) $(BINS)
 	./test_channel
 	./test/attack
 	./test/loopback.sh
+	./test/slowpeer.sh
 
 clean:
 	rm -f $(BINS) $(TESTS) src/*.o test/*.o

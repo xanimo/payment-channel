@@ -9,6 +9,7 @@
 
 #include "channel.h"
 #include "hex.h"
+#include "refund.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -225,6 +226,63 @@ int main(void)
         utils_hex_to_bin(nulled, o, 8, &n);
         CHECK(n <= 4, "hex: the shipped converter writes no more than asked");
         CHECK(!pc_hex_to_bin(nulled, o, 4), "hex: and this one refuses it");
+    }
+
+    /* The minimal-push rule in pc_refund_walk(). The canonical script is 116
+       bytes and always pushes via OP_PUSHDATA1, and pc_refund_create() now
+       refuses any script that is not this channel's, so nothing reaching that
+       function can take the direct-push branch. It is checked here against the
+       walk itself, which is the level fuzz_refund drives.
+
+       The script comparison runs before the signature does, so these separate
+       the two without needing a valid signature: a wrongly encoded push is
+       PC_ERR_SCRIPT, a correctly encoded one gets past it and dies on the key. */
+    {
+        unsigned char redeem[8];
+        memset(redeem, 0x51, sizeof(redeem));       /* 8 bytes, under 76 */
+        unsigned char apub[33], hash[32];
+        memset(apub, 0x02, sizeof(apub));
+        memset(hash, 0x11, sizeof(hash));
+
+        /* version, one input, 36 byte prevout, then the scriptSig */
+        unsigned char tx[128];
+        size_t n = 0;
+        memset(tx, 0, sizeof(tx));
+        tx[n++] = 0x01; n += 3;                      /* version */
+        tx[n++] = 0x01;                              /* one input */
+        n += 36;                                     /* prevout */
+        size_t sslen_at = n++;                       /* scriptSig length */
+        size_t ss_at = n;
+        tx[n++] = 0x09;                              /* a 9 byte push: sig */
+        for (int i = 0; i < 9; i++) tx[n++] = (i == 8) ? 0x01 : 0x30;
+        tx[n++] = 0x51;                              /* OP_1 */
+        size_t push_at = n;
+        tx[n++] = 0x08;                              /* minimal push of 8 bytes */
+        memcpy(tx + n, redeem, sizeof(redeem)); n += sizeof(redeem);
+        size_t sn = n - ss_at;
+        tx[sslen_at] = (unsigned char)sn;
+
+        pc_result minimal = pc_refund_walk(tx, n, sn, redeem, sizeof(redeem),
+                                           apub, hash);
+        CHECK(minimal == PC_ERR_KEY,
+              "walk: a minimal push gets past the script check, %s",
+              pc_strerror(minimal));
+
+        /* the same length pushed the long way, which MINIMALDATA refuses */
+        unsigned char tx2[128];
+        memcpy(tx2, tx, sizeof(tx2));
+        size_t n2 = push_at;
+        tx2[n2++] = 0x4c;                            /* OP_PUSHDATA1 */
+        tx2[n2++] = 0x08;
+        memcpy(tx2 + n2, redeem, sizeof(redeem)); n2 += sizeof(redeem);
+        size_t sn2 = n2 - ss_at;
+        tx2[sslen_at] = (unsigned char)sn2;
+
+        pc_result nonmin = pc_refund_walk(tx2, n2, sn2, redeem, sizeof(redeem),
+                                          apub, hash);
+        CHECK(nonmin == PC_ERR_SCRIPT,
+              "walk: OP_PUSHDATA1 for a short script is refused, %s",
+              pc_strerror(nonmin));
     }
 
     CHECK(generatePrivPubKeypair(alice_wif, alice_addr, false), "alice keygen");
