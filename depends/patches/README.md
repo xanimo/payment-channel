@@ -37,15 +37,19 @@ consumer that declared them would compile and fail to link.
 conversion in the library shares. without it `finalize_transaction` returns a
 pointer that the next call overwrites, and freeing it aborts.
 
-0009 stops `utils_hex_to_bin` reading past the string it was given. it ran
-`inLen / 2` iterations without consulting the NUL, left a non-hex nibble as the
-zero it was pre-set to, and assigned `*outLen` to `inLen / 2` at the end
+0009 makes `inLen` an upper bound on `utils_hex_to_bin` rather than a claim
+about the string, which is the contract change and is larger than the diff. it
+ran `inLen / 2` iterations without consulting the NUL, left a non-hex nibble as
+the zero it was pre-set to, and assigned `*outLen` to `inLen / 2` at the end
 regardless, so an empty string with `inLen` 8 returned four bytes off the stack
 and reported four bytes written. every caller checking the out-count against the
 length it asked for was comparing that length to itself, across 191 call sites.
+two of those pass NULL for the count and both are in `test/utils_tests.c`, so
+nothing in the library declines it.
+
 this channel does not need it: `src/hex.h` converts strictly and the suite is
-green with or without 0009. it is here because the reproducer belongs next to
-the fix.
+green against a dependency with or without 0009, which is what `test_channel`
+now asserts. it is here because the reproducer belongs next to the fix.
 
 0008 makes `chain_from_b58_prefix` read the version byte instead of the first
 character. regtest's 0x6f encodes to 'm' or 'n' and testnet's 0x71 is only ever

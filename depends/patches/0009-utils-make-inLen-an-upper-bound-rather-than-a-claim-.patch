@@ -1,35 +1,47 @@
-From 5ae544b07dfd01d3957699eadc3439c3360eefae Mon Sep 17 00:00:00 2001
+From dffdfc5581164e142858a07245505959d8b251e3 Mon Sep 17 00:00:00 2001
 From: bluezr <bluezr@dogecoin.com>
 Date: Sun, 6 Sep 2026 02:32:55 -0700
-Subject: [PATCH] utils: stop hex_to_bin reading past the string and reporting
- success anyway
+Subject: [PATCH] utils: make inLen an upper bound rather than a claim about
+ the string
 
-utils_hex_to_bin() ran inLen / 2 iterations whatever str held. It never
-consulted the NUL, so a caller passing a fixed inLen against a shorter string
-read past the end of it. A character outside the hex alphabet failed all three
-range tests and left the nibble as the zero it had been pre-set to. And *outLen
-was assigned inLen / 2 at the end regardless, so every caller checking the
-out-count against the length it asked for was comparing that length to itself.
+This changes the contract. inLen was documented as "the number of characters in
+the hex string" and the code took that literally, running inLen / 2 iterations
+whatever str held. It becomes the maximum to read: conversion stops at a NUL or
+at any character outside [0-9a-fA-F], and *outLen becomes the number of bytes
+actually converted rather than a restatement of inLen / 2.
 
-An empty string with inLen 8 returned four bytes off the stack and reported
-four bytes written:
+That is the whole of the behaviour change and it only affects malformed input.
+A well-formed string of the requested length converts byte for byte as before.
+
+What it fixes, all three from the same cause. The loop never consulted the NUL,
+so a caller passing a fixed inLen against a shorter string read past the end of
+it. A character outside the alphabet failed all three range tests and left the
+nibble as the zero it had been pre-set to. And *outLen was assigned inLen / 2 at
+the end regardless, so every caller checking the out-count against the length it
+asked for was comparing that length to itself. An empty string with inLen 8
+returned four bytes off the stack and reported four bytes written:
 
     before                                        after
     short string, inLen 64  outLen=32             outLen=4
     non-hex at offset 4     outLen=4 dead00ef     outLen=2 dead0000
     empty, inLen 8          outLen=4 00000020     outLen=0 00000000
 
-Stops at the first character that is not a hex digit. utils_hex_digit() already
-returns -1 for every byte outside the alphabet, the NUL included, so this is a
-table that was already in the file. Bytes past the stop keep the zero from
-dogecoin_mem_zero(), which is what a partial conversion already produced, and a
-well-formed string of the requested length converts exactly as before.
+Reuses utils_hex_digit(), already in this file, which indexes p_util_hexdigit
+through (unsigned char) so a byte at or above 0x80 does not sign-extend into a
+negative index. Checked across all 256 values: 22 return a digit, 234 return -1,
+none return anything else. Bytes past the stop keep the zero from
+dogecoin_mem_zero(), which is what a partial conversion already produced.
 
-This changes what *outLen means for malformed input: it is now the number of
-bytes converted rather than a restatement of inLen. 191 call sites, and the ones
-that pass a strlen-derived length over valid hex are unaffected.
+Ordering matters in the loop: hi is tested before str[i * 2 + 1] is read, so the
+second character is only touched once the first was a hex digit and therefore
+not the NUL. An odd-length string stops without an overread.
 
-make check green, 106 PASSED, 0 FAIL.
+191 call sites. Two pass NULL for outLen and both are in test/utils_tests.c, so
+no caller in the library declines the count. Those two get no signal that a
+conversion stopped early, which is a limit of the void return rather than of this
+patch; giving the function a return value is a separate change.
+
+make check green: 106 PASSED, 0 FAIL.
 ---
  src/utils.c | 50 +++++++++++++++++++++++++++++++-------------------
  1 file changed, 31 insertions(+), 19 deletions(-)
