@@ -26,6 +26,7 @@
 
 #include "channel.h"
 #include "hex.h"
+#include "refund.h"
 
 #include <inttypes.h>
 #include <stdarg.h>
@@ -686,6 +687,61 @@ static size_t refund_bytes(const pc_channel *ch, const unsigned char h160[20],
     return n;
 }
 
+pc_result pc_refund_walk(const unsigned char *buf, size_t fn, size_t sn,
+                         const unsigned char *redeem, size_t rlen,
+                         const unsigned char apub[33],
+                         const unsigned char hash[32])
+{
+    if (!buf || !redeem || !apub || !hash) return PC_ERR_ARG;
+    if (fn < 42) return PC_ERR_SCRIPT;
+
+    size_t off = 4;                                /* version */
+    if (buf[off++] != 0x01) return PC_ERR_SCRIPT;  /* exactly one input */
+    off += 36;                                     /* prevout */
+
+    size_t got = buf[off++];
+    if (got == 0xfd) {
+        if (off + 2 > fn) return PC_ERR_SCRIPT;
+        got = buf[off] | ((size_t)buf[off + 1] << 8);
+        off += 2;
+    } else if (got >= 0xfd) return PC_ERR_SCRIPT;
+    if (got != sn || off + got > fn) return PC_ERR_SCRIPT;
+    const unsigned char *s = buf + off;
+
+    /* <alice sig> OP_1 <redeem script>, and nothing after it */
+    size_t k = 0;
+    if (k >= got || s[k] == 0 || s[k] > 75) return PC_ERR_SCRIPT;
+    size_t slen = s[k++];
+    if (k + slen > got) return PC_ERR_SCRIPT;
+    const unsigned char *rsig = s + k;
+    k += slen;
+    if (k >= got || s[k++] != 0x51) return PC_ERR_SCRIPT;
+
+    /* The encoding refund_bytes() would have produced, not merely one that
+       decodes to the same length. MINIMALDATA is on the relay path, so a script
+       pushed the long way is a script that does not spend. */
+    size_t plen;
+    if (k >= got) return PC_ERR_SCRIPT;
+    if (s[k] < 76) plen = s[k++];
+    else if (s[k] == 0x4c) {
+        k++;
+        if (k >= got) return PC_ERR_SCRIPT;
+        plen = s[k++];
+        if (plen < 76) return PC_ERR_SCRIPT;
+    } else return PC_ERR_SCRIPT;
+    if (k + plen != got) return PC_ERR_SCRIPT;
+    if (plen != rlen || memcmp(s + k, redeem, rlen) != 0) return PC_ERR_SCRIPT;
+
+    if (slen < 2 || rsig[slen - 1] != 0x01) return PC_ERR_KEY;   /* SIGHASH_ALL */
+    /* const off only here: dogecoin_ecc_verify_sig takes a mutable pointer, and
+       the walk above must keep the compiler's guarantee that it never writes. */
+    if (!dogecoin_ecc_verify_sig((unsigned char *)apub, true,
+                                 (unsigned char *)hash,
+                                 (unsigned char *)rsig, slen - 1))
+        return PC_ERR_KEY;
+    return PC_OK;
+}
+
 pc_result pc_refund_create(const pc_channel *ch,
                            const char *alice_wif,
                            const char *alice_addr,
@@ -782,65 +838,19 @@ pc_result pc_refund_create(const pc_channel *ch,
        but because it is discarded and replaced, which is the stronger
        statement: no sighash over this transaction can attest to its scriptSig.
 
-       So the input is walked back out of the serialization. Two different
-       things are being checked and they are not the same strength. The
-       signature is verified against bytes read out of the returned
-       transaction, which is what the guard exists for. The length and script
-       comparisons check the serialization against memory this function built,
-       which pins that refund_bytes() serialized what it was handed and says
-       nothing beyond that. */
+       Two different things are being checked and they are not the same
+       strength. The signature is verified against bytes read out of the
+       returned transaction, which is what this exists for. The length and
+       script comparisons check the serialization against memory this function
+       built, which pins that refund_bytes() serialized what it was handed and
+       says nothing beyond that. */
     {
         unsigned char apub[33];
         if (!pc_hex_to_bin(ch->alice_pubkey_hex, apub, sizeof(apub))) {
             rc = PC_ERR_KEY; goto out;
         }
-
-        rc = PC_ERR_SCRIPT;
-        if (fn < 42) goto out;
-        size_t off = 4;                            /* version */
-        if (buf[off++] != 0x01) goto out;          /* exactly one input */
-        off += 36;                                 /* prevout */
-
-        /* Every read is bounded against fn here, including the second half of
-           a two-byte varint. A 0xfd prefix does imply a scriptSig long enough
-           that fn covers those bytes, but that is an argument about what
-           refund_bytes() writes, and this block is the one place that is not
-           supposed to take refund_bytes() at its word. */
-        size_t got = buf[off++];
-        if (got == 0xfd) {
-            if (off + 2 > fn) goto out;
-            got = buf[off] | ((size_t)buf[off + 1] << 8);
-            off += 2;
-        } else if (got >= 0xfd) goto out;
-        if (got != sn || off + got > fn) goto out;
-        unsigned char *s = buf + off;
-
-        /* <alice sig> OP_1 <redeem script>, and nothing after it */
-        size_t k = 0;
-        if (k >= got || s[k] == 0 || s[k] > 75) goto out;
-        size_t slen = s[k++];
-        if (k + slen > got) goto out;
-        unsigned char *rsig = s + k;
-        k += slen;
-        if (k >= got || s[k++] != 0x51) goto out;
-        size_t plen;
-        if (k >= got) goto out;
-        /* The encoding refund_bytes() would have produced, not merely one that
-           decodes to the same length. MINIMALDATA is on the relay path, so a
-           script pushed the long way is a script that does not spend. */
-        if (s[k] < 76) { plen = s[k++]; if (plen >= 76) goto out; }
-        else if (s[k] == 0x4c) {
-            k++;
-            if (k >= got) goto out;
-            plen = s[k++];
-            if (plen < 76) goto out;
-        } else goto out;
-        if (k + plen != got) goto out;
-        if (plen != rlen || memcmp(s + k, redeem, rlen) != 0) goto out;
-
-        rc = PC_ERR_KEY;
-        if (slen < 2 || rsig[slen - 1] != 0x01) goto out;   /* SIGHASH_ALL */
-        if (!dogecoin_ecc_verify_sig(apub, true, hash, rsig, slen - 1)) goto out;
+        rc = pc_refund_walk(buf, fn, sn, redeem, rlen, apub, hash);
+        if (rc != PC_OK) goto out;
     }
 
     /* the caller frees this with dogecoin_free(), which goes through the
