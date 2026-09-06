@@ -40,6 +40,7 @@
  * then runs the channel against that confirmed transaction. */
 
 #include "common.h"
+#include "hex.h"
 
 #include <ctype.h>
 #include <inttypes.h>
@@ -217,12 +218,10 @@ int main(int argc, char **argv)
         dogecoin_pubkey bp;
         dogecoin_pubkey_init(&bp);
         bp.compressed = true;
-        size_t bl = 0;
-        if (strlen(in.psbt_hex) != 66) {
-            fprintf(stderr, "alice: peer key is not 33 bytes\n"); goto done;
+        if (!pc_hex_to_bin(in.psbt_hex, bp.pubkey, 33)) {
+            fprintf(stderr, "alice: peer key is not 33 bytes of hex\n"); goto done;
         }
-        utils_hex_to_bin(in.psbt_hex, bp.pubkey, 66, &bl);
-        if (bl != 33 || !dogecoin_pubkey_is_valid(&bp)) {
+        if (!dogecoin_pubkey_is_valid(&bp)) {
             fprintf(stderr, "alice: peer key is not a point on the curve\n");
             goto done;
         }

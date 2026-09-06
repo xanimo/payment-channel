@@ -49,7 +49,10 @@ typedef enum { PC_CHAIN_MAIN = 0, PC_CHAIN_TEST, PC_CHAIN_REGTEST } pc_chain;
 
 const dogecoin_chainparams *pc_chainparams(pc_chain chain);
 
-#define PC_MAX_SCRIPT_HEX   1024   /* 520-byte redeem script as hex, plus NUL */
+/* 511 bytes of script as hex plus a NUL. P2SH allows 520, so a maximal legal
+   redeem script does not fit here and pc_refund_create() refuses over 255
+   anyway, which is the tighter of the two limits. */
+#define PC_MAX_SCRIPT_HEX   1024
 #define PC_MAX_PSBT_HEX    16384
 #define PC_ADDR_LEN        P2SHLEN
 

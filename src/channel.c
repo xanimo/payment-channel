@@ -773,13 +773,22 @@ pc_result pc_refund_create(const pc_channel *ch,
     }
 
     /* Check the transaction that gets returned rather than the one that got
-       signed. A legacy SIGHASH_ALL digest blanks every scriptSig, so
-       re-deriving the sighash from the final bytes reproduces the same hash
-       whatever was assembled above: the scriptSig is the one part of this
-       transaction no sighash can attest to. So the input is walked back out of
-       the serialization, the three pushes are checked against what they were
-       built from, and the signature is verified from the bytes the transaction
-       actually carries. */
+       signed.
+
+       Re-deriving the sighash from the final bytes cannot do this.
+       sighash_all() excises the input's scriptSig region and splices the redeem
+       script in over it, so the digest is computed over bytes that no longer
+       contain whatever was assembled above. Not because the region is blanked,
+       but because it is discarded and replaced, which is the stronger
+       statement: no sighash over this transaction can attest to its scriptSig.
+
+       So the input is walked back out of the serialization. Two different
+       things are being checked and they are not the same strength. The
+       signature is verified against bytes read out of the returned
+       transaction, which is what the guard exists for. The length and script
+       comparisons check the serialization against memory this function built,
+       which pins that refund_bytes() serialized what it was handed and says
+       nothing beyond that. */
     {
         unsigned char apub[33];
         if (!pc_hex_to_bin(ch->alice_pubkey_hex, apub, sizeof(apub))) {
@@ -792,33 +801,46 @@ pc_result pc_refund_create(const pc_channel *ch,
         if (buf[off++] != 0x01) goto out;          /* exactly one input */
         off += 36;                                 /* prevout */
 
+        /* Every read is bounded against fn here, including the second half of
+           a two-byte varint. A 0xfd prefix does imply a scriptSig long enough
+           that fn covers those bytes, but that is an argument about what
+           refund_bytes() writes, and this block is the one place that is not
+           supposed to take refund_bytes() at its word. */
         size_t got = buf[off++];
-        if (got == 0xfd) { got = buf[off] | ((size_t)buf[off + 1] << 8); off += 2; }
-        else if (got >= 0xfd) goto out;
+        if (got == 0xfd) {
+            if (off + 2 > fn) goto out;
+            got = buf[off] | ((size_t)buf[off + 1] << 8);
+            off += 2;
+        } else if (got >= 0xfd) goto out;
         if (got != sn || off + got > fn) goto out;
-        const unsigned char *s = buf + off;
+        unsigned char *s = buf + off;
 
         /* <alice sig> OP_1 <redeem script>, and nothing after it */
         size_t k = 0;
         if (k >= got || s[k] == 0 || s[k] > 75) goto out;
         size_t slen = s[k++];
         if (k + slen > got) goto out;
-        const unsigned char *rsig = s + k;
+        unsigned char *rsig = s + k;
         k += slen;
         if (k >= got || s[k++] != 0x51) goto out;
         size_t plen;
         if (k >= got) goto out;
-        if (s[k] < 76) plen = s[k++];
-        else if (s[k] == 0x4c) { k++; if (k >= got) goto out; plen = s[k++]; }
-        else goto out;
+        /* The encoding refund_bytes() would have produced, not merely one that
+           decodes to the same length. MINIMALDATA is on the relay path, so a
+           script pushed the long way is a script that does not spend. */
+        if (s[k] < 76) { plen = s[k++]; if (plen >= 76) goto out; }
+        else if (s[k] == 0x4c) {
+            k++;
+            if (k >= got) goto out;
+            plen = s[k++];
+            if (plen < 76) goto out;
+        } else goto out;
         if (k + plen != got) goto out;
         if (plen != rlen || memcmp(s + k, redeem, rlen) != 0) goto out;
 
         rc = PC_ERR_KEY;
         if (slen < 2 || rsig[slen - 1] != 0x01) goto out;   /* SIGHASH_ALL */
-        unsigned char der[75];                 /* the push is bounded at 75 above */
-        memcpy(der, rsig, slen - 1);
-        if (!dogecoin_ecc_verify_sig(apub, true, hash, der, slen - 1)) goto out;
+        if (!dogecoin_ecc_verify_sig(apub, true, hash, rsig, slen - 1)) goto out;
     }
 
     /* the caller frees this with dogecoin_free(), which goes through the

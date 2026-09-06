@@ -335,6 +335,23 @@ int main(void)
                    "a funding txid short of 64 hex\n");
         }
 
+        /* The canonical script is 116 bytes, so it always pushes via
+           OP_PUSHDATA1 and the direct-push branch of the check is never taken
+           by a real channel. A short script takes it, which is what pins that
+           the encoding is required to be the minimal one. */
+        bad = ch;
+        r = NULL;
+        checks++;
+        memset(bad.redeem_script_hex, '5', 80);
+        bad.redeem_script_hex[80] = '\0';
+        if (pc_refund_create(&bad, awif, aaddr, fee, &r) == PC_OK) {
+            printf("  accepted      a 40 byte script, pushed the minimal way\n");
+            dogecoin_free(r);
+        } else {
+            printf("  REFUSED       a 40 byte script, pushed the minimal way\n");
+            failures++;
+        }
+
         bad = ch;
         r = NULL;
         checks++;
