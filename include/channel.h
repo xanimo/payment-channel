@@ -70,7 +70,9 @@ typedef enum {
     PC_ERR_FEE,          /* what is left over is below the miner's floor      */
     PC_ERR_FINAL,        /* a non-zero locktime or a non-final input          */
     PC_ERR_VERSION,      /* the transaction version is outside 1..2            */
-    PC_ERR_NONSTANDARD   /* an output script is not a type a node will relay   */
+    PC_ERR_NONSTANDARD,  /* an output script is not a type a node will relay   */
+    PC_ERR_TX,           /* the bytes returned are not the ones that were signed */
+    PC_ERR_LAST          /* not a code: one past the last, so a test can walk them */
 } pc_result;
 
 /* Four of these are nothing to do with the amount Bob is paid, and a merchant

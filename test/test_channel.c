@@ -830,7 +830,10 @@ int main(void)
     /* bob sends pc_strerror() as a reject reason, so every one of them has to
        survive the envelope. a comma in one of these is how the reject path went
        dead the first time. */
-    for (int e = PC_OK; e <= PC_ERR_FINAL + 1; e++) {
+    /* PC_ERR_LAST rather than a literal: this loop was written when
+       PC_ERR_FINAL was the last code and stopped one past it, so the six
+       added since were never checked against the field they travel in. */
+    for (int e = PC_OK; e < PC_ERR_LAST; e++) {
         const char *why = pc_strerror((pc_result)e);
         /* Assert on the source, not on the copy. send_reject() snprintf()s into
            this field, so testing the copy reproduces any truncation before

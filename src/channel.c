@@ -56,6 +56,8 @@ const char *pc_strerror(pc_result r)
     case PC_ERR_FINAL:   return "not final and cannot be mined yet";
     case PC_ERR_VERSION: return "version is not a standard one";
     case PC_ERR_NONSTANDARD: return "an output script is not standard";
+    case PC_ERR_TX:      return "not the signed transaction";
+    case PC_ERR_LAST:    break;   /* a count, never returned */
     }
     return "unknown";
 }
@@ -858,6 +860,26 @@ pc_result pc_refund_create(const pc_channel *ch,
     char *outhex = (char *)dogecoin_malloc(fn * 2 + 1);
     if (!outhex) { rc = PC_ERR_ARG; goto out; }
     utils_bin_to_hex(buf, fn, outhex);
+
+    /* And the complement of the walk, which stops at the end of the scriptSig
+       and never reads the sequence, the outputs or the locktime. Those are
+       still only what the second refund_bytes() call happened to write, and
+       nothing above would notice if it wrote a different address, value or
+       locktime than the call that was signed: the fee test sees a length, the
+       dust test reads memory, and the signature verifies against a digest taken
+       before that call happened.
+
+       Re-deriving covers exactly that. Excising the scriptSig and splicing the
+       same script code into the same position is what makes the digest blind to
+       the assembly, and it is the same property that makes it sensitive to
+       every other byte. So it has to come back equal to what was signed. */
+    unsigned char h2[32];
+    if (pc_tx_sighash(outhex, redeem, rlen, h2) != PC_OK ||
+        memcmp(h2, hash, sizeof(h2)) != 0) {
+        dogecoin_free(outhex);
+        rc = PC_ERR_TX;
+        goto out;
+    }
 
     *raw_tx_hex_out = outhex;
     rc = PC_OK;
