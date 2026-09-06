@@ -32,6 +32,7 @@
  * funding outpoint, and an output to Bob for at least what was claimed. */
 
 #include "channel.h"
+#include "hex.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -195,9 +196,11 @@ static pc_result verify_sigs(const pc_channel *ch,
     unsigned char redeem[520];
     size_t rlen = 0;
     size_t rhexlen = strlen(ch->redeem_script_hex);
-    if (rhexlen == 0 || (rhexlen % 2) || rhexlen / 2 > sizeof(redeem))
+    if (rhexlen == 0 || (rhexlen % 2) || rhexlen / 2 > sizeof(redeem) ||
+        !pc_is_hex(ch->redeem_script_hex, rhexlen))
         return PC_ERR_SCRIPT;
-    utils_hex_to_bin(ch->redeem_script_hex, redeem, rhexlen, &rlen);
+    if (!pc_hex_to_bin(ch->redeem_script_hex, redeem, rhexlen / 2)) return PC_ERR_SCRIPT;
+    rlen = rhexlen / 2;
     if (rlen != rhexlen / 2) return PC_ERR_SCRIPT;
 
     /* OP_0 <sig alice> <sig bob> OP_0 <redeem script> */
@@ -225,13 +228,8 @@ static pc_result verify_sigs(const pc_channel *ch,
         return PC_ERR_PSBT;
 
     unsigned char apub[33], bpub[33];
-    size_t n = 0;
-    if (strlen(ch->alice_pubkey_hex) != 66 || strlen(ch->bob_pubkey_hex) != 66)
-        return PC_ERR_KEY;
-    utils_hex_to_bin(ch->alice_pubkey_hex, apub, 66, &n);
-    if (n != sizeof(apub)) return PC_ERR_KEY;
-    utils_hex_to_bin(ch->bob_pubkey_hex, bpub, 66, &n);
-    if (n != sizeof(bpub)) return PC_ERR_KEY;
+    if (!pc_hex_to_bin(ch->alice_pubkey_hex, apub, sizeof(apub))) return PC_ERR_KEY;
+    if (!pc_hex_to_bin(ch->bob_pubkey_hex, bpub, sizeof(bpub))) return PC_ERR_KEY;
 
     if (!dogecoin_ecc_verify_sig(apub, true, hash, (unsigned char *)sa, salen - 1))
         return PC_ERR_PSBT;
@@ -290,9 +288,8 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
     if (hl == 0 || (hl % 2)) return PC_ERR_ARG;
     unsigned char *buf = (unsigned char *)malloc(hl / 2 + 1);
     if (!buf) return PC_ERR_ARG;
-    size_t blen = 0;
-    utils_hex_to_bin(raw_tx_hex, buf, hl, &blen);
-    if (blen != hl / 2) { free(buf); return PC_ERR_ARG; }
+    if (!pc_hex_to_bin(raw_tx_hex, buf, hl / 2)) { free(buf); return PC_ERR_ARG; }
+    size_t blen = hl / 2;
 
     /* held until the walk finishes, so a refusal leaves the caller's outputs
        alone rather than filled in from a call that failed */
@@ -367,9 +364,7 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     dogecoin_pubkey bob;
     dogecoin_pubkey_init(&bob);
     bob.compressed = true;
-    size_t pklen = 0;
-    utils_hex_to_bin(ch->bob_pubkey_hex, bob.pubkey, 66, &pklen);
-    if (pklen != 33) return PC_ERR_ARG;
+    if (!pc_hex_to_bin(ch->bob_pubkey_hex, bob.pubkey, 33)) return PC_ERR_ARG;
     uint160_t bob_h160;
     dogecoin_pubkey_get_hash160(&bob, bob_h160);
 
@@ -382,9 +377,8 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     if (hl == 0 || (hl % 2)) return PC_ERR_ARG;
     unsigned char *buf = (unsigned char *)malloc(hl / 2 + 1);
     if (!buf) return PC_ERR_ARG;
-    size_t blen = 0;
-    utils_hex_to_bin(raw_tx_hex, buf, hl, &blen);
-    if (blen != hl / 2) { free(buf); return PC_ERR_ARG; }
+    if (!pc_hex_to_bin(raw_tx_hex, buf, hl / 2)) { free(buf); return PC_ERR_ARG; }
+    size_t blen = hl / 2;
 
     rdr r = { buf, blen, 0, 0 };
     pc_result rc = PC_ERR_PSBT;
@@ -498,11 +492,11 @@ pc_result pc_tx_sighash(const char *raw_tx_hex,
     if (hl == 0 || (hl % 2)) return PC_ERR_ARG;
     unsigned char *buf = (unsigned char *)malloc(hl / 2 + 1);
     if (!buf) return PC_ERR_ARG;
-    size_t blen = 0;
-    utils_hex_to_bin(raw_tx_hex, buf, hl, &blen);
+    size_t blen = hl / 2;
 
-    pc_result rc = PC_ERR_PSBT;
-    if (blen != hl / 2) goto out;
+    pc_result rc = PC_ERR_ARG;
+    if (!pc_hex_to_bin(raw_tx_hex, buf, blen)) goto out;
+    rc = PC_ERR_PSBT;
 
     rdr r = { buf, blen, 0, 0 };
     rd_u(&r, 4);                                  /* version */

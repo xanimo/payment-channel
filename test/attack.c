@@ -315,6 +315,43 @@ int main(void)
         }
     }
 
+    /* The refund is built when Bob is gone, so nothing downstream ever tells
+       Alice it is wrong. Its inputs come out of the channel struct, which the
+       caller owns and can hand over in a state the constructors never produce. */
+    {
+        pc_channel bad;
+        char *r = NULL;
+        uint64_t fee = pc_min_fee(PC_TYPICAL_TX_BYTES, 0);
+
+        bad = ch;
+        checks++;
+        snprintf(bad.funding_txid, sizeof(bad.funding_txid), "%s", "deadbeef");
+        if (pc_refund_create(&bad, awif, aaddr, fee, &r) == PC_OK) {
+            printf("  ACCEPTED      a funding txid short of 64 hex\n");
+            failures++;
+            dogecoin_free(r);
+        } else {
+            printf("  refused (short funding txid                   ) "
+                   "a funding txid short of 64 hex\n");
+        }
+
+        bad = ch;
+        r = NULL;
+        checks++;
+        /* 260 bytes of script: past what a one-byte OP_PUSHDATA1 operand can
+           carry, and still inside redeem_script_hex */
+        memset(bad.redeem_script_hex, '5', 520);
+        bad.redeem_script_hex[520] = '\0';
+        if (pc_refund_create(&bad, awif, aaddr, fee, &r) == PC_OK) {
+            printf("  ACCEPTED      a redeem script past the pushdata operand\n");
+            failures++;
+            dogecoin_free(r);
+        } else {
+            printf("  refused (redeem script over 255 bytes         ) "
+                   "a redeem script past the pushdata operand\n");
+        }
+    }
+
     printf("\n%d attacks, %d got through\n", checks, failures);
     rc = failures ? 1 : 0;
 done:

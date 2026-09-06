@@ -8,6 +8,7 @@
  * real node, which is what proves the transaction is actually accepted. */
 
 #include "channel.h"
+#include "hex.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -198,6 +199,30 @@ int main(void)
     /* ── two parties ─────────────────────────────────────────── */
     char alice_wif[PRIVKEYWIFLEN], alice_addr[P2PKHLEN];
     char bob_wif[PRIVKEYWIFLEN],   bob_addr[P2PKHLEN];
+    /* The shipped converter cannot be asked whether it worked: it runs inLen/2
+       iterations without consulting the NUL, leaves a non-hex nibble as the zero
+       it was pre-set to, and assigns the out-count inLen/2 at the end whatever
+       happened. These pin the replacement actually refusing. */
+    {
+        unsigned char o[4];
+        CHECK(pc_hex_to_bin("deadbeef", o, 4) && o[0] == 0xde && o[3] == 0xef,
+              "hex: a good string converts");
+        CHECK(!pc_hex_to_bin("deadbe", o, 4), "hex: short is refused");
+        CHECK(!pc_hex_to_bin("deadbeef00", o, 4), "hex: long is refused");
+        CHECK(!pc_hex_to_bin("deadbeeg", o, 4), "hex: a non-hex digit is refused");
+        CHECK(!pc_hex_to_bin("", o, 4), "hex: empty is refused");
+
+        /* what the shipped one does with the same short string, which is why
+           the out-count was never a check */
+        char nulled[9];
+        memcpy(nulled, "deadbeef", 9);
+        nulled[4] = '\0';
+        size_t n = 99;
+        utils_hex_to_bin(nulled, o, 8, &n);
+        CHECK(n == 4, "hex: the shipped converter reports success past a NUL");
+        CHECK(!pc_hex_to_bin(nulled, o, 4), "hex: and this one does not");
+    }
+
     CHECK(generatePrivPubKeypair(alice_wif, alice_addr, false), "alice keygen");
     CHECK(generatePrivPubKeypair(bob_wif,   bob_addr,   false), "bob keygen");
 
