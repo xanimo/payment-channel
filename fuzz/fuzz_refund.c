@@ -45,6 +45,7 @@
 #include <string.h>
 
 #include "channel.h"
+#include "refund.h"
 
 static int ready = 0;
 static char awif[PRIVKEYWIFLEN], aaddr[P2PKHLEN];
@@ -119,6 +120,33 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         dogecoin_free(raw);
     } else if (raw) {
         abort();   /* a refusal must not leave the caller holding a transaction */
+    }
+
+    /* The walk, on bytes pc_refund_create() could not have produced.
+     *
+     * Everything above goes in through pc_refund_create(), so refund_bytes()
+     * always serialized correctly and the walk only ever sees a well-formed
+     * transaction of some length. That reaches its length handling and none of
+     * its refusals: the corruption it guards against cannot be expressed
+     * through that entry point. Here the buffer is the fuzzer's, and it is
+     * allocated at exactly fn so a read past the bound is a read past the
+     * allocation and asan reports it. */
+    {
+        size_t fn = size;
+        unsigned char *tx = (unsigned char *)malloc(fn ? fn : 1);
+        if (tx) {
+            memcpy(tx, data, fn);
+            unsigned char wredeem[256], wpub[33], whash[32];
+            size_t rlen = (data[0] % sizeof(wredeem)) + 1;
+            memset(wredeem, data[1], sizeof(wredeem));
+            memset(wpub,    data[2], sizeof(wpub));
+            memset(whash,   data[3], sizeof(whash));
+            /* sn is the length the walk is told to expect, which is the field
+               it cross-checks the varint against */
+            size_t sn = ((size_t)data[4] << 8) | data[5];
+            pc_refund_walk(tx, fn, sn, wredeem, rlen, wpub, whash);
+            free(tx);
+        }
     }
     return 0;
 }

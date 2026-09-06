@@ -136,7 +136,7 @@ static char *forge(const pc_channel *ch, const char *awif, const char *bwif,
     return hex;
 }
 
-static int failures = 0, checks = 0;
+static int failures = 0, checks = 0, controls = 0;
 
 static void expect_refused(const pc_channel *ch, const char *raw,
                            uint64_t claimed, const char *what)
@@ -152,10 +152,13 @@ static void expect_refused(const pc_channel *ch, const char *raw,
     }
 }
 
+/* Not an attack. A refusal here is the harness telling us the attacks above
+   pass because everything is refused, which is the failure mode a wall of
+   "refused" hides. Counted apart from them so the headline number is attacks. */
 static void expect_accepted(const pc_channel *ch, const char *raw,
                             uint64_t claimed, const char *what)
 {
-    checks++;
+    controls++;
     if (!raw) { printf("  BUILD FAILED  %s\n", what); failures++; return; }
     pc_result r = pc_tx_verify_payment(ch, raw, claimed);
     if (r != PC_OK) {
@@ -341,7 +344,7 @@ int main(void)
            the encoding is required to be the minimal one. */
         bad = ch;
         r = NULL;
-        checks++;
+        controls++;
         memset(bad.redeem_script_hex, '5', 80);
         bad.redeem_script_hex[80] = '\0';
         if (pc_refund_create(&bad, awif, aaddr, fee, &r) == PC_OK) {
@@ -369,7 +372,8 @@ int main(void)
         }
     }
 
-    printf("\n%d attacks, %d got through\n", checks, failures);
+    printf("\n%d attacks, %d got through (%d controls accepted)\n",
+           checks, failures, controls);
     rc = failures ? 1 : 0;
 done:
     dogecoin_ecc_stop();
