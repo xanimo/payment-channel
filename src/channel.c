@@ -25,6 +25,7 @@
 */
 
 #include "channel.h"
+#include "hex.h"
 
 #include <inttypes.h>
 #include <stdarg.h>
@@ -127,13 +128,11 @@ pc_result pc_doge_to_koinu(const char *doge, uint64_t *koinu_out)
 static int hex_to_bytes(const char *hex, unsigned char **out, size_t *outlen)
 {
     size_t hl = strlen(hex);
-    if (hl == 0 || (hl % 2)) return 0;
+    if (hl == 0 || (hl % 2) || !pc_is_hex(hex, hl)) return 0;
     unsigned char *b = (unsigned char *)malloc(hl / 2 + 1);
     if (!b) return 0;
-    size_t n = 0;
-    utils_hex_to_bin(hex, b, hl, &n);
-    if (n != hl / 2) { free(b); return 0; }
-    *out = b; *outlen = n;
+    if (!pc_hex_to_bin(hex, b, hl / 2)) { free(b); return 0; }
+    *out = b; *outlen = hl / 2;
     return 1;
 }
 
@@ -160,9 +159,8 @@ pc_result pc_channel_init(pc_channel *ch,
         dogecoin_pubkey pk;
         dogecoin_pubkey_init(&pk);
         pk.compressed = true;
-        size_t n = 0;
-        utils_hex_to_bin(hex, pk.pubkey, 66, &n);
-        if (n != 33 || !dogecoin_pubkey_is_valid(&pk)) return PC_ERR_KEY;
+        if (!pc_hex_to_bin(hex, pk.pubkey, 33)) return PC_ERR_KEY;
+        if (!dogecoin_pubkey_is_valid(&pk)) return PC_ERR_KEY;
     }
 
     /* A channel is between two parties. One key in both slots builds a script
@@ -297,9 +295,7 @@ static int unsigned_1in_0out(const char *txid_display, uint32_t vout,
                              char *out, size_t cap)
 {
     unsigned char prev[32];
-    size_t n = 0;
-    utils_hex_to_bin((char *)txid_display, prev, 64, &n);
-    if (n != 32) return 0;
+    if (!pc_hex_to_bin(txid_display, prev, 32)) return 0;
 
     unsigned char tx[64];
     size_t i = 0;
@@ -662,8 +658,7 @@ static size_t refund_bytes(const pc_channel *ch, const unsigned char h160[20],
 
     /* the txid is stored reversed from the way it is displayed */
     unsigned char txid[32];
-    size_t tn = 0;
-    utils_hex_to_bin(ch->funding_txid, txid, 64, &tn);
+    if (!pc_hex_to_bin(ch->funding_txid, txid, sizeof(txid))) return 0;
     for (int i = 0; i < 32; i++) o[n + i] = txid[31 - i];
     n += 32;
     n += put_u(o + n, (uint64_t)ch->funding_vout, 4);
@@ -717,12 +712,17 @@ pc_result pc_refund_create(const pc_channel *ch,
     char *hex = NULL;
     uint64_t value = ch->capacity_koinu - fee_koinu;
 
+    /* what value has to clear does not depend on anything built below, so it is
+       checked before the signing rather than after it */
+    if (value < PC_HARD_DUST_KOINU) { rc = PC_ERR_DUST; goto out; }
+
     size_t cap = 256 + rlen * 2;
     buf = (unsigned char *)malloc(cap);
     if (!buf) { rc = PC_ERR_ARG; goto out; }
 
     /* what the signature covers: the redeem script stands in for the scriptSig */
     size_t un = refund_bytes(ch, h160, value, NULL, 0, buf);
+    if (un == 0) { rc = PC_ERR_STATE; goto out; }
     hex = (char *)malloc(un * 2 + 1);
     if (!hex) { rc = PC_ERR_ARG; goto out; }
     utils_bin_to_hex(buf, un, hex);
@@ -750,6 +750,10 @@ pc_result pc_refund_create(const pc_channel *ch,
     if (!ss) { rc = PC_ERR_ARG; goto out; }
     size_t sn = 0;
     if (siglen > 75) goto out;
+    /* OP_PUSHDATA1 carries a one-byte length, and redeem_script_hex holds up to
+       511 bytes, so the cast below is only safe because it is refused here.
+       P2SH allows 520, so this is a refusal rather than a smaller buffer. */
+    if (rlen == 0 || rlen > 255) { rc = PC_ERR_SCRIPT; goto out; }
     ss[sn++] = (unsigned char)siglen;
     memcpy(ss + sn, sig, siglen); sn += siglen;
     ss[sn++] = 0x51;                               /* OP_1 */
@@ -758,24 +762,63 @@ pc_result pc_refund_create(const pc_channel *ch,
     memcpy(ss + sn, redeem, rlen); sn += rlen;
 
     size_t fn = refund_bytes(ch, h160, value, ss, sn, buf);
+    if (fn == 0) { rc = PC_ERR_STATE; goto out; }
 
     /* Alice builds this when Bob is already gone, so there is nobody on the
        other end to refuse it and tell her why. Everything Bob would have
        checked about a payment gets checked here instead, which turns a
        discovery at the locktime into a discovery at call time. */
-    if (value < PC_HARD_DUST_KOINU) { rc = PC_ERR_DUST; goto out; }
     if (fee_koinu < pc_min_fee(fn, value < PC_SOFT_DUST_KOINU ? 1 : 0)) {
         rc = PC_ERR_FEE; goto out;
     }
+
+    /* Check the transaction that gets returned rather than the one that got
+       signed. A legacy SIGHASH_ALL digest blanks every scriptSig, so
+       re-deriving the sighash from the final bytes reproduces the same hash
+       whatever was assembled above: the scriptSig is the one part of this
+       transaction no sighash can attest to. So the input is walked back out of
+       the serialization, the three pushes are checked against what they were
+       built from, and the signature is verified from the bytes the transaction
+       actually carries. */
     {
         unsigned char apub[33];
-        size_t an = 0;
-        if (strlen(ch->alice_pubkey_hex) != 66) { rc = PC_ERR_KEY; goto out; }
-        utils_hex_to_bin(ch->alice_pubkey_hex, apub, 66, &an);
-        if (an != sizeof(apub)) { rc = PC_ERR_KEY; goto out; }
-        if (!dogecoin_ecc_verify_sig(apub, true, hash, sig, siglen - 1)) {
+        if (!pc_hex_to_bin(ch->alice_pubkey_hex, apub, sizeof(apub))) {
             rc = PC_ERR_KEY; goto out;
         }
+
+        rc = PC_ERR_SCRIPT;
+        if (fn < 42) goto out;
+        size_t off = 4;                            /* version */
+        if (buf[off++] != 0x01) goto out;          /* exactly one input */
+        off += 36;                                 /* prevout */
+
+        size_t got = buf[off++];
+        if (got == 0xfd) { got = buf[off] | ((size_t)buf[off + 1] << 8); off += 2; }
+        else if (got >= 0xfd) goto out;
+        if (got != sn || off + got > fn) goto out;
+        const unsigned char *s = buf + off;
+
+        /* <alice sig> OP_1 <redeem script>, and nothing after it */
+        size_t k = 0;
+        if (k >= got || s[k] == 0 || s[k] > 75) goto out;
+        size_t slen = s[k++];
+        if (k + slen > got) goto out;
+        const unsigned char *rsig = s + k;
+        k += slen;
+        if (k >= got || s[k++] != 0x51) goto out;
+        size_t plen;
+        if (k >= got) goto out;
+        if (s[k] < 76) plen = s[k++];
+        else if (s[k] == 0x4c) { k++; if (k >= got) goto out; plen = s[k++]; }
+        else goto out;
+        if (k + plen != got) goto out;
+        if (plen != rlen || memcmp(s + k, redeem, rlen) != 0) goto out;
+
+        rc = PC_ERR_KEY;
+        if (slen < 2 || rsig[slen - 1] != 0x01) goto out;   /* SIGHASH_ALL */
+        unsigned char der[75];                 /* the push is bounded at 75 above */
+        memcpy(der, rsig, slen - 1);
+        if (!dogecoin_ecc_verify_sig(apub, true, hash, der, slen - 1)) goto out;
     }
 
     /* the caller frees this with dogecoin_free(), which goes through the
