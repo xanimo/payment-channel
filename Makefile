@@ -55,7 +55,7 @@ test/mkfunding: test/mkfunding.o $(CORE_OBJ)
 # transaction hex. Both are read carefully and neither had been fuzzed, which is
 # the bug class reading misses. clang only, since it needs libFuzzer.
 FUZZ_SAN = -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer
-FUZZERS  = fuzz/fuzz_envelope fuzz/fuzz_txcheck fuzz/fuzz_opening fuzz/fuzz_refund
+FUZZERS  = fuzz/fuzz_envelope fuzz/fuzz_txcheck fuzz/fuzz_opening fuzz/fuzz_refund fuzz/fuzz_payment
 
 fuzz/mkseed: fuzz/mkseed.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)

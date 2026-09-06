@@ -124,6 +124,19 @@ int main(void)
     printf("/* write this to fuzz/corpus/txcheck/closing-tx.hex */\n");
     printf("%s\n", raw);
 
+    /* fuzz_payment drives Bob's signing path, so it needs the keys as well as
+       the pubkeys: a PSBT that reaches the scriptSig assembly has to be one
+       this channel's Bob can actually sign. */
+    printf("/* paste into fuzz_payment.c */\n");
+    printf("static const char *ALICE_WIF  = \"%s\";\n", awif);
+    printf("static const char *BOB_WIF    = \"%s\";\n", bwif);
+    printf("static const char *ALICE_ADDR = \"%s\";\n", aaddr);
+    printf("static const char *BOB_ADDR   = \"%s\";\n", baddr);
+    printf("/* write this to fuzz/corpus/payment/payment.hex */\n");
+    printf("%s\n", psbt);
+    printf("/* and this to fuzz/corpus/payment/funding.hex */\n");
+    printf("%s\n", ftx);
+
     dogecoin_free(psbt);
     dogecoin_free(raw);
     free(ftx);
