@@ -212,15 +212,19 @@ int main(void)
         CHECK(!pc_hex_to_bin("deadbeeg", o, 4), "hex: a non-hex digit is refused");
         CHECK(!pc_hex_to_bin("", o, 4), "hex: empty is refused");
 
-        /* what the shipped one does with the same short string, which is why
-           the out-count was never a check */
+        /* The same short string through the shipped converter. Its out-count
+           is deliberately not asserted: before depends/patches 0009 it reports
+           inLen / 2 whatever the string held, after it reports what converted,
+           and the point of pc_hex_to_bin() is that this program does not depend
+           on which. Asserting the broken value pinned the bug, and the patch
+           turned that assertion red, which is how this comment got written. */
         char nulled[9];
         memcpy(nulled, "deadbeef", 9);
         nulled[4] = '\0';
         size_t n = 99;
         utils_hex_to_bin(nulled, o, 8, &n);
-        CHECK(n == 4, "hex: the shipped converter reports success past a NUL");
-        CHECK(!pc_hex_to_bin(nulled, o, 4), "hex: and this one does not");
+        CHECK(n <= 4, "hex: the shipped converter writes no more than asked");
+        CHECK(!pc_hex_to_bin(nulled, o, 4), "hex: and this one refuses it");
     }
 
     CHECK(generatePrivPubKeypair(alice_wif, alice_addr, false), "alice keygen");

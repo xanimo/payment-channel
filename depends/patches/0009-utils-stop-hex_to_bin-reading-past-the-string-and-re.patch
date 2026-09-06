@@ -1,0 +1,114 @@
+From 5ae544b07dfd01d3957699eadc3439c3360eefae Mon Sep 17 00:00:00 2001
+From: bluezr <bluezr@dogecoin.com>
+Date: Sun, 6 Sep 2026 02:32:55 -0700
+Subject: [PATCH] utils: stop hex_to_bin reading past the string and reporting
+ success anyway
+
+utils_hex_to_bin() ran inLen / 2 iterations whatever str held. It never
+consulted the NUL, so a caller passing a fixed inLen against a shorter string
+read past the end of it. A character outside the hex alphabet failed all three
+range tests and left the nibble as the zero it had been pre-set to. And *outLen
+was assigned inLen / 2 at the end regardless, so every caller checking the
+out-count against the length it asked for was comparing that length to itself.
+
+An empty string with inLen 8 returned four bytes off the stack and reported
+four bytes written:
+
+    before                                        after
+    short string, inLen 64  outLen=32             outLen=4
+    non-hex at offset 4     outLen=4 dead00ef     outLen=2 dead0000
+    empty, inLen 8          outLen=4 00000020     outLen=0 00000000
+
+Stops at the first character that is not a hex digit. utils_hex_digit() already
+returns -1 for every byte outside the alphabet, the NUL included, so this is a
+table that was already in the file. Bytes past the stop keep the zero from
+dogecoin_mem_zero(), which is what a partial conversion already produced, and a
+well-formed string of the requested length converts exactly as before.
+
+This changes what *outLen means for malformed input: it is now the number of
+bytes converted rather than a restatement of inLen. 191 call sites, and the ones
+that pass a strlen-derived length over valid hex are unaffected.
+
+make check green, 106 PASSED, 0 FAIL.
+---
+ src/utils.c | 50 +++++++++++++++++++++++++++++++-------------------
+ 1 file changed, 31 insertions(+), 19 deletions(-)
+
+diff --git a/src/utils.c b/src/utils.c
+index defad9b5..8211b8ec 100644
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -162,9 +162,14 @@ void utils_clear_buffers(void)
+  * @param str The hex string to convert. Required.
+  * @param out The buffer for the raw data to be returned. Required, and must
+  *        have room for inLen / 2 bytes.
+- * @param inLen The number of characters in the hex string.
++ * @param inLen The maximum number of characters to read from the hex string.
++ *        Conversion stops early at a NUL or at any character outside
++ *        [0-9a-fA-F], so this is an upper bound rather than a promise about
++ *        what str contains.
+  * @param outLen Optional. If non-NULL, receives the number of raw bytes
+- *        written to out, or 0 if str or out was NULL.
++ *        actually converted, which is less than inLen / 2 when str was short
++ *        or held a character that is not a hex digit, and 0 if str or out was
++ *        NULL. Bytes past that point are left zeroed.
+  *
+  * @return Nothing.
+  */
+@@ -188,29 +193,36 @@ void utils_hex_to_bin(const char* str, unsigned char* out, size_t inLen, size_t*
+         return;
+         }
+ 
++    /* The loop below ran inLen / 2 times whatever str held. It never consulted
++       the NUL, so a caller passing a fixed inLen against a shorter string read
++       past the end of it; a character outside the hex alphabet failed all three
++       range tests and left the nibble as the zero it had been pre-set to; and
++       *outLen was assigned inLen / 2 at the end regardless. Every caller that
++       checks the out-count against the length it asked for was therefore
++       comparing that length to itself.
++
++       Stopping at the first character that is not a hex digit fixes all three:
++       the NUL is not a hex digit, so a short string stops at its end, and the
++       count reported is the number of bytes that actually converted. Bytes past
++       it keep the zero from dogecoin_mem_zero(), which is what a partial
++       conversion already produced.
++
++       utils_hex_digit() already returns -1 for every byte outside the alphabet,
++       the NUL included, so this is the table that was sitting in the same file
++       unused by this function. */
+     size_t bLen = inLen / 2;
+     size_t i;
+     dogecoin_mem_zero(out, bLen);
+     for (i = 0; i < bLen; i++) {
+-        if (str[i * 2] >= '0' && str[i * 2] <= '9') {
+-            *out = (str[i * 2] - '0') << 4;
+-            }
+-        if (str[i * 2] >= 'a' && str[i * 2] <= 'f') {
+-            *out = (10 + str[i * 2] - 'a') << 4;
+-            }
+-        if (str[i * 2] >= 'A' && str[i * 2] <= 'F') {
+-            *out = (10 + str[i * 2] - 'A') << 4;
+-            }
+-        if (str[i * 2 + 1] >= '0' && str[i * 2 + 1] <= '9') {
+-            *out |= (str[i * 2 + 1] - '0');
+-            }
+-        if (str[i * 2 + 1] >= 'a' && str[i * 2 + 1] <= 'f') {
+-            *out |= (10 + str[i * 2 + 1] - 'a');
++        signed char hi = utils_hex_digit(str[i * 2]);
++        if (hi < 0) {
++            break;
+             }
+-        if (str[i * 2 + 1] >= 'A' && str[i * 2 + 1] <= 'F') {
+-            *out |= (10 + str[i * 2 + 1] - 'A');
++        signed char lo = utils_hex_digit(str[i * 2 + 1]);
++        if (lo < 0) {
++            break;
+             }
+-        out++;
++        out[i] = (unsigned char)((hi << 4) | lo);
+         }
+     if (outLen) {
+         *outLen = i;
+-- 
+2.34.1
+
