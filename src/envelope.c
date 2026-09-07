@@ -218,6 +218,11 @@ pc_result pc_envelope_decode(const char *json, pc_envelope *env)
         size_t rlen = 0;
         if (!read_string(rp, env->ref, sizeof(env->ref), &rlen)) return PC_ERR_ARG;
         if (rlen && (rlen != 64 || !is_hex(env->ref, rlen))) return PC_ERR_ARG;
+        /* Canonicalise to lowercase. The hex here is decoded case-insensitively
+           everywhere, but Bob compares ref to a funding txid he derives lowercase
+           himself, so an uppercase txid from another implementation is the right
+           outpoint answered "wrong funding". |0x20 leaves digits untouched. */
+        for (size_t i = 0; i < rlen; i++) env->ref[i] |= 0x20;
     }
 
     const char *ap = find_key(json, "to_bob");
