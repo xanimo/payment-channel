@@ -104,6 +104,17 @@ refuses an output whose on-chain value is not the capacity alice claimed.
           --confirm-cmd "kw outpoint --headers hdrs --node NODE" --min-depth 6 \
           --price 5.0
 
+`--since-window N` appends `--since HEIGHT` to that command so a height bounded
+backend only scans from there to the tip rather than the whole chain, which is
+what makes a warm `kwd` answer a recent funding output in milliseconds instead
+of seconds. a first open has no better guess than the current height minus `N`,
+so `N` has to cover how far back the funding might be and no further, since too
+recent a start gets "not in the scanned range" and is refused. once a channel
+confirms bob records the funding block in its state file and asks from there
+exactly, so the guess only ever costs the first question. it is off by default
+because `--since` needs a filter cache and a backend without one rejects it as
+an unknown option.
+
 `contrib/regtest.sh` checks that path against a real chain when `KW` points at a
 built backend, covering an unconfirmed output, a buried one and one a close
 already spent. without `KW` it says it skipped rather than passing quietly. ci
