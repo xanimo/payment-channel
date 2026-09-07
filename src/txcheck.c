@@ -207,7 +207,7 @@ static pc_result verify_sigs(const pc_channel *ch,
     unsigned char redeem[256];
     size_t rlen = 0;
     size_t rhexlen = strlen(ch->redeem_script_hex);
-    if (rhexlen == 0 || (rhexlen % 2) || rhexlen / 2 > sizeof(redeem) ||
+    if (rhexlen == 0 || (rhexlen % 2) || rhexlen / 2 > 255 ||
         !pc_is_hex(ch->redeem_script_hex, rhexlen))
         return PC_ERR_SCRIPT;
     if (!pc_hex_to_bin(ch->redeem_script_hex, redeem, rhexlen / 2)) return PC_ERR_SCRIPT;

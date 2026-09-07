@@ -905,6 +905,10 @@ int main(void)
           "missing psbt refused");
     CHECK(pc_envelope_decode("{\"type\":\"payment\",\"ref\":\"abc\",\"psbt\":\"00\"}",
                              &back) != PC_OK, "short ref refused");
+    /* one object per line: outer braces are not enough, a second object on the
+       line would otherwise have its fields scraped through the first */
+    CHECK(pc_envelope_decode("{\"type\":\"ack\",\"psbt\":\"01\"} {\"tx\":\"aa\"}",
+                             &back) != PC_OK, "two objects on a line refused");
 
     /* the ack's continuation flag: it ends the payment loop, so a value that
        silently decodes wrong is a hang rather than an error */
