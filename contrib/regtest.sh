@@ -169,4 +169,64 @@ print(t)
 echo "refund   returned $R_PAID DOGE to alice, expected 99"
 [ "$R_PAID" = "99.0" ] || { echo "FAIL: refund did not return the balance" >&2; exit 1; }
 
+# ── the funding check, against the chain rather than against alice ──────────
+#
+# Everything above proves the transactions are valid. This proves the one thing
+# bob cannot check for himself: that the funding output alice described is
+# actually there, buried, unspent and worth what she said. Set KW to a built
+# koinu binary to run it; without one the confirmation path is only ever tested
+# against a stub, and a stub written from the same reading as the code agrees
+# with the code and with nothing else. That is how --confirm-cmd shipped unable
+# to invoke the tool it was built for.
+if [ -n "${KW:-}" ]; then
+    [ -x "$KW" ] || { echo "KW=$KW is not executable" >&2; exit 1; }
+    KWARGS="$KW --regtest outpoint --node 127.0.0.1 --port ${P2P:-18444} --spv --headers $WORK/hdrs"
+
+    confirm_bob() {
+        rm -rf "$WORK/cstate"; mkdir -p "$WORK/cstate"
+        "${RPC[@]}" getblockcount > "$WORK/cheight"
+        ./bob $NET --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT + 2))" --once \
+                   --min-slack 100 --height-file "$WORK/cheight" \
+                   --state "$WORK/cstate" --confirm-cmd "$KWARGS" \
+                   --min-depth "${MIN_DEPTH:-6}" --price 5.0 > "$WORK/cbob.log" 2>&1 &
+        CBOB=$!
+        for _ in $(seq 1 80); do
+            grep -q listening "$WORK/cbob.log" 2>/dev/null && break
+            sleep 0.1
+        done
+        ./alice $NET --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$1" \
+                     --funding-tx "@$2" --connect "127.0.0.1:$((PORT + 2))" \
+                     --max "$CAPACITY" > "$WORK/calice.log" 2>&1 || true
+        kill "$CBOB" 2>/dev/null || true
+        wait "$CBOB" 2>/dev/null || true
+    }
+
+    # a fresh, buried funding output: it opens
+    C_LOCKTIME=$(( $("${RPC[@]}" getblockcount) + 500 ))
+    C_CHANNEL=$(./alice $NET --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" \
+                             --locktime "$C_LOCKTIME" --address)
+    C_TXID=$("${RPC[@]}" sendtoaddress "$C_CHANNEL" "$CAPACITY")
+
+    # before it is buried, the same channel is refused
+    "${RPC[@]}" getrawtransaction "$C_TXID" > "$WORK/cfunding.hex"
+    confirm_bob "$C_LOCKTIME" "$WORK/cfunding.hex"
+    grep -q "unconfirmed or spent" "$WORK/cbob.log" \
+        || { echo "FAIL: an unconfirmed funding output was accepted" >&2; exit 1; }
+    echo "confirm  unconfirmed funding refused"
+
+    "${RPC[@]}" generate 6 >/dev/null
+    confirm_bob "$C_LOCKTIME" "$WORK/cfunding.hex"
+    grep -q "confirmed to at least" "$WORK/cbob.log" \
+        || { echo "FAIL: a buried funding output was refused" >&2;
+             tail -3 "$WORK/cbob.log" >&2; exit 1; }
+    echo "confirm  buried funding accepted"
+
+    # and the outpoint the close already spent is refused, with the state
+    # directory emptied so only the chain can be what refuses it
+    confirm_bob "$LOCKTIME" "$WORK/funding.hex"
+    grep -q "unconfirmed or spent" "$WORK/cbob.log" \
+        || { echo "FAIL: a spent funding output was accepted" >&2; exit 1; }
+    echo "confirm  spent funding refused"
+fi
+
 echo "regtest ok"

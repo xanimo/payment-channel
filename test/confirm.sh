@@ -14,8 +14,11 @@
 #   exit 0 and "unspent height H depth D value V koinu"   confirmed
 #   exit 3 and "not found (unconfirmed or already spent)" not
 #
-# A stub stands in for it here so the integration is testable without a node.
-# contrib/regtest.sh is where the real one belongs.
+# A stub stands in for it here so the cases are testable without a node: too
+# shallow, spent, a value that disagrees, a backend that hangs. What a stub
+# cannot check is whether the contract itself is right, since one written from
+# the same reading as the code agrees with the code and with nothing else.
+# contrib/regtest.sh runs the real kw against a real chain for that.
 set -eu
 
 cd "$(dirname "$0")/.."

@@ -86,8 +86,9 @@ jobs:
           docker build -t dogecoin-regtest dogecoin-docker/1.14.9/bookworm
       - name: start the node
         run: |
-          docker run -d --name doge-ci dogecoin-regtest \
-              dogecoind -regtest -txindex=1 -printtoconsole
+          # 18444 is published because kw talks to the node over p2p, not rpc
+          docker run -d --name doge-ci -p 18444:18444 dogecoin-regtest \
+              dogecoind -regtest -txindex=1 -listen=1 -printtoconsole
           printf '#!/bin/sh\nexec docker exec doge-ci dogecoin-cli "$@"\n' > doge-cli
           chmod +x doge-cli
           for _ in $(seq 1 120); do
@@ -96,7 +97,18 @@ jobs:
           done
           ./doge-cli -regtest getblockcount
           ./doge-cli -regtest generate 200 >/dev/null
-      - run: CLI="$GITHUB_WORKSPACE/doge-cli" ./contrib/regtest.sh
+      # The confirmation backend, built rather than stubbed. A stub written from
+      # the same reading as the code agrees with the code and with nothing else,
+      # which is how --confirm-cmd shipped unable to invoke the tool it exists
+      # for. This is the only thing that checks the contract.
+      - name: build koinu
+        run: |
+          git clone --recurse-submodules https://github.com/xanimo/koinu koinu
+          make -C koinu -j"$(nproc)"
+          ./koinu/kw 2>&1 | head -1
+      - run: |
+          CLI="$GITHUB_WORKSPACE/doge-cli" KW="$GITHUB_WORKSPACE/koinu/kw" \
+              ./contrib/regtest.sh
       - if: failure()
         run: docker logs doge-ci
 
