@@ -88,7 +88,13 @@ static void rd_script(rdr *r, const unsigned char **out, size_t *outlen)
    default-configured miner only includes it at DEFAULT_BLOCK_MIN_TX_FEE per kB,
    which is ten times the relay rate and carries no surcharge. Checking only the
    relay floor accepts a payment that propagates, sits in mempools and is never
-   mined, which is the same failure as not checking at all and harder to see. */
+   mined, which is the same failure as not checking at all and harder to see.
+
+   The surcharge is on the relay floor only, not the block floor: GetDogecoinDustFee
+   is added in GetDogecoinMinRelayFee (dogecoin-fees.cpp) and the wallet's own
+   pay target (wallet.cpp), while the miner tests packageFees against a bare
+   blockMinFeeRate.GetFee (miner.cpp), so max(relay + surcharge, block) is the
+   pair of floors and the block term is right to omit it. */
 #define PC_RELAY_KOINU_PER_KB   100000ULL   /* DEFAULT_MIN_RELAY_TX_FEE   */
 #define PC_BLOCK_KOINU_PER_KB  1000000ULL   /* DEFAULT_BLOCK_MIN_TX_FEE   */
 

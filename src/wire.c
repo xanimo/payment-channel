@@ -84,6 +84,8 @@ int pc_wire_listen(const char *host, int port)
     if (fd < 0) return -1;
     int on = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    /* Small backlog on purpose: a merchant daemon behind a tunnel would rather
+       refuse a burst than queue it, and the per-connection fork is capped anyway. */
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(fd, 4) != 0) {
         close(fd);
         return -1;

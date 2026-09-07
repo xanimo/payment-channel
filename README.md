@@ -263,6 +263,10 @@ handshake and stand up a channel to a key it controls. terminate tls or a tunnel
 `contrib/bob.service` runs him that way, unprivileged and sandboxed, with the key
 read from a file.
 
+`--listen` and `--connect` are ipv4 only, an address and a port split on the
+last colon, so a tunnel terminating on `127.0.0.1` is the intended shape and a
+bracketed ipv6 literal is not parsed.
+
 a held payment is not a confirmed one. bob cannot see the chain, so
 `paid ... koinu held` means the transaction verifies, not that the funding output
 exists or is buried, so do not release goods against it: wait until the funding
