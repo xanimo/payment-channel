@@ -206,7 +206,7 @@ out:
 }
 
 static pc_result state_write(pc_state *st, const pc_channel *ch,
-                             const char *best_tx_hex, int closed)
+                             const char *best_tx_hex, int closed, int sent)
 {
     if (!st || !ch) return PC_ERR_ARG;
     if (st->lock_fd < 0) return PC_OK;            /* state is off */
@@ -228,13 +228,14 @@ static pc_result state_write(pc_state *st, const pc_channel *ch,
                      "capacity %llu\n"
                      "paid %llu\n"
                      "closed %d\n"
+                     "sent %d\n"
                      "tx ",
                      PC_STATE_MAGIC, ch->redeem_script_hex,
                      ch->alice_pubkey_hex, ch->bob_pubkey_hex,
                      (unsigned)ch->locktime,
                      (unsigned long long)ch->capacity_koinu,
                      (unsigned long long)ch->paid_to_bob_koinu,
-                     closed ? 1 : 0);
+                     closed ? 1 : 0, sent ? 1 : 0);
     int ok = n > 0 && (size_t)n < sizeof(head) &&
              write_all(fd, head, (size_t)n) &&
              write_all(fd, best_tx_hex, strlen(best_tx_hex)) &&
@@ -260,13 +261,15 @@ static pc_result state_write(pc_state *st, const pc_channel *ch,
 
 pc_result pc_state_adopt(pc_state *st, const char *dir,
                          const char *txid_hex, int vout,
-                         pc_channel *ch, char *tx, size_t txcap, int *closed)
+                         pc_channel *ch, char *tx, size_t txcap,
+                         int *closed, int *sent)
 {
     if (!st || !dir || !txid_hex || !ch || !tx || txcap == 0) return PC_ERR_ARG;
     pc_state_disable(st);
     memset(ch, 0, sizeof(*ch));
     tx[0] = '\0';
     if (closed) *closed = 0;
+    if (sent) *sent = 0;
 
     if (!outpoint_path(st->path, sizeof(st->path), dir, txid_hex, vout))
         return PC_ERR_ARG;
@@ -315,6 +318,7 @@ pc_result pc_state_adopt(pc_state *st, const char *dir,
     ch->paid_to_bob_koinu = u;
 
     if (closed && field_u64(buf, "closed", &u)) *closed = u ? 1 : 0;
+    if (sent && field_u64(buf, "sent", &u)) *sent = u ? 1 : 0;
 
     snprintf(ch->funding_txid, sizeof(ch->funding_txid), "%s", txid_hex);
     ch->funding_vout = vout;
@@ -338,11 +342,17 @@ out:
 pc_result pc_state_save(pc_state *st, const pc_channel *ch,
                         const char *best_tx_hex)
 {
-    return state_write(st, ch, best_tx_hex, 0);
+    return state_write(st, ch, best_tx_hex, 0, 0);
 }
 
 pc_result pc_state_retire(pc_state *st, const pc_channel *ch,
                           const char *best_tx_hex)
 {
-    return state_write(st, ch, best_tx_hex, 1);
+    return state_write(st, ch, best_tx_hex, 1, 0);
+}
+
+pc_result pc_state_mark_sent(pc_state *st, const pc_channel *ch,
+                             const char *best_tx_hex)
+{
+    return state_write(st, ch, best_tx_hex, 0, 1);
 }
