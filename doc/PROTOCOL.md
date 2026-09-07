@@ -119,3 +119,18 @@ checks it confirms and returns the balance.
 nothing revokes an old state, so bob can still broadcast any payment he holds
 before the locktime arrives. that is the design rather than a gap: every state
 he holds pays him more than the last, so the newest is the one he wants.
+
+## bob's side of the same clock
+
+the close message hands alice the raw transaction, but alice relaying it is not
+something bob can rely on, and the funding output is one alice can spend out from
+under him until the close is mined. with `--broadcast-cmd` bob hands the close to
+the chain himself, after alice is answered and after re-checking the funding is
+still there. a session that ends without a close is the mirror of alice's refund:
+the payment sits in bob's state file with nothing broadcasting it, so if he does
+nothing the locktime arrives and alice's refund takes back the money and the
+goods with it. `bob --sweep` is the safety net, one pass over the state directory
+that broadcasts anything nearing its locktime and, for a channel already closed
+but not yet confirmed, treats it as due at once. it retires a channel only once
+the chain shows the funding spent, so a broadcast that quietly went nowhere is
+re-sent rather than lost.
