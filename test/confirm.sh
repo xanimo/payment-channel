@@ -44,8 +44,12 @@ printf '%s' "$FUNDING_HEX" > "$WORK/funding.hex"
 # different things about the same outpoint
 cat > "$WORK/confirm" <<'STUB'
 #!/usr/bin/env bash
-# argv is: --watch ADDR --outpoint TXID:VOUT, exactly what kw outpoint takes
-[ "$1" = "--watch" ] && [ "$3" = "--outpoint" ] || { echo "bad argv" >&2; exit 1; }
+# The operator's own arguments come first and Bob's two are appended, which is
+# the shape kw outpoint needs since it requires --node. A single-path
+# --confirm-cmd could never invoke it, and the first version of this stub took
+# one path and so never noticed.
+[ "$1" = "--node" ] && [ "$2" = "stub" ] || { echo "operator args lost" >&2; exit 1; }
+[ "$3" = "--watch" ] && [ "$5" = "--outpoint" ] || { echo "bad argv" >&2; exit 1; }
 read -r mode arg < "$CONFIRM_ANSWER"
 case "$mode" in
   unspent) echo "unspent height 900 depth $arg value 10000000000 koinu"; exit 0 ;;
@@ -64,7 +68,7 @@ answer() { printf '%s %s\n' "$1" "${2:-0}" > "$WORK/answer"; }
 answer unspent 100
 ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --min-slack 100 \
       --height-file "$WORK/height" --state "$WORK/state" \
-      --confirm-cmd "$WORK/confirm" --min-depth 6 \
+      --confirm-cmd "$WORK/confirm --node stub" --min-depth 6 \
       --price 5.0 > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!
 for _ in $(seq 1 100); do

@@ -216,6 +216,7 @@ static int read_height_file(const char *path, unsigned max_age,
    cold backend that needs to sync headers is warmed out of band, which is what
    an on-disk header cache is for. */
 #define PC_CONFIRM_SECONDS 3
+#define PC_CONFIRM_MAX_ARGV 32
 
 static int run_confirm(const char *cmd, const char *addr, const char *outpoint,
                        char *out, size_t cap, int *status)
@@ -229,14 +230,28 @@ static int run_confirm(const char *cmd, const char *addr, const char *outpoint,
         close(fds[0]);
         dup2(fds[1], STDOUT_FILENO);
         close(fds[1]);
-        char *argv[6];
-        argv[0] = (char *)cmd;
-        argv[1] = (char *)"--watch";
-        argv[2] = (char *)addr;
-        argv[3] = (char *)"--outpoint";
-        argv[4] = (char *)outpoint;
-        argv[5] = NULL;
-        execvp(cmd, argv);
+
+        /* The command is split on spaces because the backend it exists for
+           needs its own arguments: kw outpoint requires --node, so a single
+           path could never invoke it and the documented form did not run. It
+           is still not a shell. The split is over the operator's own argument
+           and the two values appended after it are a validated address and a
+           validated outpoint, so nothing off the wire reaches argv unchecked. */
+        char *argv[PC_CONFIRM_MAX_ARGV];
+        size_t argc = 0;
+        char split[512];
+        snprintf(split, sizeof(split), "%s", cmd);
+        for (char *tok = strtok(split, " \t");
+             tok && argc + 5 < PC_CONFIRM_MAX_ARGV;
+             tok = strtok(NULL, " \t"))
+            argv[argc++] = tok;
+        if (argc == 0) _exit(127);
+        argv[argc++] = (char *)"--watch";
+        argv[argc++] = (char *)addr;
+        argv[argc++] = (char *)"--outpoint";
+        argv[argc++] = (char *)outpoint;
+        argv[argc]   = NULL;
+        execvp(argv[0], argv);
         _exit(127);
     }
     close(fds[1]);
