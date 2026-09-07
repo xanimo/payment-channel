@@ -102,6 +102,12 @@ typedef struct {
     int      funding_vout;
     uint64_t capacity_koinu;
 
+    /* The block the funding landed in, once a chain has said so. Zero until
+       then. It is a cache rather than state: a height-bounded confirmation
+       backend can answer in milliseconds when told where to start looking, and
+       guessing a window is only necessary the first time. */
+    uint32_t funding_height;
+
     /* highest payment seen so far; a later one must pay Bob strictly more */
     uint64_t paid_to_bob_koinu;
     pc_chain chain;

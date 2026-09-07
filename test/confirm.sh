@@ -53,6 +53,9 @@ cat > "$WORK/confirm" <<'STUB'
 # one path and so never noticed.
 [ "$1" = "--node" ] && [ "$2" = "stub" ] || { echo "operator args lost" >&2; exit 1; }
 [ "$3" = "--watch" ] && [ "$5" = "--outpoint" ] || { echo "bad argv" >&2; exit 1; }
+# --since is appended only when --since-window asked for it, because it needs a
+# filter cache and a backend without one rejects it as an unknown option
+printf '%s\n' "${7:-none} ${8:-}" > "$SINCE_SEEN"
 read -r mode arg < "$CONFIRM_ANSWER"
 case "$mode" in
   unspent) echo "unspent height 900 depth $arg value 10000000000 koinu"; exit 0 ;;
@@ -78,6 +81,7 @@ chmod +x "$WORK/send"
 export SEND_ANSWER="$WORK/sendanswer"
 echo ok > "$SEND_ANSWER"
 chmod +x "$WORK/confirm"
+export SINCE_SEEN="$WORK/since"
 export CONFIRM_ANSWER="$WORK/answer"
 
 answer() { printf '%s %s\n' "$1" "${2:-0}" > "$WORK/answer"; }
@@ -164,9 +168,36 @@ grep -q "sent, keep this in case" "$WORK/bob.log" \
     && say "and it stops asking the operator to send it" "yes" \
     || { say "and it stops asking the operator to send it" "no"; fail=1; }
 
+# by default nothing is appended, so a backend with no filter cache still works
+grep -q "^none" "$SINCE_SEEN" \
+    && say "no --since unless it was asked for" "yes" \
+    || { say "no --since unless it was asked for" "$(cat "$SINCE_SEEN")"; fail=1; }
+
 kill "$BOB_PID" 2>/dev/null || true
 wait "$BOB_PID" 2>/dev/null || true
 BOB_PID=
+
+# with a window, --since is appended and is height minus the window
+answer unspent 100
+: > "$SINCE_SEEN"
+mkdir -p "$WORK/state2"
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT + 1))" --once --min-slack 100 \
+      --height-file "$WORK/height" --state "$WORK/state2" \
+      --confirm-cmd "$WORK/confirm --node stub" --min-depth 6 \
+      --since-window 400 --price 5.0 > "$WORK/bob2.log" 2>&1 &
+B2=$!
+for _ in $(seq 1 100); do grep -q listening "$WORK/bob2.log" 2>/dev/null && break; sleep 0.1; done
+./alice --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$LOCKTIME" \
+        --funding-tx "@$WORK/funding.hex" --connect "127.0.0.1:$((PORT + 1))" \
+        --max 100.0 > "$WORK/alice-since.log" 2>&1 || true
+kill "$B2" 2>/dev/null || true; wait "$B2" 2>/dev/null || true
+# height file says 1000, window 400, so it should ask from 600
+grep -q "^--since 600" "$SINCE_SEEN" \
+    && say "with a window it asks from height minus it" "yes" \
+    || { say "with a window it asks from height minus it" "$(cat "$SINCE_SEEN")"; fail=1; }
+grep -q "^fheight 900" "$WORK/state2"/*.channel 2>/dev/null \
+    && say "and records where the funding was found" "yes" \
+    || { say "and records where the funding was found" "$(grep -h '^fheight' "$WORK/state2"/*.channel 2>/dev/null)"; fail=1; }
 
 [ "$fail" = 0 ] || { echo "confirm FAILED" >&2; exit 1; }
 echo "confirm ok"

@@ -109,6 +109,7 @@ static void usage(void)
       "           [--height N | --height-file PATH] [--height-max-age SEC]\n"
       "           [--min-slack N] [--state DIR] [--price DOGE ...]\n"
       "           [--confirm-cmd CMD] [--min-depth N] [--broadcast-cmd CMD]\n"
+      "           [--since-window N]\n"
       "       bob --sweep --state DIR --height-file PATH [--broadcast-cmd CMD]\n"
       "           [--sweep-margin N] [--confirm-cmd CMD]\n"
       "           [--max-per-ip N] [--once]\n"
@@ -319,11 +320,33 @@ static int confirm_field(const char *s, const char *key, unsigned long long *out
     return 0;
 }
 
-static int run_confirm(const char *cmd, const char *addr, const char *outpoint,
-                       char *out, size_t cap, int *status)
+/* Where a confirmation should start looking.
+ *
+ * A channel that has confirmed once records the block its funding landed in,
+ * so every later question is exact and near the tip, which is where a
+ * height-bounded backend is fast. Only a first open has to guess, and it
+ * guesses (window) blocks back: too recent and the answer is "not in the
+ * scanned range", which is refused rather than mistaken for a spend.
+ *
+ * Zero means do not pass --since at all, which is the default and what a
+ * backend without a filter cache needs. */
+static uint32_t sweep_since(const pc_channel *ch, uint32_t height, unsigned window)
 {
-    const char *extra[4] = { "--watch", addr, "--outpoint", outpoint };
-    return run_backend(cmd, extra, 4, NULL, PC_CONFIRM_SECONDS,
+    if (!window) return 0;
+    if (ch->funding_height) return ch->funding_height;
+    return height > window ? height - window : 1;
+}
+
+static int run_confirm(const char *cmd, const char *addr, const char *outpoint,
+                       const char *since, char *out, size_t cap, int *status)
+{
+    /* --since is appended only when the operator asked for it. It requires a
+       filter cache, or a daemon holding one, so a backend without either
+       rejects it as an unknown option and every open fails. Off by default
+       keeps a plain kw outpoint working. */
+    const char *extra[6] = { "--watch", addr, "--outpoint", outpoint,
+                             "--since", since };
+    return run_backend(cmd, extra, since ? 6 : 4, NULL, PC_CONFIRM_SECONDS,
                        out, cap, status);
 }
 
@@ -365,7 +388,8 @@ static int broadcast(const char *cmd, const char *raw_tx_hex)
  * which is the one outcome worse than doing nothing. An open refuses on
  * anything but 1; a sweep only acts on 0. */
 static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
-                                unsigned min_depth, const char **why)
+                                unsigned min_depth, const char **why,
+                                uint32_t since, uint32_t *height_out)
 {
     if (strlen(ch->funding_txid) != 64 || ch->funding_vout < 0) {
         *why = "funding outpoint is malformed";
@@ -378,9 +402,24 @@ static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
         return -1;
     }
 
+    /* Where to start looking. A channel that has confirmed once knows exactly,
+       which is both correct and near-tip fast; a first open has to guess, and
+       guessing too recently gets "not in the scanned range" rather than a
+       wrong answer. */
+    char sincebuf[24];
+    const char *since_arg = NULL;
+    if (since) {
+        if (snprintf(sincebuf, sizeof(sincebuf), "%u", since) < 0) {
+            *why = "funding outpoint is malformed";
+            return -1;
+        }
+        since_arg = sincebuf;
+    }
+
     char buf[512];
     int status = -1;
-    if (!run_confirm(cmd, ch->p2sh_address, outpoint, buf, sizeof(buf), &status)) {
+    if (!run_confirm(cmd, ch->p2sh_address, outpoint, since_arg,
+                     buf, sizeof(buf), &status)) {
         *why = "confirmation backend did not reply";
         return -1;
     }
@@ -406,6 +445,11 @@ static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
         *why = "funding is not worth what it says";
         return 0;
     }
+
+    /* The height it reports is where to start looking next time. */
+    unsigned long long at = 0;
+    if (height_out && confirm_field(buf, "height", &at) && at <= 0xffffffffULL)
+        *height_out = (uint32_t)at;
     return 1;
 }
 
@@ -426,7 +470,8 @@ static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
  * than the one being negotiated. */
 static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                     const char *broadcast_cmd, const char *confirm_cmd,
-                    unsigned min_depth, unsigned margin, pc_chain chain)
+                    unsigned min_depth, unsigned margin, pc_chain chain,
+                    unsigned window)
 {
     const char *why = "";
     uint32_t height = 0;
@@ -492,7 +537,10 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
         /* Ask the chain first, because what to do next depends on whether the
            funding output is still there rather than on what was sent. */
         if (confirm_cmd) {
-            int ok = funding_is_confirmed(confirm_cmd, &ch, min_depth, &why);
+            uint32_t at = ch.funding_height;
+            int ok = funding_is_confirmed(confirm_cmd, &ch, min_depth, &why,
+                                          sweep_since(&ch, height, window), &at);
+            if (ok == 1 && at && at != ch.funding_height) ch.funding_height = at;
             if (ok < 0) {
                 /* Not knowing is a reason to try again, never a reason to
                    retire: the transaction is the payment. */
@@ -569,7 +617,8 @@ static int handle_open(int fd, session *s, const pc_envelope *in,
                        const char *bob_pub, uint32_t height, uint32_t slack,
                        const char *state_dir,
                        const char *height_file, unsigned height_max_age,
-                       const char *confirm_cmd, unsigned min_depth)
+                       const char *confirm_cmd, unsigned min_depth,
+                       unsigned window)
 {
     (void)wif;
     dogecoin_psbt *psbt = NULL;
@@ -617,8 +666,11 @@ static int handle_open(int fd, session *s, const pc_envelope *in,
        This is the first thing that checks it against a chain. */
     if (confirm_cmd) {
         const char *why = "funding is not confirmed";
-        if (funding_is_confirmed(confirm_cmd, &s->ch, min_depth, &why) != 1)
+        uint32_t at = s->ch.funding_height;
+        if (funding_is_confirmed(confirm_cmd, &s->ch, min_depth, &why,
+                                 sweep_since(&s->ch, height, window), &at) != 1)
             return send_reject(fd, why), 0;
+        if (at) s->ch.funding_height = at;
         printf("funding  confirmed to at least %u blocks\n", min_depth);
     }
 
@@ -762,7 +814,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                              const char *state_dir,
                              const char *height_file, unsigned height_max_age,
                              const char *confirm_cmd, unsigned min_depth,
-                             const char *broadcast_cmd,
+                             const char *broadcast_cmd, unsigned window,
                              const char **prices, int nprices)
 {
     session s;
@@ -789,7 +841,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
             if (opened) { alive = send_reject(fd, "channel already open"); break; }
             alive = handle_open(fd, &s, &in, wif, chain, bob_pub, height, slack,
                                 state_dir, height_file, height_max_age,
-                                confirm_cmd, min_depth);
+                                confirm_cmd, min_depth, window);
             if (alive) {
                 opened = 1;
                 if (!send_invoice(fd, &s, bob_addr, prices, nprices)) {
@@ -835,7 +887,9 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                take longer than a confirmation is allowed to. */
             if (confirm_cmd) {
                 const char *why = "";
-                if (funding_is_confirmed(confirm_cmd, &s.ch, 1, &why) != 1)
+                if (funding_is_confirmed(confirm_cmd, &s.ch, 1, &why,
+                                         sweep_since(&s.ch, height, window),
+                                         NULL) != 1)
                     printf("WARNING  the funding output is gone: %s\n"
                            "         the transaction below cannot confirm\n", why);
             }
@@ -868,7 +922,7 @@ int main(int argc, char **argv)
     const char *broadcast_cmd = NULL;
     int sweep = 0;
     unsigned margin = 50;
-    unsigned height_max_age = 600, min_depth = 6;
+    unsigned height_max_age = 600, min_depth = 6, window = 0;
     int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
     int want_pubkey = 0, once = 0;
@@ -886,6 +940,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--sweep"))     { sweep = 1; }
         else if (!strcmp(a, "--sweep-margin")) { const char *v = NEXT(); margin = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--min-depth"))  { const char *v = NEXT(); min_depth = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
+        else if (!strcmp(a, "--since-window")) { const char *v = NEXT(); window = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--height-max-age")) { const char *v = NEXT(); height_max_age = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--min-slack")) { const char *v = NEXT(); slack  = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--max-per-ip")){ const char *v = NEXT(); max_per_ip = v ? (int)strtol(v, NULL, 10) : 0; }
@@ -919,7 +974,8 @@ int main(int argc, char **argv)
            context, so this cannot run before it is up */
         dogecoin_ecc_start();
         int srv = do_sweep(state_dir, height_file, height_max_age,
-                           broadcast_cmd, confirm_cmd, min_depth, margin, chain);
+                           broadcast_cmd, confirm_cmd, min_depth, margin, chain,
+                           window);
         dogecoin_ecc_stop();
         return srv;
     }
@@ -1042,7 +1098,7 @@ int main(int argc, char **argv)
             serve_connection(fd, wif, chain, bob_pub, bob_addr,
                              height, slack, state_dir, height_file,
                              height_max_age, confirm_cmd, min_depth,
-                             broadcast_cmd, prices, nprices);
+                             broadcast_cmd, window, prices, nprices);
             close(fd);
             _exit(0);
         }
