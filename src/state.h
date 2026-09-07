@@ -86,6 +86,14 @@ pc_result pc_state_save(pc_state *st, const pc_channel *ch,
 pc_result pc_state_retire(pc_state *st, const pc_channel *ch,
                           const char *best_tx_hex);
 
+/* Note that the transaction has been handed to a node, without closing the
+   channel. p2p has no positive acknowledgement, so a send that drew no reject
+   is not a send that confirmed: the peer may never relay it and a mempool may
+   drop it later. Retiring on that would leave a channel finished on Bob's side
+   and unspent on the chain, and nothing sweeps a retired channel again. */
+pc_result pc_state_mark_sent(pc_state *st, const pc_channel *ch,
+                             const char *best_tx_hex);
+
 /* Read a state file without a channel to check it against.
  *
  * pc_state_open() validates what is on disk against a channel the caller
@@ -98,7 +106,8 @@ pc_result pc_state_retire(pc_state *st, const pc_channel *ch,
  * of ours or (txcap) is too small for the transaction it carries. */
 pc_result pc_state_adopt(pc_state *st, const char *dir,
                          const char *txid_hex, int vout,
-                         pc_channel *ch, char *tx, size_t txcap, int *closed);
+                         pc_channel *ch, char *tx, size_t txcap,
+                         int *closed, int *sent);
 
 /* Release the lock. Safe on a struct that was never opened. */
 void pc_state_close(pc_state *st);

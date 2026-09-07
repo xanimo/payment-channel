@@ -432,7 +432,7 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
     DIR *d = opendir(dir);
     if (!d) { fprintf(stderr, "bob: cannot read %s\n", dir); return 1; }
 
-    int swept = 0, held = 0, waiting = 0, dead = 0, unknown = 0;
+    int swept = 0, held = 0, waiting = 0, dead = 0, unknown = 0, confirmed = 0;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
         /* <64 hex>-<vout>.channel, and nothing else in the directory */
@@ -448,8 +448,9 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
         pc_state st;
         pc_channel ch;
         char tx[PC_MAX_PSBT_HEX];
-        int closed = 0;
-        pc_result r = pc_state_adopt(&st, dir, txid, vout, &ch, tx, sizeof(tx), &closed);
+        int closed = 0, already_sent = 0;
+        pc_result r = pc_state_adopt(&st, dir, txid, vout, &ch, tx, sizeof(tx),
+                                     &closed, &already_sent);
         if (r == PC_ERR_STATE) { held++; continue; }
         if (r != PC_OK) {
             fprintf(stderr, "sweep    %s:%d unreadable\n", txid, vout);
@@ -476,25 +477,10 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                      canon.p2sh_address);
         }
 
-        /* Broadcast once the locktime is close enough that waiting risks the
-           refund becoming spendable first. Earlier than that costs a customer
-           the rest of the channel, so it is a margin rather than a deadline. */
-        if ((uint64_t)ch.locktime > (uint64_t)height + margin) {
-            waiting++;
-            pc_state_close(&st);
-            continue;
-        }
-
+        /* Ask the chain first, because what to do next depends on whether the
+           funding output is still there rather than on what was sent. */
         if (confirm_cmd) {
             int ok = funding_is_confirmed(confirm_cmd, &ch, min_depth, &why);
-            if (ok == 0) {
-                printf("sweep    %s:%d %s, retiring without broadcast\n",
-                       txid, vout, why);
-                pc_state_retire(&st, &ch, tx);
-                dead++;
-                pc_state_close(&st);
-                continue;
-            }
             if (ok < 0) {
                 /* Not knowing is a reason to try again, never a reason to
                    retire: the transaction is the payment. */
@@ -504,22 +490,55 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                 pc_state_close(&st);
                 continue;
             }
+            if (ok == 0) {
+                /* The outpoint is spent. If this is the transaction that spent
+                   it, the channel is genuinely finished; if something else did,
+                   there is nothing left to broadcast either way. */
+                printf("sweep    %s:%d %s\n", txid, vout,
+                       already_sent ? "the close confirmed" : why);
+                pc_state_retire(&st, &ch, tx);
+                if (already_sent) confirmed++; else dead++;
+                pc_state_close(&st);
+                continue;
+            }
         }
 
-        printf("sweep    %s:%d locktime %u, height %u, %" PRIu64 " koinu\n",
-               txid, vout, ch.locktime, height, ch.paid_to_bob_koinu);
-        if (broadcast_cmd && broadcast(broadcast_cmd, tx)) {
-            pc_state_retire(&st, &ch, tx);
-            swept++;
-        } else if (!broadcast_cmd) {
+        /* Still unspent. Broadcast once the locktime is close enough that
+           waiting risks the refund becoming spendable first. Earlier than that
+           costs a customer the rest of the channel, so it is a margin rather
+           than a deadline. */
+        if ((uint64_t)ch.locktime > (uint64_t)height + margin) {
+            waiting++;
+            pc_state_close(&st);
+            continue;
+        }
+
+        printf("sweep    %s:%d locktime %u, height %u, %" PRIu64 " koinu%s\n",
+               txid, vout, ch.locktime, height, ch.paid_to_bob_koinu,
+               already_sent ? ", still unspent, sending again" : "");
+        if (broadcast_cmd) {
+            if (broadcast(broadcast_cmd, tx)) {
+                /* Marked as sent, not retired. kw send says "no reject" and
+                   means it: p2p has no acknowledgement, so a peer may never
+                   relay this and a mempool may drop it later. The pass that
+                   finds the outpoint spent is the one that closes the channel,
+                   and re-sending in between is harmless. Without a
+                   confirmation backend nothing will ever say more than this,
+                   so there it retires and says so. */
+                if (confirm_cmd) pc_state_mark_sent(&st, &ch, tx);
+                else             pc_state_retire(&st, &ch, tx);
+                swept++;
+            }
+        } else {
             printf("%s\n", tx);
             swept++;
         }
         pc_state_close(&st);
     }
     closedir(d);
-    printf("sweep    %d broadcast, %d waiting, %d held by a session, "
-           "%d dead, %d undetermined\n", swept, waiting, held, dead, unknown);
+    printf("sweep    %d broadcast, %d confirmed, %d waiting, %d held by a "
+           "session, %d dead, %d undetermined\n",
+           swept, confirmed, waiting, held, dead, unknown);
     fflush(stdout);
     return 0;
 }

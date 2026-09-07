@@ -139,7 +139,15 @@ key. run it from cron or a systemd timer, more often than the margin is wide:
           --confirm-cmd "kw outpoint --node NODE" --sweep-margin 50
 
 the margin is a margin rather than a deadline. sweeping early costs a customer
-the rest of the channel; sweeping late costs bob the payment. that is deliberately under the peer's
+the rest of the channel; sweeping late costs bob the payment.
+
+a broadcast is recorded, not treated as finished. `kw send` reports no reject
+rather than acceptance, because p2p has no positive acknowledgement, so a peer
+may never relay a transaction and a mempool may drop it later. the sweep sends
+again on the next pass while the outpoint is still unspent and retires the
+channel only once the chain shows it spent, which is what confirmation looks
+like from outside. without a `--confirm-cmd` nothing can ever say more, so it
+retires on the send and says so. that is deliberately under the peer's
 read budget: a backend slower than that cannot produce a reject alice is still
 connected to read. warm the header cache out of band.
 

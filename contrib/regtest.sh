@@ -264,6 +264,73 @@ if [ -n "${KW:-}" ]; then
               'import json,sys; print(json.load(sys.stdin).get("confirmations",0))')
     [ "$B_CONFS" -ge 1 ] || { echo "FAIL: bob's broadcast did not confirm" >&2; exit 1; }
     echo "confirm  bob broadcast the close himself, $B_SENT confirmed"
+
+    # And the payment nobody closed on. This is the path that had no coverage
+    # here, and verifying it by hand found two bugs: a channel rebuilt from a
+    # state file that only stores its parts, and a backend failure being read
+    # as "the output is gone" and retiring the payment.
+    S_LOCKTIME=$(( $("${RPC[@]}" getblockcount) + 500 ))
+    S_CHANNEL=$(./alice $NET --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" \
+                             --locktime "$S_LOCKTIME" --address)
+    S_TXID=$("${RPC[@]}" sendtoaddress "$S_CHANNEL" "$CAPACITY")
+    "${RPC[@]}" generate 6 >/dev/null
+    "${RPC[@]}" getrawtransaction "$S_TXID" > "$WORK/sfunding.hex"
+    rm -rf "$WORK/sstate"; mkdir -p "$WORK/sstate"
+    "${RPC[@]}" getblockcount > "$WORK/sheight"
+
+    ./bob $NET --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT + 4))" --once \
+               --min-slack 100 --height-file "$WORK/sheight" \
+               --state "$WORK/sstate" --confirm-cmd "$KWARGS" \
+               --min-depth "${MIN_DEPTH:-6}" --price 5.0 > "$WORK/sbob.log" 2>&1 &
+    SBOB=$!
+    for _ in $(seq 1 80); do
+        grep -q listening "$WORK/sbob.log" 2>/dev/null && break; sleep 0.1
+    done
+    # no --close: alice pays and walks away, which is the whole point
+    ./alice $NET --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$S_LOCKTIME" \
+                 --funding-tx "@$WORK/sfunding.hex" --fee "$FEE" --max "$CAPACITY" \
+                 --connect "127.0.0.1:$((PORT + 4))" > "$WORK/salice.log" 2>&1 || true
+    kill "$SBOB" 2>/dev/null || true; wait "$SBOB" 2>/dev/null || true
+
+    grep -q "^paid " "$WORK/sstate"/*.channel \
+        || { echo "FAIL: nothing was recorded for the unclosed channel" >&2; exit 1; }
+
+    SWEEP() {
+        ./bob $NET --sweep --state "$WORK/sstate" --height-file "$WORK/sheight" \
+              --broadcast-cmd "$KWSEND" --confirm-cmd "$KWARGS" \
+              --min-depth 1 --sweep-margin "$1" 2>&1
+    }
+
+    # far from the locktime: leave it alone
+    SWEEP 50 | grep -q "0 broadcast" \
+        || { echo "FAIL: swept a channel with time left" >&2; exit 1; }
+
+    # a backend that cannot answer must change nothing
+    ./bob $NET --sweep --state "$WORK/sstate" --height-file "$WORK/sheight" \
+          --broadcast-cmd "$KWSEND" --confirm-cmd /bin/false \
+          --sweep-margin 600 > "$WORK/sweep0.log" 2>&1 || true
+    grep -q "leaving it for the next pass" "$WORK/sweep0.log" \
+        || { echo "FAIL: a broken backend did not leave the channel alone" >&2; exit 1; }
+    grep -q "^closed 0" "$WORK/sstate"/*.channel \
+        || { echo "FAIL: a broken backend retired the channel" >&2; exit 1; }
+
+    # inside the margin: broadcast, but record it as sent rather than finished
+    SWEEP 600 | grep -q "1 broadcast" \
+        || { echo "FAIL: the sweep did not broadcast" >&2; exit 1; }
+    grep -q "^sent 1" "$WORK/sstate"/*.channel \
+        || { echo "FAIL: the sweep did not record the send" >&2; exit 1; }
+    grep -q "^closed 0" "$WORK/sstate"/*.channel \
+        || { echo "FAIL: the sweep retired on a send that was not confirmed" >&2; exit 1; }
+    echo "confirm  sweep broadcast an unclosed payment without retiring it"
+
+    # once it confirms, the outpoint is spent and that is what closes it
+    "${RPC[@]}" generate 1 >/dev/null
+    "${RPC[@]}" getblockcount > "$WORK/sheight"
+    SWEEP 600 | grep -q "1 confirmed" \
+        || { echo "FAIL: a confirmed close did not retire the channel" >&2; exit 1; }
+    grep -q "^closed 1" "$WORK/sstate"/*.channel \
+        || { echo "FAIL: the channel was not closed after confirming" >&2; exit 1; }
+    echo "confirm  and retired it once the chain showed the outpoint spent"
 else
     # Loud, not silent. The confirmation path is the only thing standing
     # between bob and a funding output that was never broadcast, and a stub
