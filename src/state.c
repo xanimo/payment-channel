@@ -258,6 +258,83 @@ static pc_result state_write(pc_state *st, const pc_channel *ch,
     return PC_OK;
 }
 
+pc_result pc_state_adopt(pc_state *st, const char *dir,
+                         const char *txid_hex, int vout,
+                         pc_channel *ch, char *tx, size_t txcap, int *closed)
+{
+    if (!st || !dir || !txid_hex || !ch || !tx || txcap == 0) return PC_ERR_ARG;
+    pc_state_disable(st);
+    memset(ch, 0, sizeof(*ch));
+    tx[0] = '\0';
+    if (closed) *closed = 0;
+
+    if (!outpoint_path(st->path, sizeof(st->path), dir, txid_hex, vout))
+        return PC_ERR_ARG;
+    if (snprintf(st->tmp,  sizeof(st->tmp),  "%s.tmp",  st->path) < 0) return PC_ERR_ARG;
+    if (snprintf(st->lock, sizeof(st->lock), "%s.lock", st->path) < 0) return PC_ERR_ARG;
+
+    int lfd = open(st->lock, O_RDWR | O_CREAT, 0600);
+    if (lfd < 0) return PC_ERR_ARG;
+    if (flock(lfd, LOCK_EX | LOCK_NB) != 0) { close(lfd); return PC_ERR_STATE; }
+    st->lock_fd = lfd;
+
+    int fd = open(st->path, O_RDONLY);
+    if (fd < 0) { pc_state_close(st); return PC_ERR_ARG; }
+    off_t sz = lseek(fd, 0, SEEK_END);
+    if (sz <= 0 || sz > 1024 * 1024) { close(fd); pc_state_close(st); return PC_ERR_ARG; }
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { close(fd); pc_state_close(st); return PC_ERR_ARG; }
+    if (lseek(fd, 0, SEEK_SET) != 0) { free(buf); close(fd); pc_state_close(st); return PC_ERR_ARG; }
+    ssize_t got = read(fd, buf, (size_t)sz);
+    close(fd);
+    if (got != sz) { free(buf); pc_state_close(st); return PC_ERR_ARG; }
+    buf[sz] = '\0';
+
+    pc_result rc = PC_ERR_ARG;
+    if (!field_eq(buf, "magic", PC_STATE_MAGIC)) goto out;
+
+    size_t n = 0;
+    const char *v = field(buf, "redeem", &n);
+    if (!v || n == 0 || n + 1 > sizeof(ch->redeem_script_hex)) goto out;
+    memcpy(ch->redeem_script_hex, v, n); ch->redeem_script_hex[n] = '\0';
+
+    v = field(buf, "alice", &n);
+    if (!v || n + 1 > sizeof(ch->alice_pubkey_hex)) goto out;
+    memcpy(ch->alice_pubkey_hex, v, n); ch->alice_pubkey_hex[n] = '\0';
+
+    v = field(buf, "bob", &n);
+    if (!v || n + 1 > sizeof(ch->bob_pubkey_hex)) goto out;
+    memcpy(ch->bob_pubkey_hex, v, n); ch->bob_pubkey_hex[n] = '\0';
+
+    uint64_t u = 0;
+    if (!field_u64(buf, "locktime", &u) || u == 0 || u > 0xffffffffULL) goto out;
+    ch->locktime = (uint32_t)u;
+    if (!field_u64(buf, "capacity", &u)) goto out;
+    ch->capacity_koinu = u;
+    if (!field_u64(buf, "paid", &u) || u > ch->capacity_koinu) goto out;
+    ch->paid_to_bob_koinu = u;
+
+    if (closed && field_u64(buf, "closed", &u)) *closed = u ? 1 : 0;
+
+    snprintf(ch->funding_txid, sizeof(ch->funding_txid), "%s", txid_hex);
+    ch->funding_vout = vout;
+
+    /* The transaction is the reason a sweep exists, so a file carrying one too
+       long for the caller's buffer is an error rather than a channel with an
+       empty one: silently sweeping without broadcasting would retire a channel
+       and drop the payment. */
+    v = field(buf, "tx", &n);
+    if (v) {
+        if (n + 1 > txcap) goto out;
+        memcpy(tx, v, n); tx[n] = '\0';
+    }
+    rc = PC_OK;
+out:
+    free(buf);
+    if (rc != PC_OK) pc_state_close(st);
+    return rc;
+}
+
 pc_result pc_state_save(pc_state *st, const pc_channel *ch,
                         const char *best_tx_hex)
 {

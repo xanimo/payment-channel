@@ -86,6 +86,20 @@ pc_result pc_state_save(pc_state *st, const pc_channel *ch,
 pc_result pc_state_retire(pc_state *st, const pc_channel *ch,
                           const char *best_tx_hex);
 
+/* Read a state file without a channel to check it against.
+ *
+ * pc_state_open() validates what is on disk against a channel the caller
+ * already built from an opening PSBT. A sweep has no such channel: the outpoint
+ * is the filename and everything else has to come out of the file. This takes
+ * the same lock, so a channel a live session is holding is skipped rather than
+ * swept out from under it, and fills (ch) and (tx) from what it finds.
+ *
+ * PC_OK, PC_ERR_STATE if a session holds it, PC_ERR_ARG if the file is not one
+ * of ours or (txcap) is too small for the transaction it carries. */
+pc_result pc_state_adopt(pc_state *st, const char *dir,
+                         const char *txid_hex, int vout,
+                         pc_channel *ch, char *tx, size_t txcap, int *closed);
+
 /* Release the lock. Safe on a struct that was never opened. */
 void pc_state_close(pc_state *st);
 
