@@ -107,16 +107,17 @@ static int field_u64(const char *buf, const char *key, uint64_t *out)
 void pc_state_disable(pc_state *st)
 {
     if (!st) return;
-    st->fd = -1;
+    st->lock_fd = -1;
     st->path[0] = '\0';
-    st->tmp[0] = '\0';
+    st->tmp[0]  = '\0';
+    st->lock[0] = '\0';
 }
 
 void pc_state_close(pc_state *st)
 {
-    if (!st || st->fd < 0) return;
-    close(st->fd);            /* releases the flock */
-    st->fd = -1;
+    if (!st || st->lock_fd < 0) return;
+    close(st->lock_fd);       /* releases the flock */
+    st->lock_fd = -1;
 }
 
 pc_result pc_state_open(pc_state *st, const char *dir, pc_channel *ch)
@@ -127,33 +128,42 @@ pc_result pc_state_open(pc_state *st, const char *dir, pc_channel *ch)
     if (!outpoint_path(st->path, sizeof(st->path), dir,
                        ch->funding_txid, ch->funding_vout))
         return PC_ERR_ARG;
-    if (snprintf(st->tmp, sizeof(st->tmp), "%s.tmp", st->path) < 0)
-        return PC_ERR_ARG;
+    if (snprintf(st->tmp,  sizeof(st->tmp),  "%s.tmp",  st->path) < 0) return PC_ERR_ARG;
+    if (snprintf(st->lock, sizeof(st->lock), "%s.lock", st->path) < 0) return PC_ERR_ARG;
 
-    int fd = open(st->path, O_RDWR | O_CREAT, 0600);
-    if (fd < 0) return PC_ERR_ARG;
+    /* The lock is its own file because the data file gets renamed over, and a
+       lock follows the inode rather than the name. Locking the data file held
+       an unlinked inode from the first save onwards while the next process
+       locked the new one and saw nothing in its way. This one is created once
+       and never replaced, so the name and the inode stay the same thing. */
+    int lfd = open(st->lock, O_RDWR | O_CREAT, 0600);
+    if (lfd < 0) return PC_ERR_ARG;
 
     /* Non-blocking: a second session on one outpoint is refused, not queued.
        Two peers negotiating against one channel at once have no interleaving
        that leaves the ratchet meaning anything. */
-    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        close(fd);
+    if (flock(lfd, LOCK_EX | LOCK_NB) != 0) {
+        close(lfd);
         return PC_ERR_STATE;
     }
-    st->fd = fd;
+    st->lock_fd = lfd;
+
+    int fd = open(st->path, O_RDONLY);
+    if (fd < 0) {
+        if (errno == ENOENT) { ch->paid_to_bob_koinu = 0; return PC_OK; }
+        pc_state_close(st);
+        return PC_ERR_ARG;
+    }
 
     off_t sz = lseek(fd, 0, SEEK_END);
-    if (sz < 0) { pc_state_close(st); return PC_ERR_ARG; }
-    if (sz == 0) {
-        ch->paid_to_bob_koinu = 0;      /* a channel nobody has paid yet */
-        return PC_OK;
-    }
-    if (sz > 1024 * 1024) { pc_state_close(st); return PC_ERR_ARG; }
+    if (sz < 0 || sz > 1024 * 1024) { close(fd); pc_state_close(st); return PC_ERR_ARG; }
+    if (sz == 0) { close(fd); ch->paid_to_bob_koinu = 0; return PC_OK; }
 
     char *buf = (char *)malloc((size_t)sz + 1);
-    if (!buf) { pc_state_close(st); return PC_ERR_ARG; }
-    if (lseek(fd, 0, SEEK_SET) != 0) { free(buf); pc_state_close(st); return PC_ERR_ARG; }
+    if (!buf) { close(fd); pc_state_close(st); return PC_ERR_ARG; }
+    if (lseek(fd, 0, SEEK_SET) != 0) { free(buf); close(fd); pc_state_close(st); return PC_ERR_ARG; }
     ssize_t got = read(fd, buf, (size_t)sz);
+    close(fd);
     if (got != sz) { free(buf); pc_state_close(st); return PC_ERR_ARG; }
     buf[sz] = '\0';
 
@@ -173,6 +183,13 @@ pc_result pc_state_open(pc_state *st, const char *dir, pc_channel *ch)
     rc = PC_ERR_ARG;
     if (!field_u64(buf, "locktime", &v) || v != ch->locktime)       goto out;
     if (!field_u64(buf, "capacity", &v) || v != ch->capacity_koinu) goto out;
+
+    /* A closed channel does not reopen. The close is the last thing that
+       happens on an outpoint, and a session after it is asking to be shipped
+       against a transaction the closed one intends to broadcast. */
+    if (field_u64(buf, "closed", &v) && v) { rc = PC_ERR_CLOSED; goto out; }
+
+    rc = PC_ERR_ARG;
     if (!field_u64(buf, "paid", &v)) goto out;
 
     /* A stored ratchet above the capacity is a corrupt file, not a rich
@@ -188,11 +205,11 @@ out:
     return rc;
 }
 
-pc_result pc_state_save(pc_state *st, const pc_channel *ch,
-                        const char *best_tx_hex)
+static pc_result state_write(pc_state *st, const pc_channel *ch,
+                             const char *best_tx_hex, int closed)
 {
     if (!st || !ch) return PC_ERR_ARG;
-    if (st->fd < 0) return PC_OK;                 /* state is off */
+    if (st->lock_fd < 0) return PC_OK;            /* state is off */
     if (!best_tx_hex) best_tx_hex = "";
 
     /* Temporary, fsync, rename. A crash between the write and the rename
@@ -210,12 +227,14 @@ pc_result pc_state_save(pc_state *st, const pc_channel *ch,
                      "locktime %u\n"
                      "capacity %llu\n"
                      "paid %llu\n"
+                     "closed %d\n"
                      "tx ",
                      PC_STATE_MAGIC, ch->redeem_script_hex,
                      ch->alice_pubkey_hex, ch->bob_pubkey_hex,
                      (unsigned)ch->locktime,
                      (unsigned long long)ch->capacity_koinu,
-                     (unsigned long long)ch->paid_to_bob_koinu);
+                     (unsigned long long)ch->paid_to_bob_koinu,
+                     closed ? 1 : 0);
     int ok = n > 0 && (size_t)n < sizeof(head) &&
              write_all(fd, head, (size_t)n) &&
              write_all(fd, best_tx_hex, strlen(best_tx_hex)) &&
@@ -237,4 +256,16 @@ pc_result pc_state_save(pc_state *st, const pc_channel *ch,
         if (dfd >= 0) { fsync(dfd); close(dfd); }
     }
     return PC_OK;
+}
+
+pc_result pc_state_save(pc_state *st, const pc_channel *ch,
+                        const char *best_tx_hex)
+{
+    return state_write(st, ch, best_tx_hex, 0);
+}
+
+pc_result pc_state_retire(pc_state *st, const pc_channel *ch,
+                          const char *best_tx_hex)
+{
+    return state_write(st, ch, best_tx_hex, 1);
 }

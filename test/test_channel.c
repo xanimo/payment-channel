@@ -10,6 +10,10 @@
 #include "channel.h"
 #include "hex.h"
 #include "refund.h"
+#include "state.h"
+
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -283,6 +287,107 @@ int main(void)
         CHECK(nonmin == PC_ERR_SCRIPT,
               "walk: OP_PUSHDATA1 for a short script is refused, %s",
               pc_strerror(nonmin));
+    }
+
+    /* The state layer's refusals. Every one of these was written from reasoning
+       and none had ever been executed: the only path with coverage was the lock,
+       and that coverage was arranged so it passed either way. */
+    {
+        char dir[] = "/tmp/pc-state-XXXXXX";
+        CHECK(mkdtemp(dir) != NULL, "state: a directory to work in");
+
+        char kw[PRIVKEYWIFLEN], ka[P2PKHLEN], kw2[PRIVKEYWIFLEN], ka2[P2PKHLEN];
+        char pa[PUBKEYHEXLEN], pb[PUBKEYHEXLEN];
+        size_t pn = sizeof(pa);
+        CHECK(generatePrivPubKeypair(kw, ka, false), "state: key a");
+        CHECK(generatePrivPubKeypair(kw2, ka2, false), "state: key b");
+        CHECK(getPubkeyFromPrivkey(kw, false, pa, &pn), "state: pubkey a");
+        pn = sizeof(pb);
+        CHECK(getPubkeyFromPrivkey(kw2, false, pb, &pn), "state: pubkey b");
+
+        const char *TXID =
+            "b4455e7b7b7acb51fb6feba7a2702c42a5100f61f61abafa31851ed6ae076074";
+        pc_channel c;
+        CHECK_OK(pc_channel_init(&c, pa, pb, 300000, PC_CHAIN_MAIN), "state: channel");
+        CHECK_OK(pc_channel_set_funding(&c, TXID, 0, 10000000000ULL), "state: funding");
+
+        pc_state st;
+        pc_state_disable(&st);
+        CHECK_OK(pc_state_open(&st, dir, &c), "state: a fresh outpoint opens");
+        CHECK(c.paid_to_bob_koinu == 0, "state: and starts at nothing paid");
+
+        c.paid_to_bob_koinu = 500000000ULL;
+        CHECK_OK(pc_state_save(&st, &c, "deadbeef"), "state: a payment records");
+
+        /* The regression. flock follows an inode, and a save renames a new one
+           over the data path, so locking that file left the holder guarding an
+           unlinked inode from the first payment onward. A second opener is
+           still refused after a save only because the lock is its own file. */
+        {
+            pc_channel other = c;
+            pc_state st2;
+            pc_state_disable(&st2);
+            pc_result r2 = pc_state_open(&st2, dir, &other);
+            CHECK(r2 == PC_ERR_STATE,
+                  "state: still locked against a second session after a save, %s",
+                  pc_strerror(r2));
+            pc_state_close(&st2);
+        }
+
+        pc_state_close(&st);
+
+        /* it reloads what it wrote */
+        pc_channel back = c;
+        back.paid_to_bob_koinu = 0;
+        CHECK_OK(pc_state_open(&st, dir, &back), "state: reopens after release");
+        CHECK(back.paid_to_bob_koinu == 500000000ULL,
+              "state: and the ratchet came back");
+        pc_state_close(&st);
+
+        /* one outpoint under a second set of channel parameters is not a
+           reconnection, whatever the ratchet says */
+        {
+            pc_channel wrong;
+            CHECK_OK(pc_channel_init(&wrong, pa, pb, 300001, PC_CHAIN_MAIN),
+                     "state: a channel with a different locktime");
+            CHECK_OK(pc_channel_set_funding(&wrong, TXID, 0, 10000000000ULL),
+                     "state: on the same outpoint");
+            pc_state stw;
+            pc_state_disable(&stw);
+            pc_result rw = pc_state_open(&stw, dir, &wrong);
+            CHECK(rw == PC_ERR_SCRIPT,
+                  "state: a different channel on one outpoint is refused, %s",
+                  pc_strerror(rw));
+            pc_state_close(&stw);
+        }
+
+        /* a retired outpoint does not reopen */
+        CHECK_OK(pc_state_open(&st, dir, &back), "state: reopen to retire");
+        CHECK_OK(pc_state_retire(&st, &back, "deadbeef"), "state: retires");
+        pc_state_close(&st);
+        {
+            pc_channel again = c;
+            pc_result rc2 = pc_state_open(&st, dir, &again);
+            CHECK(rc2 == PC_ERR_CLOSED,
+                  "state: a closed outpoint stays closed, %s", pc_strerror(rc2));
+            pc_state_close(&st);
+        }
+
+        /* a file that is not one of ours is refused rather than treated as a
+           channel nobody has paid yet, since that reading starts at zero */
+        {
+            char path[600];
+            snprintf(path, sizeof(path), "%s/%s-0.channel", dir, TXID);
+            FILE *f = fopen(path, "w");
+            CHECK(f != NULL, "state: rewrite the file");
+            if (f) { fputs("magic something-else\npaid 1\n", f); fclose(f); }
+            pc_channel again = c;
+            pc_result rc3 = pc_state_open(&st, dir, &again);
+            CHECK(rc3 == PC_ERR_ARG, "state: a foreign file is refused, %s",
+                  pc_strerror(rc3));
+            pc_state_close(&st);
+            unlink(path);
+        }
     }
 
     CHECK(generatePrivPubKeypair(alice_wif, alice_addr, false), "alice keygen");

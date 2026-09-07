@@ -236,6 +236,7 @@ static int handle_open(int fd, session *s, const pc_envelope *in,
     if (state_dir) {
         pc_result sr = pc_state_open(&s->st, state_dir, &s->ch);
         if (sr == PC_ERR_STATE)  return send_reject(fd, "channel is in use"), 0;
+        if (sr == PC_ERR_CLOSED) return send_reject(fd, pc_strerror(sr)), 0;
         if (sr == PC_ERR_SCRIPT) return send_reject(fd, "outpoint is another channel"), 0;
         if (sr != PC_OK)         return send_reject(fd, "cannot claim channel"), 0;
 
@@ -418,6 +419,14 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
 
         case PC_MSG_CLOSE:                        /* [H] */
             if (!s.best) { alive = send_reject(fd, "nothing to close on"); break; }
+            /* Retire before answering, for the same reason the ratchet is saved
+               before the ack: after this the channel is over, and a session
+               that reopened the outpoint would be asking to be shipped against
+               a transaction this one is about to broadcast. */
+            if (pc_state_retire(&s.st, &s.ch, s.best) != PC_OK) {
+                alive = send_reject(fd, "cannot close channel");
+                break;
+            }
             memset(&out, 0, sizeof(out));
             out.type = PC_MSG_CLOSE;
             snprintf(out.ref, sizeof(out.ref), "%s", s.ch.funding_txid);
