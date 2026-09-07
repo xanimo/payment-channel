@@ -123,7 +123,23 @@ than claiming acceptance, since p2p has no positive acknowledgement.
     --broadcast-cmd "kw send --node NODE"
 
 both are run with execvp and no shell, since the txid on that line came off the
-wire, and the confirmation has three seconds to answer. that is deliberately under the peer's
+wire, and the confirmation has three seconds to answer.
+
+a session that ends without a close leaves the payment in its state file and
+nothing broadcasts it, so if alice pays and walks away the locktime arrives and
+her refund takes back the money and the goods with it. `bob --sweep` is one pass
+over the state directory that broadcasts anything within `--sweep-margin` blocks
+of its locktime and retires it. it skips a channel a live session is holding,
+and retires without sending when the funding output has gone rather than
+broadcasting something that cannot confirm. it signs nothing, so it needs no
+key. run it from cron or a systemd timer, more often than the margin is wide:
+
+    $ bob --sweep --state channels --height-file height.txt \
+          --broadcast-cmd "kw send --node NODE" \
+          --confirm-cmd "kw outpoint --node NODE" --sweep-margin 50
+
+the margin is a margin rather than a deadline. sweeping early costs a customer
+the rest of the channel; sweeping late costs bob the payment. that is deliberately under the peer's
 read budget: a backend slower than that cannot produce a reject alice is still
 connected to read. warm the header cache out of band.
 

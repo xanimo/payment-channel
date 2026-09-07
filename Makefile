@@ -78,6 +78,7 @@ check: $(TESTS) $(BINS)
 	./test/resume.sh
 	./test/height.sh
 	./test/confirm.sh
+	./test/sweep.sh
 
 clean:
 	rm -f $(BINS) $(TESTS) src/*.o test/*.o

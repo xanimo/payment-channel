@@ -38,8 +38,10 @@
  * the operator's job. */
 
 #include "common.h"
+#include "hex.h"
 #include "state.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
@@ -107,6 +109,8 @@ static void usage(void)
       "           [--height N | --height-file PATH] [--height-max-age SEC]\n"
       "           [--min-slack N] [--state DIR] [--price DOGE ...]\n"
       "           [--confirm-cmd CMD] [--min-depth N] [--broadcast-cmd CMD]\n"
+      "       bob --sweep --state DIR --height-file PATH [--broadcast-cmd CMD]\n"
+      "           [--sweep-margin N] [--confirm-cmd CMD]\n"
       "           [--max-per-ip N] [--once]\n"
       "       bob --wif WIF|@FILE|- --pubkey\n"
       "\n"
@@ -354,33 +358,39 @@ static int broadcast(const char *cmd, const char *raw_tx_hex)
     return 0;
 }
 
+/* 1 confirmed, 0 definitively not there, -1 could not be determined.
+ *
+ * The third is not a detail. A sweep that treats "the backend fell over" the
+ * same as "the output is gone" retires the channel and drops the payment,
+ * which is the one outcome worse than doing nothing. An open refuses on
+ * anything but 1; a sweep only acts on 0. */
 static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
                                 unsigned min_depth, const char **why)
 {
     if (strlen(ch->funding_txid) != 64 || ch->funding_vout < 0) {
         *why = "funding outpoint is malformed";
-        return 0;
+        return -1;
     }
     char outpoint[80];
     if (snprintf(outpoint, sizeof(outpoint), "%s:%d",
                  ch->funding_txid, ch->funding_vout) < 0) {
         *why = "funding outpoint is malformed";
-        return 0;
+        return -1;
     }
 
     char buf[512];
     int status = -1;
     if (!run_confirm(cmd, ch->p2sh_address, outpoint, buf, sizeof(buf), &status)) {
         *why = "confirmation backend did not reply";
-        return 0;
+        return -1;
     }
     if (status == 3) { *why = "funding is unconfirmed or spent"; return 0; }
-    if (status != 0) { *why = "confirmation backend failed";     return 0; }
+    if (status != 0) { *why = "confirmation backend failed";     return -1; }
 
     unsigned long long depth = 0, value = 0;
     if (!confirm_field(buf, "depth", &depth)) {
         *why = "confirmation gave no depth";
-        return 0;
+        return -1;
     }
     if (depth < min_depth) { *why = "funding is not buried deep enough"; return 0; }
 
@@ -391,6 +401,127 @@ static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
         return 0;
     }
     return 1;
+}
+
+/* One pass over the state directory, broadcasting what is about to expire.
+ *
+ * A session that ends without a close leaves the payment in its state file and
+ * the child exits. Nothing read that transaction back, so if Alice paid and
+ * simply walked away it sat there until the locktime passed and her refund took
+ * back the money and the goods with it. The ratchet and --broadcast-cmd each
+ * solved half of this and the halves were not joined.
+ *
+ * A pass rather than a thread, because Bob has no loop that outlives a
+ * connection and adding one would be a bigger change than the problem. Run it
+ * from cron or a systemd timer, as often as suits the margin.
+ *
+ * A channel a live session holds is skipped: the lock is what says so, and
+ * sweeping one out from under a peer mid-payment would broadcast a state older
+ * than the one being negotiated. */
+static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
+                    const char *broadcast_cmd, const char *confirm_cmd,
+                    unsigned min_depth, unsigned margin, pc_chain chain)
+{
+    const char *why = "";
+    uint32_t height = 0;
+    if (!read_height_file(height_file, max_age, &height, &why)) {
+        fprintf(stderr, "bob: %s: %s\n", height_file, why);
+        return 1;
+    }
+
+    DIR *d = opendir(dir);
+    if (!d) { fprintf(stderr, "bob: cannot read %s\n", dir); return 1; }
+
+    int swept = 0, held = 0, waiting = 0, dead = 0, unknown = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        /* <64 hex>-<vout>.channel, and nothing else in the directory */
+        char txid[65];
+        int vout = -1;
+        size_t nlen = strlen(e->d_name);
+        if (nlen < 68 || strcmp(e->d_name + nlen - 8, ".channel") != 0) continue;
+        if (e->d_name[64] != '-') continue;
+        memcpy(txid, e->d_name, 64); txid[64] = '\0';
+        if (!pc_is_hex(txid, 64)) continue;
+        if (sscanf(e->d_name + 65, "%d.channel", &vout) != 1 || vout < 0) continue;
+
+        pc_state st;
+        pc_channel ch;
+        char tx[PC_MAX_PSBT_HEX];
+        int closed = 0;
+        pc_result r = pc_state_adopt(&st, dir, txid, vout, &ch, tx, sizeof(tx), &closed);
+        if (r == PC_ERR_STATE) { held++; continue; }
+        if (r != PC_OK) {
+            fprintf(stderr, "sweep    %s:%d unreadable\n", txid, vout);
+            continue;
+        }
+        if (closed || tx[0] == '\0') { pc_state_close(&st); continue; }
+
+        /* The file stores the parts, not the whole channel: no p2sh address
+           because it is derivable, and no chain because it is the operator's.
+           Rebuilding from the parts produces both, and comparing the script it
+           produces to the stored one is the same canonical check used
+           everywhere else, so a file that has been edited stops here. */
+        {
+            pc_channel canon;
+            if (pc_channel_init(&canon, ch.alice_pubkey_hex, ch.bob_pubkey_hex,
+                                ch.locktime, chain) != PC_OK ||
+                strcmp(canon.redeem_script_hex, ch.redeem_script_hex) != 0) {
+                fprintf(stderr, "sweep    %s:%d does not rebuild, skipping\n",
+                        txid, vout);
+                pc_state_close(&st);
+                continue;
+            }
+            snprintf(ch.p2sh_address, sizeof(ch.p2sh_address), "%s",
+                     canon.p2sh_address);
+        }
+
+        /* Broadcast once the locktime is close enough that waiting risks the
+           refund becoming spendable first. Earlier than that costs a customer
+           the rest of the channel, so it is a margin rather than a deadline. */
+        if ((uint64_t)ch.locktime > (uint64_t)height + margin) {
+            waiting++;
+            pc_state_close(&st);
+            continue;
+        }
+
+        if (confirm_cmd) {
+            int ok = funding_is_confirmed(confirm_cmd, &ch, min_depth, &why);
+            if (ok == 0) {
+                printf("sweep    %s:%d %s, retiring without broadcast\n",
+                       txid, vout, why);
+                pc_state_retire(&st, &ch, tx);
+                dead++;
+                pc_state_close(&st);
+                continue;
+            }
+            if (ok < 0) {
+                /* Not knowing is a reason to try again, never a reason to
+                   retire: the transaction is the payment. */
+                printf("sweep    %s:%d %s, leaving it for the next pass\n",
+                       txid, vout, why);
+                unknown++;
+                pc_state_close(&st);
+                continue;
+            }
+        }
+
+        printf("sweep    %s:%d locktime %u, height %u, %" PRIu64 " koinu\n",
+               txid, vout, ch.locktime, height, ch.paid_to_bob_koinu);
+        if (broadcast_cmd && broadcast(broadcast_cmd, tx)) {
+            pc_state_retire(&st, &ch, tx);
+            swept++;
+        } else if (!broadcast_cmd) {
+            printf("%s\n", tx);
+            swept++;
+        }
+        pc_state_close(&st);
+    }
+    closedir(d);
+    printf("sweep    %d broadcast, %d waiting, %d held by a session, "
+           "%d dead, %d undetermined\n", swept, waiting, held, dead, unknown);
+    fflush(stdout);
+    return 0;
 }
 
 static int handle_open(int fd, session *s, const pc_envelope *in,
@@ -446,7 +577,7 @@ static int handle_open(int fd, session *s, const pc_envelope *in,
        This is the first thing that checks it against a chain. */
     if (confirm_cmd) {
         const char *why = "funding is not confirmed";
-        if (!funding_is_confirmed(confirm_cmd, &s->ch, min_depth, &why))
+        if (funding_is_confirmed(confirm_cmd, &s->ch, min_depth, &why) != 1)
             return send_reject(fd, why), 0;
         printf("funding  confirmed to at least %u blocks\n", min_depth);
     }
@@ -664,7 +795,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                take longer than a confirmation is allowed to. */
             if (confirm_cmd) {
                 const char *why = "";
-                if (!funding_is_confirmed(confirm_cmd, &s.ch, 1, &why))
+                if (funding_is_confirmed(confirm_cmd, &s.ch, 1, &why) != 1)
                     printf("WARNING  the funding output is gone: %s\n"
                            "         the transaction below cannot confirm\n", why);
             }
@@ -695,6 +826,8 @@ int main(int argc, char **argv)
     uint32_t height = 0, slack = 100;
     const char *state_dir = NULL, *height_file = NULL, *confirm_cmd = NULL;
     const char *broadcast_cmd = NULL;
+    int sweep = 0;
+    unsigned margin = 50;
     unsigned height_max_age = 600, min_depth = 6;
     int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
@@ -710,6 +843,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--height-file")) { height_file = NEXT(); }
         else if (!strcmp(a, "--confirm-cmd")) { confirm_cmd = NEXT(); }
         else if (!strcmp(a, "--broadcast-cmd")) { broadcast_cmd = NEXT(); }
+        else if (!strcmp(a, "--sweep"))     { sweep = 1; }
+        else if (!strcmp(a, "--sweep-margin")) { const char *v = NEXT(); margin = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--min-depth"))  { const char *v = NEXT(); min_depth = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--height-max-age")) { const char *v = NEXT(); height_max_age = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--min-slack")) { const char *v = NEXT(); slack  = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
@@ -726,16 +861,35 @@ int main(int argc, char **argv)
         else { usage(); return 2; }
         #undef NEXT
     }
-    if (!wif_arg) { usage(); return 2; }
     if (max_per_ip < 0) { usage(); return 2; }
+
+    /* a peer that closes mid-write must not take the process with it */
+    signal(SIGPIPE, SIG_IGN);
+
+    /* A sweep signs nothing and answers nobody: it reads the directory,
+       broadcasts what is about to expire, and exits. So it needs no key, which
+       is why it comes before --wif is demanded: asking for one would put a key
+       on a cron line for no reason. */
+    if (sweep) {
+        if (!state_dir || !height_file) {
+            fprintf(stderr, "bob: --sweep needs --state DIR and --height-file PATH\n");
+            return 2;
+        }
+        /* rebuilding a channel validates both pubkeys, which needs the curve
+           context, so this cannot run before it is up */
+        dogecoin_ecc_start();
+        int srv = do_sweep(state_dir, height_file, height_max_age,
+                           broadcast_cmd, confirm_cmd, min_depth, margin, chain);
+        dogecoin_ecc_stop();
+        return srv;
+    }
+
+    if (!wif_arg) { usage(); return 2; }
 
     /* Pull the key out of argv immediately, so it is not sitting in ps for the
        life of the process. */
     char *wif = pc_read_secret_arg(wif_arg);
     if (!wif) { fprintf(stderr, "bob: cannot read --wif\n"); return 2; }
-
-    /* a peer that closes mid-write must not take the process with it */
-    signal(SIGPIPE, SIG_IGN);
 
     dogecoin_ecc_start();
     int rc = 1;
