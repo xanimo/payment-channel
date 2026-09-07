@@ -104,6 +104,13 @@ refuses an output whose on-chain value is not the capacity alice claimed.
           --confirm-cmd "kw outpoint --headers hdrs --node NODE" --min-depth 6 \
           --price 5.0
 
+`contrib/regtest.sh` checks that path against a real chain when `KW` points at a
+built backend, covering an unconfirmed output, a buried one and one a close
+already spent. without `KW` it says it skipped rather than passing quietly, and
+ci needs a read-only deploy key in `KOINU_DEPLOY_KEY` because the backend lives
+in a private repository. a stub is enough to check what bob does with an answer
+and useless for checking that the question is right.
+
 it is run with execvp and no shell, since the txid on that line came off the
 wire, and it has three seconds to answer. that is deliberately under the peer's
 read budget: a backend slower than that cannot produce a reject alice is still

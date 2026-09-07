@@ -227,6 +227,12 @@ if [ -n "${KW:-}" ]; then
     grep -q "unconfirmed or spent" "$WORK/cbob.log" \
         || { echo "FAIL: a spent funding output was accepted" >&2; exit 1; }
     echo "confirm  spent funding refused"
+else
+    # Loud, not silent. The confirmation path is the only thing standing
+    # between bob and a funding output that was never broadcast, and a stub
+    # cannot check that the question asked of the backend is the right one.
+    echo "confirm  SKIPPED: set KW to a built koinu binary to check the"
+    echo "confirm           funding path against a real chain"
 fi
 
 echo "regtest ok"
