@@ -178,6 +178,25 @@ pc_result pc_envelope_decode(const char *json, pc_envelope *env)
 {
     if (!json || !env) return PC_ERR_ARG;
     memset(env, 0, sizeof(*env));
+
+    /* PROTOCOL.md says one json object per line, and until now nothing made
+       that true: find_key() searches from the start of the line, so a field
+       sitting outside the braces was read as though it were inside them and
+       "tx":"aa" {"type":"ack"} parsed with tx taken from the prefix. Every
+       field is validated and duplicates are refused, so there was no exploit
+       in it, but a document describing something the code does not do is a
+       promise that decays. The line has to be one object and nothing else. */
+    {
+        const char *a = json;
+        while (*a == ' ' || *a == '\t' || *a == '\r' || *a == '\n') a++;
+        if (*a != '{') return PC_ERR_ARG;
+        const char *b = a + strlen(a);
+        while (b > a && (b[-1] == ' ' || b[-1] == '\t' ||
+                         b[-1] == '\r' || b[-1] == '\n')) b--;
+        if (b == a || b[-1] != '}') return PC_ERR_ARG;
+        json = a;
+    }
+
     if (has_duplicate_key(json)) return PC_ERR_ARG;
 
     char tbuf[16];
