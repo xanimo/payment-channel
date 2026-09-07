@@ -72,6 +72,7 @@ typedef enum {
     PC_ERR_VERSION,      /* the transaction version is outside 1..2            */
     PC_ERR_NONSTANDARD,  /* an output script is not a type a node will relay   */
     PC_ERR_TX,           /* the bytes returned are not the ones that were signed */
+    PC_ERR_CLOSED,       /* this channel was closed and will not reopen        */
     PC_ERR_LAST          /* not a code: one past the last, so a test can walk them */
 } pc_result;
 

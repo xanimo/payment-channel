@@ -57,6 +57,7 @@ const char *pc_strerror(pc_result r)
     case PC_ERR_VERSION: return "version is not a standard one";
     case PC_ERR_NONSTANDARD: return "an output script is not standard";
     case PC_ERR_TX:      return "not the signed transaction";
+    case PC_ERR_CLOSED:  return "this channel was closed";
     case PC_ERR_LAST:    break;   /* a count, never returned */
     }
     return "unknown";
