@@ -38,6 +38,9 @@
  * the operator's job. */
 
 #include "common.h"
+#include "state.h"
+
+#include <sys/stat.h>
 
 #include <ctype.h>
 #include <inttypes.h>
@@ -68,20 +71,35 @@
 #define CHILD_CPU_SECONDS   30
 #define CHILD_AS_BYTES      (512UL * 1024 * 1024)
 
+/* Address sanitizer reserves a shadow mapping far larger than any address space
+   limit worth setting, so a child that caps RLIMIT_AS under it dies on its first
+   mmap with "Failed to mmap" before serving anything. That is why the forking
+   server had never been run under asan at all. The cap is a production defence,
+   so it is kept everywhere except the build that cannot tolerate it. */
+#if defined(__SANITIZE_ADDRESS__)          /* gcc */
+#  define PC_ADDRESS_LIMIT_UNAVAILABLE 1
+#elif defined(__has_feature)                /* clang, and it must nest */
+#  if __has_feature(address_sanitizer)
+#    define PC_ADDRESS_LIMIT_UNAVAILABLE 1
+#  endif
+#endif
+
 static void limit_child(void)
 {
     struct rlimit rl;
     rl.rlim_cur = rl.rlim_max = CHILD_CPU_SECONDS;
     setrlimit(RLIMIT_CPU, &rl);
+#ifndef PC_ADDRESS_LIMIT_UNAVAILABLE
     rl.rlim_cur = rl.rlim_max = CHILD_AS_BYTES;
     setrlimit(RLIMIT_AS, &rl);
+#endif
 }
 
 static void usage(void)
 {
     fprintf(stderr,
       "usage: bob --wif WIF|@FILE|- [--listen [HOST:]PORT] [--testnet|--regtest]\n"
-      "           [--height N] [--min-slack N] [--price DOGE ...]\n"
+      "           [--height N] [--min-slack N] [--state DIR] [--price DOGE ...]\n"
       "           [--max-per-ip N] [--once]\n"
       "       bob --wif WIF|@FILE|- --pubkey\n"
       "\n"
@@ -96,6 +114,7 @@ static void usage(void)
 /* Everything one connection knows. */
 typedef struct {
     pc_channel ch;
+    pc_state   st;              /* the outpoint's lock and ratchet on disk */
     char      *best;            /* newest transaction worth broadcasting */
     uint64_t   best_amount;
     uint64_t   owed;            /* cumulative total invoiced so far */
@@ -117,7 +136,8 @@ static int send_reject(int fd, const char *why)
    unless every part of it is one he checked himself. */
 static int handle_open(int fd, session *s, const pc_envelope *in,
                        const char *wif, pc_chain chain,
-                       const char *bob_pub, uint32_t height, uint32_t slack)
+                       const char *bob_pub, uint32_t height, uint32_t slack,
+                       const char *state_dir)
 {
     (void)wif;
     dogecoin_psbt *psbt = NULL;
@@ -154,11 +174,30 @@ static int handle_open(int fd, session *s, const pc_envelope *in,
                                                  : "funding does not check out"), 0;
     }
 
+    /* The ratchet belongs to the outpoint, not to this connection. Claim it
+       before anything is invoiced: without this each session starts at zero and
+       one funding output pays for goods as many times as Alice reconnects. */
+    if (state_dir) {
+        pc_result sr = pc_state_open(&s->st, state_dir, &s->ch);
+        if (sr == PC_ERR_STATE)  return send_reject(fd, "channel is in use"), 0;
+        if (sr == PC_ERR_SCRIPT) return send_reject(fd, "outpoint is another channel"), 0;
+        if (sr != PC_OK)         return send_reject(fd, "cannot claim channel"), 0;
+
+        /* Invoices are cumulative totals, so they carry on from what the
+           channel has already paid rather than restarting. Without this a
+           resumed channel invoices an amount its own ratchet refuses, and the
+           replay is fixed by making the channel unusable, which is not a fix. */
+        s->owed = s->ch.paid_to_bob_koinu;
+    }
+
     char cap_s[32];
     pc_koinu_to_doge(capacity, cap_s, sizeof(cap_s));
     printf("channel  %s\n", s->ch.p2sh_address);
     printf("funding  %s:%d worth %s DOGE, locktime %u (height %u)\n",
            s->ch.funding_txid, s->ch.funding_vout, cap_s, locktime, height);
+    if (s->ch.paid_to_bob_koinu)
+        printf("resumed  %" PRIu64 " koinu already paid on this outpoint\n",
+               s->ch.paid_to_bob_koinu);
     fflush(stdout);
 
     pc_envelope out;
@@ -241,6 +280,12 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
     if (s->best) dogecoin_free(s->best);
     s->best = raw;
     s->best_amount = in->to_bob_koinu;
+
+    /* Durable before the ack, never after. The ack is what tells a merchant to
+       ship, so a crash between the two has to cost Alice a retry rather than
+       cost Bob the payment he already answered for. */
+    if (pc_state_save(&s->st, &s->ch, s->best) != PC_OK)
+        return send_reject(fd, "cannot record payment"), 0;
     /* "held" is not "confirmed": Bob cannot see the chain, so this is money only
        once the funding output is buried. Do not ship against this line alone. */
     printf("paid     %" PRIu64 " koinu held (%zu byte tx), "
@@ -265,10 +310,14 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
 static void serve_connection(int fd, const char *wif, pc_chain chain,
                              const char *bob_pub, const char *bob_addr,
                              uint32_t height, uint32_t slack,
+                             const char *state_dir,
                              const char **prices, int nprices)
 {
     session s;
     memset(&s, 0, sizeof(s));
+    /* after the memset, not before: zeroing the struct sets the state fd to 0,
+       which is a descriptor rather than the -1 that means "no state here" */
+    pc_state_disable(&s.st);
 
     pc_envelope in, out;
     int alive = 1, opened = 0;
@@ -286,7 +335,8 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
             /* a second one resets the channel and the amount paid while the
                order count and the held transaction survive from the first */
             if (opened) { alive = send_reject(fd, "channel already open"); break; }
-            alive = handle_open(fd, &s, &in, wif, chain, bob_pub, height, slack);
+            alive = handle_open(fd, &s, &in, wif, chain, bob_pub, height, slack,
+                                state_dir);
             if (alive) {
                 opened = 1;
                 if (!send_invoice(fd, &s, bob_addr, prices, nprices)) {
@@ -332,6 +382,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
         fflush(stdout);
         dogecoin_free(s.best);
     }
+    pc_state_close(&s.st);
 }
 
 int main(int argc, char **argv)
@@ -340,6 +391,7 @@ int main(int argc, char **argv)
     const char *prices[MAX_ORDERS];
     int nprices = 0;
     uint32_t height = 0, slack = 100;
+    const char *state_dir = NULL;
     int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
     int want_pubkey = 0, once = 0;
@@ -350,6 +402,7 @@ int main(int argc, char **argv)
         if      (!strcmp(a, "--wif"))       wif_arg = NEXT();
         else if (!strcmp(a, "--listen"))    listen_at = NEXT();
         else if (!strcmp(a, "--height"))    { const char *v = NEXT(); height = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
+        else if (!strcmp(a, "--state"))     { state_dir = NEXT(); }
         else if (!strcmp(a, "--min-slack")) { const char *v = NEXT(); slack  = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--max-per-ip")){ const char *v = NEXT(); max_per_ip = v ? (int)strtol(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--testnet"))   chain = PC_CHAIN_TEST;
@@ -385,6 +438,24 @@ int main(int argc, char **argv)
     }
     if (want_pubkey) { printf("%s\n", bob_pub); rc = 0; goto done; }
     if (nprices == 0) { usage(); goto done; }
+    /* A Bob that serves more than one connection and forgets between them
+       pays for goods once per reconnection: three sessions on one funding
+       output each acked five DOGE and only one of those transactions can
+       confirm. --once cannot replay, so it is the only configuration that is
+       safe without a place to keep the ratchet. */
+    if (!state_dir && !once) {
+        fprintf(stderr, "bob: --state DIR is required without --once, or one "
+                        "funding output pays for goods once per reconnection\n");
+        return 1;
+    }
+    if (state_dir) {
+        struct stat sb;
+        if (stat(state_dir, &sb) != 0 || !S_ISDIR(sb.st_mode)) {
+            fprintf(stderr, "bob: --state %s is not a directory\n", state_dir);
+            return 1;
+        }
+    }
+
     if (height == 0) {
         fprintf(stderr, "bob: --height is required, since the locktime is only "
                         "meaningful against a height\n");
@@ -446,7 +517,7 @@ int main(int argc, char **argv)
             close(lfd);
             limit_child();
             serve_connection(fd, wif, chain, bob_pub, bob_addr,
-                             height, slack, prices, nprices);
+                             height, slack, state_dir, prices, nprices);
             close(fd);
             _exit(0);
         }
