@@ -24,6 +24,7 @@ WORK=$(mktemp -d)
 BOB_PID=
 trap 'rm -rf "$WORK"; [ -n "$BOB_PID" ] && kill "$BOB_PID" 2>/dev/null || true' EXIT
 mkdir -p "$WORK/state"
+printf '1000\n' > "$WORK/height"
 
 read -r ALICE_WIF ALICE_ADDR < <(./test/mkfunding --keys)
 read -r BOB_WIF   _          < <(./test/mkfunding --keys)
@@ -35,7 +36,8 @@ printf '%s' "$FUNDING_HEX" > "$WORK/funding.hex"
 
 start_bob() {
     ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" \
-          --height 1000 --min-slack 100 --state "$WORK/state" \
+          --min-slack 100 --height-file "$WORK/height" \
+          --state "$WORK/state" \
           --price 5.0 >> "$WORK/bob.log" 2>&1 &
     BOB_PID=$!
     for _ in $(seq 1 100); do
@@ -64,8 +66,8 @@ say() { printf "  %-52s %s\n" "$1" "$2"; }
 echo "one outpoint, many connections:"
 
 # a long-lived Bob with nowhere to keep the ratchet refuses to start at all
-if ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --height 1000 \
-         --price 5.0 >"$WORK/nostate.log" 2>&1; then
+if ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" \
+         --height-file "$WORK/height" --price 5.0 >"$WORK/nostate.log" 2>&1; then
     say "refuses to run long-lived without --state" "NO, it started"; fail=1
 else
     grep -q "state DIR is required" "$WORK/nostate.log" \

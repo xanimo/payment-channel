@@ -40,6 +40,8 @@
 #include "common.h"
 #include "state.h"
 
+#include <errno.h>
+
 #include <sys/stat.h>
 
 #include <ctype.h>
@@ -99,7 +101,8 @@ static void usage(void)
 {
     fprintf(stderr,
       "usage: bob --wif WIF|@FILE|- [--listen [HOST:]PORT] [--testnet|--regtest]\n"
-      "           [--height N] [--min-slack N] [--state DIR] [--price DOGE ...]\n"
+      "           [--height N | --height-file PATH] [--height-max-age SEC]\n"
+      "           [--min-slack N] [--state DIR] [--price DOGE ...]\n"
       "           [--max-per-ip N] [--once]\n"
       "       bob --wif WIF|@FILE|- --pubkey\n"
       "\n"
@@ -134,10 +137,56 @@ static int send_reject(int fd, const char *why)
 
 /* [3][4][D] The opening. Bob learns the channel from the PSBT and refuses it
    unless every part of it is one he checked himself. */
+/* The height Bob measures a locktime against, re-read for every channel.
+ *
+ * --height is a number from the operator that is correct once. min-slack is
+ * checked against it at open, so a process running for a day is comparing a
+ * locktime to a height a day old, and the margin it thinks it has erodes
+ * silently until a channel whose locktime has already passed still looks like
+ * it has room. Alice's refund is spendable the moment that happens.
+ *
+ * A file is the whole interface: anything that can see a chain writes a decimal
+ * height into it, dogecoin-cli getblockcount or an spv wallet, and Bob reads it
+ * without linking to any of them. Its age is what makes it trustworthy, so a
+ * file nobody is updating is refused rather than believed. */
+static int read_height_file(const char *path, unsigned max_age,
+                            uint32_t *out, const char **why)
+{
+    struct stat sb;
+    if (stat(path, &sb) != 0) { *why = "height file is missing"; return 0; }
+
+    time_t now = time(NULL);
+    if (now > sb.st_mtime && (unsigned long)(now - sb.st_mtime) > max_age) {
+        *why = "height file is stale";
+        return 0;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (!f) { *why = "height file will not open"; return 0; }
+    char buf[32] = {0};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) { *why = "height file is empty"; return 0; }
+
+    char *end = NULL;
+    errno = 0;
+    unsigned long v = strtoul(buf, &end, 10);
+    if (errno || end == buf || v == 0 || v > UINT32_MAX) {
+        *why = "height file is not a height";
+        return 0;
+    }
+    while (end && (*end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) end++;
+    if (end && *end) { *why = "height file is not a height"; return 0; }
+
+    *out = (uint32_t)v;
+    return 1;
+}
+
 static int handle_open(int fd, session *s, const pc_envelope *in,
                        const char *wif, pc_chain chain,
                        const char *bob_pub, uint32_t height, uint32_t slack,
-                       const char *state_dir)
+                       const char *state_dir,
+                       const char *height_file, unsigned height_max_age)
 {
     (void)wif;
     dogecoin_psbt *psbt = NULL;
@@ -165,6 +214,13 @@ static int handle_open(int fd, session *s, const pc_envelope *in,
 
     pc_result r = pc_channel_init(&s->ch, alice_pub, bob_pub, locktime, chain);
     if (r != PC_OK) return send_reject(fd, "cannot build channel"), 0;
+
+    /* Read it here, not at startup: this is the moment the margin is decided. */
+    if (height_file) {
+        const char *why = "height file";
+        if (!read_height_file(height_file, height_max_age, &height, &why))
+            return send_reject(fd, why), 0;
+    }
 
     uint64_t capacity = 0;
     r = pc_channel_open_accept(&s->ch, in->psbt_hex, in->tx_hex,
@@ -311,6 +367,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                              const char *bob_pub, const char *bob_addr,
                              uint32_t height, uint32_t slack,
                              const char *state_dir,
+                             const char *height_file, unsigned height_max_age,
                              const char **prices, int nprices)
 {
     session s;
@@ -336,7 +393,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                order count and the held transaction survive from the first */
             if (opened) { alive = send_reject(fd, "channel already open"); break; }
             alive = handle_open(fd, &s, &in, wif, chain, bob_pub, height, slack,
-                                state_dir);
+                                state_dir, height_file, height_max_age);
             if (alive) {
                 opened = 1;
                 if (!send_invoice(fd, &s, bob_addr, prices, nprices)) {
@@ -391,7 +448,8 @@ int main(int argc, char **argv)
     const char *prices[MAX_ORDERS];
     int nprices = 0;
     uint32_t height = 0, slack = 100;
-    const char *state_dir = NULL;
+    const char *state_dir = NULL, *height_file = NULL;
+    unsigned height_max_age = 600;
     int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
     int want_pubkey = 0, once = 0;
@@ -403,6 +461,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--listen"))    listen_at = NEXT();
         else if (!strcmp(a, "--height"))    { const char *v = NEXT(); height = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--state"))     { state_dir = NEXT(); }
+        else if (!strcmp(a, "--height-file")) { height_file = NEXT(); }
+        else if (!strcmp(a, "--height-max-age")) { const char *v = NEXT(); height_max_age = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--min-slack")) { const char *v = NEXT(); slack  = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--max-per-ip")){ const char *v = NEXT(); max_per_ip = v ? (int)strtol(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--testnet"))   chain = PC_CHAIN_TEST;
@@ -456,10 +516,30 @@ int main(int argc, char **argv)
         }
     }
 
-    if (height == 0) {
-        fprintf(stderr, "bob: --height is required, since the locktime is only "
-                        "meaningful against a height\n");
+    /* Same argument as --state, one field over. A number given once is correct
+       once, and min-slack is checked against it at every open, so a long-lived
+       Bob compares locktimes to a height as old as his uptime. --once cannot
+       outlive its own number. */
+    if (!height_file && !once) {
+        fprintf(stderr, "bob: --height-file PATH is required without --once, or "
+                        "min-slack is measured against a height that stops "
+                        "being true\n");
         goto done;
+    }
+    if (height == 0 && !height_file) {
+        fprintf(stderr, "bob: --height or --height-file is required, since the "
+                        "locktime is only meaningful against a height\n");
+        goto done;
+    }
+    if (height_file) {
+        const char *why = "";
+        uint32_t probe = 0;
+        if (!read_height_file(height_file, height_max_age, &probe, &why)) {
+            fprintf(stderr, "bob: %s: %s\n", height_file, why);
+            goto done;
+        }
+        printf("height   %u from %s, refused when older than %us\n",
+               probe, height_file, height_max_age);
     }
 
     char host[64] = "127.0.0.1";
@@ -517,7 +597,8 @@ int main(int argc, char **argv)
             close(lfd);
             limit_child();
             serve_connection(fd, wif, chain, bob_pub, bob_addr,
-                             height, slack, state_dir, prices, nprices);
+                             height, slack, state_dir, height_file,
+                             height_max_age, prices, nprices);
             close(fd);
             _exit(0);
         }

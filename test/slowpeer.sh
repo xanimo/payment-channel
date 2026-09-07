@@ -23,6 +23,7 @@ command -v python3 >/dev/null || { echo "SKIP: needs python3" >&2; exit 0; }
 
 WORK=$(mktemp -d)
 mkdir -p "$WORK/state"
+printf '1000\n' > "$WORK/height"
 BOB_PID=
 trap 'rm -rf "$WORK"; [ -n "$BOB_PID" ] && kill "$BOB_PID" 2>/dev/null || true' EXIT
 
@@ -30,7 +31,8 @@ read -r BOB_WIF _ < <(./test/mkfunding --keys)
 
 start_bob() {
     ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" \
-          --height 1000 --min-slack 100 --state "$WORK/state" \
+          --min-slack 100 --height-file "$WORK/height" \
+          --state "$WORK/state" \
           --price 5.0 > "$WORK/bob.log" 2>&1 &
     BOB_PID=$!
     for _ in $(seq 1 100); do

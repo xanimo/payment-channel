@@ -76,6 +76,7 @@ check: $(TESTS) $(BINS)
 	./test/loopback.sh
 	./test/slowpeer.sh
 	./test/resume.sh
+	./test/height.sh
 
 clean:
 	rm -f $(BINS) $(TESTS) src/*.o test/*.o

@@ -76,6 +76,18 @@ to him, and he refuses a channel whose locktime is not at least `--min-slack`
 blocks above it. alice can refund once the locktime passes, so a channel that
 expires while bob is holding a payment is one he loses.
 
+that height has to keep being true. `--height N` is correct once, so a process
+running for a day compares locktimes to a height a day old and the margin erodes
+silently until a channel whose locktime has already passed still looks like it
+has room. `--height-file PATH` is re-read for every channel and refused once
+nothing has updated it for `--height-max-age` seconds, 600 by default. anything
+that can see a chain writes a decimal height into it:
+
+    $ while :; do dogecoin-cli getblockcount > height.txt; sleep 60; done
+
+he refuses to run without it unless `--once` is given, which cannot outlive its
+own number.
+
 `--state` is where the channel lives between connections. bob serves each one in
 its own process, so without it the running total starts at zero every time and
 one funding output pays for goods once per reconnection: three sessions naming
