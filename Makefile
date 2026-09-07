@@ -24,7 +24,7 @@ LDFLAGS  += -L$(LIBDOGECOIN)/lib
 LDLIBS   += $(LIBDOGECOIN)/lib/libdogecoin.a -levent -levent_core -levent_extra \
             -levent_pthreads -lpthread -lm
 
-CORE_SRC = src/channel.c src/envelope.c src/txcheck.c src/wire.c
+CORE_SRC = src/channel.c src/envelope.c src/state.c src/txcheck.c src/wire.c
 CORE_OBJ = $(CORE_SRC:.c=.o)
 
 BINS = alice bob
@@ -75,6 +75,7 @@ check: $(TESTS) $(BINS)
 	./test/attack
 	./test/loopback.sh
 	./test/slowpeer.sh
+	./test/resume.sh
 
 clean:
 	rm -f $(BINS) $(TESTS) src/*.o test/*.o

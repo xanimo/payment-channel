@@ -76,8 +76,18 @@ to him, and he refuses a channel whose locktime is not at least `--min-slack`
 blocks above it. alice can refund once the locktime passes, so a channel that
 expires while bob is holding a payment is one he loses.
 
+`--state` is where the channel lives between connections. bob serves each one in
+its own process, so without it the running total starts at zero every time and
+one funding output pays for goods once per reconnection: three sessions naming
+the same outpoint each get shipped and only one of those transactions can ever
+confirm. he refuses to run without it unless `--once` is given, which cannot
+replay. one file per outpoint, locked for the life of a session, written to a
+temporary and renamed, so a crash mid-payment leaves the previous total rather
+than half of a new one.
+
+    $ mkdir -p channels
     $ bob --wif $BOB_WIF --listen 127.0.0.1:9876 \
-          --height 5100000 --min-slack 100 \
+          --height 5100000 --min-slack 100 --state channels \
           --price 5.0 --price 7.5 --price 17.5
 
 alice prints the address, funds it, then pays what she is invoiced up to
