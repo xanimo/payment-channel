@@ -92,7 +92,9 @@ own number.
 than against alice. without it she never has to have broadcast the transaction
 she hands him, and a double spend, an earlier close or her own refund all end
 the same way: bob ships against something that can never confirm. the command is
-run as `CMD --watch ADDR --outpoint TXID:VOUT`, which is koinu's `kw outpoint`,
+split on spaces and run with alice's outpoint appended, `CMD --watch ADDR
+--outpoint TXID:VOUT`, which is koinu's `kw outpoint` and needs its own `--node`
+in front,
 and has to exit 0 for an unspent confirmed output while printing its depth and
 value. bob refuses anything shallower than `--min-depth`, defaulting to 6, and
 refuses an output whose on-chain value is not the capacity alice claimed.
