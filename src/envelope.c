@@ -194,6 +194,13 @@ pc_result pc_envelope_decode(const char *json, pc_envelope *env)
         while (b > a && (b[-1] == ' ' || b[-1] == '\t' ||
                          b[-1] == '\r' || b[-1] == '\n')) b--;
         if (b == a || b[-1] != '}') return PC_ERR_ARG;
+
+        /* Outer braces are not enough: "{...} {...}" starts and ends with one
+           and is two objects. No value here contains a brace, since every field
+           is hex, a number, or the alphanumeric-and-space set, so a brace
+           between the outer pair is a second object or a nested one. */
+        for (const char *p = a + 1; p < b - 1; p++)
+            if (*p == '{' || *p == '}') return PC_ERR_ARG;
         json = a;
     }
 
