@@ -90,9 +90,13 @@ pc_result pc_state_retire(pc_state *st, const pc_channel *ch,
    channel. p2p has no positive acknowledgement, so a send that drew no reject
    is not a send that confirmed: the peer may never relay it and a mempool may
    drop it later. Retiring on that would leave a channel finished on Bob's side
-   and unspent on the chain, and nothing sweeps a retired channel again. */
+   and unspent on the chain.
+
+   (keep_closed) preserves a close that has already happened: a closed channel
+   still needs its transaction on the chain, and forgetting it was closed would
+   let a later session reopen the outpoint. */
 pc_result pc_state_mark_sent(pc_state *st, const pc_channel *ch,
-                             const char *best_tx_hex);
+                             const char *best_tx_hex, int keep_closed);
 
 /* Read a state file without a channel to check it against.
  *

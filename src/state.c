@@ -352,7 +352,7 @@ pc_result pc_state_retire(pc_state *st, const pc_channel *ch,
 }
 
 pc_result pc_state_mark_sent(pc_state *st, const pc_channel *ch,
-                             const char *best_tx_hex)
+                             const char *best_tx_hex, int keep_closed)
 {
-    return state_write(st, ch, best_tx_hex, 0, 1);
+    return state_write(st, ch, best_tx_hex, keep_closed ? 1 : 0, 1);
 }

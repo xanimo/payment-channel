@@ -384,7 +384,13 @@ static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
         *why = "confirmation backend did not reply";
         return -1;
     }
+    /* 3 is a definite no: the backend looked and the output is not in the
+       unspent set. 4 is kwd saying it did not look far enough back, which is
+       not the same answer at all, and reading it as a no would have the sweep
+       retire a live channel. Everything else is a backend that could not tell
+       us. Only 3 is allowed to be terminal. */
     if (status == 3) { *why = "funding is unconfirmed or spent"; return 0; }
+    if (status == 4) { *why = "funding not in the scanned range"; return -1; }
     if (status != 0) { *why = "confirmation backend failed";     return -1; }
 
     unsigned long long depth = 0, value = 0;
@@ -456,7 +462,13 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
             fprintf(stderr, "sweep    %s:%d unreadable\n", txid, vout);
             continue;
         }
-        if (closed || tx[0] == '\0') { pc_state_close(&st); continue; }
+        /* A closed channel is not a finished one. Closing refuses new sessions
+           on the outpoint; what finishes it is that outpoint being spent.
+           skipping closed channels here switched the safety net off at exactly
+           the moment it was needed: a close with no --broadcast-cmd, or one
+           interrupted between retiring and sending, left the transaction in
+           the file with nothing that would ever send it. */
+        if (tx[0] == '\0') { pc_state_close(&st); continue; }
 
         /* The file stores the parts, not the whole channel: no p2sh address
            because it is derivable, and no chain because it is the operator's.
@@ -503,18 +515,19 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
             }
         }
 
-        /* Still unspent. Broadcast once the locktime is close enough that
-           waiting risks the refund becoming spendable first. Earlier than that
-           costs a customer the rest of the channel, so it is a margin rather
-           than a deadline. */
-        if ((uint64_t)ch.locktime > (uint64_t)height + margin) {
+        /* Still unspent. An open channel waits for the locktime to come close
+           enough that waiting risks the refund becoming spendable first, since
+           sending early costs a customer the rest of the channel. A closed one
+           has no rest of the channel to lose and is due now. */
+        if (!closed && (uint64_t)ch.locktime > (uint64_t)height + margin) {
             waiting++;
             pc_state_close(&st);
             continue;
         }
 
-        printf("sweep    %s:%d locktime %u, height %u, %" PRIu64 " koinu%s\n",
+        printf("sweep    %s:%d locktime %u, height %u, %" PRIu64 " koinu%s%s\n",
                txid, vout, ch.locktime, height, ch.paid_to_bob_koinu,
+               closed ? ", closed and unconfirmed" : "",
                already_sent ? ", still unspent, sending again" : "");
         if (broadcast_cmd) {
             if (broadcast(broadcast_cmd, tx)) {
@@ -525,8 +538,16 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                    and re-sending in between is harmless. Without a
                    confirmation backend nothing will ever say more than this,
                    so there it retires and says so. */
-                if (confirm_cmd) pc_state_mark_sent(&st, &ch, tx);
-                else             pc_state_retire(&st, &ch, tx);
+                /* The write is checked. It failing is safe, since an
+                   unrecorded send is simply sent again, but the summary is the
+                   only thing telling an operator this ran and it must not
+                   claim a record it does not have. */
+                pc_result w = confirm_cmd
+                                ? pc_state_mark_sent(&st, &ch, tx, closed)
+                                : pc_state_retire(&st, &ch, tx);
+                if (w != PC_OK)
+                    fprintf(stderr, "sweep    %s:%d sent but not recorded\n",
+                            txid, vout);
                 swept++;
             }
         } else {
