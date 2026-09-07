@@ -88,6 +88,25 @@ that can see a chain writes a decimal height into it:
 he refuses to run without it unless `--once` is given, which cannot outlive its
 own number.
 
+`--confirm-cmd` is the only thing that checks the funding against a chain rather
+than against alice. without it she never has to have broadcast the transaction
+she hands him, and a double spend, an earlier close or her own refund all end
+the same way: bob ships against something that can never confirm. the command is
+run as `CMD --watch ADDR --outpoint TXID:VOUT`, which is koinu's `kw outpoint`,
+and has to exit 0 for an unspent confirmed output while printing its depth and
+value. bob refuses anything shallower than `--min-depth`, defaulting to 6, and
+refuses an output whose on-chain value is not the capacity alice claimed.
+
+    $ bob --wif $BOB_WIF --listen 127.0.0.1:9876 \
+          --min-slack 100 --height-file height.txt --state channels \
+          --confirm-cmd "kw outpoint --headers hdrs --node NODE" --min-depth 6 \
+          --price 5.0
+
+it is run with execvp and no shell, since the txid on that line came off the
+wire, and it has three seconds to answer. that is deliberately under the peer's
+read budget: a backend slower than that cannot produce a reject alice is still
+connected to read. warm the header cache out of band.
+
 `--state` is where the channel lives between connections. bob serves each one in
 its own process, so without it the running total starts at zero every time and
 one funding output pays for goods once per reconnection: three sessions naming

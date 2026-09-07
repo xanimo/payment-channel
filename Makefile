@@ -77,6 +77,7 @@ check: $(TESTS) $(BINS)
 	./test/slowpeer.sh
 	./test/resume.sh
 	./test/height.sh
+	./test/confirm.sh
 
 clean:
 	rm -f $(BINS) $(TESTS) src/*.o test/*.o

@@ -41,6 +41,9 @@
 #include "state.h"
 
 #include <errno.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #include <sys/stat.h>
 
@@ -103,6 +106,7 @@ static void usage(void)
       "usage: bob --wif WIF|@FILE|- [--listen [HOST:]PORT] [--testnet|--regtest]\n"
       "           [--height N | --height-file PATH] [--height-max-age SEC]\n"
       "           [--min-slack N] [--state DIR] [--price DOGE ...]\n"
+      "           [--confirm-cmd CMD] [--min-depth N]\n"
       "           [--max-per-ip N] [--once]\n"
       "       bob --wif WIF|@FILE|- --pubkey\n"
       "\n"
@@ -124,12 +128,20 @@ typedef struct {
     int        order;
 } session;
 
+/* A reason longer than the field is copied in truncated, and the peer is told
+   something that trails off mid-word. test_channel holds pc_strerror to the
+   field's size, but reasons written here as literals had nothing checking them
+   and two arrived at exactly one character over. Silent is the part that makes
+   it a defect, so a truncation now says so in Bob's own log where the operator
+   will see it. */
 static int send_reject(int fd, const char *why)
 {
     pc_envelope out;
     memset(&out, 0, sizeof(out));
     out.type = PC_MSG_REJECT;
-    snprintf(out.addr, sizeof(out.addr), "%s", why);
+    if (snprintf(out.addr, sizeof(out.addr), "%s", why) >= (int)sizeof(out.addr))
+        fprintf(stderr, "reject reason truncated at %zu: %s\n",
+                sizeof(out.addr) - 1, why);
     snprintf(out.psbt_hex, sizeof(out.psbt_hex), "01");
     fprintf(stderr, "reject: %s\n", why);
     return pc_wire_send(fd, &out);
@@ -182,11 +194,144 @@ static int read_height_file(const char *path, unsigned max_age,
     return 1;
 }
 
+/* Is the funding output real, buried, unspent, and worth what Alice said?
+ *
+ * Everything else Bob checks about the funding is checked against a transaction
+ * Alice handed him. She never has to have broadcast it. A confirmation backend
+ * is the only thing that turns "she showed me a transaction" into "the chain
+ * has this output", and it answers the three questions that matter at once:
+ * present, deep enough, and not already spent.
+ *
+ * The command is run with execvp and an argv array, never a shell, because the
+ * txid on that command line came off the wire. It gets its own deadline too: a
+ * backend that hangs would otherwise be a way to pin Bob's children open, which
+ * is the thing wire.c has two timeouts to prevent.
+ *
+ * The contract is koinu's kw outpoint: argv of --watch ADDR --outpoint TXID:VOUT,
+ * exit 0 when unspent and confirmed, 3 when not, printing "depth N" and
+ * "value N koinu". Any other backend wraps to the same shape. */
+/* Shorter than the peer's per-read budget on purpose. A backend that takes
+   longer than PC_WIRE_IO_SEC cannot produce a reject Alice is still there to
+   read: she times out first and gets a dropped socket instead of a reason. A
+   cold backend that needs to sync headers is warmed out of band, which is what
+   an on-disk header cache is for. */
+#define PC_CONFIRM_SECONDS 3
+
+static int run_confirm(const char *cmd, const char *addr, const char *outpoint,
+                       char *out, size_t cap, int *status)
+{
+    int fds[2];
+    if (pipe(fds) != 0) return 0;
+
+    pid_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return 0; }
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[1]);
+        char *argv[6];
+        argv[0] = (char *)cmd;
+        argv[1] = (char *)"--watch";
+        argv[2] = (char *)addr;
+        argv[3] = (char *)"--outpoint";
+        argv[4] = (char *)outpoint;
+        argv[5] = NULL;
+        execvp(cmd, argv);
+        _exit(127);
+    }
+    close(fds[1]);
+
+    size_t n = 0;
+    time_t deadline = time(NULL) + PC_CONFIRM_SECONDS;
+    int timed_out = 0;
+    for (;;) {
+        struct pollfd pfd = { fds[0], POLLIN, 0 };
+        time_t left = deadline - time(NULL);
+        if (left <= 0) { timed_out = 1; break; }
+        int pr = poll(&pfd, 1, (int)(left * 1000));
+        if (pr <= 0) { if (pr == 0) timed_out = 1; break; }
+        if (n + 1 >= cap) break;
+        ssize_t r = read(fds[0], out + n, cap - 1 - n);
+        if (r < 0) { if (errno == EINTR) continue; break; }
+        if (r == 0) break;
+        n += (size_t)r;
+    }
+    out[n] = '\0';
+    close(fds[0]);
+
+    if (timed_out) kill(pid, SIGKILL);
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { }
+    if (timed_out) return 0;
+    *status = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    return 1;
+}
+
+/* "depth 12" or "value 100000000 koinu" out of that one line */
+static int confirm_field(const char *s, const char *key, unsigned long long *out)
+{
+    size_t klen = strlen(key);
+    for (const char *p = s; (p = strstr(p, key)) != NULL; p += klen) {
+        if (p != s && p[-1] != ' ' && p[-1] != '\n') continue;
+        const char *v = p + klen;
+        if (*v != ' ') continue;
+        v++;
+        if (*v < '0' || *v > '9') continue;
+        char *end = NULL;
+        errno = 0;
+        unsigned long long acc = strtoull(v, &end, 10);
+        if (errno || end == v) return 0;
+        *out = acc;
+        return 1;
+    }
+    return 0;
+}
+
+static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
+                                unsigned min_depth, const char **why)
+{
+    if (strlen(ch->funding_txid) != 64 || ch->funding_vout < 0) {
+        *why = "funding outpoint is malformed";
+        return 0;
+    }
+    char outpoint[80];
+    if (snprintf(outpoint, sizeof(outpoint), "%s:%d",
+                 ch->funding_txid, ch->funding_vout) < 0) {
+        *why = "funding outpoint is malformed";
+        return 0;
+    }
+
+    char buf[512];
+    int status = -1;
+    if (!run_confirm(cmd, ch->p2sh_address, outpoint, buf, sizeof(buf), &status)) {
+        *why = "confirmation backend did not reply";
+        return 0;
+    }
+    if (status == 3) { *why = "funding is unconfirmed or spent"; return 0; }
+    if (status != 0) { *why = "confirmation backend failed";     return 0; }
+
+    unsigned long long depth = 0, value = 0;
+    if (!confirm_field(buf, "depth", &depth)) {
+        *why = "confirmation gave no depth";
+        return 0;
+    }
+    if (depth < min_depth) { *why = "funding is not buried deep enough"; return 0; }
+
+    /* The capacity came from the transaction Alice supplied. The chain is the
+       only thing that can say whether that transaction is the one that paid. */
+    if (confirm_field(buf, "value", &value) && value != ch->capacity_koinu) {
+        *why = "funding is not worth what it says";
+        return 0;
+    }
+    return 1;
+}
+
 static int handle_open(int fd, session *s, const pc_envelope *in,
                        const char *wif, pc_chain chain,
                        const char *bob_pub, uint32_t height, uint32_t slack,
                        const char *state_dir,
-                       const char *height_file, unsigned height_max_age)
+                       const char *height_file, unsigned height_max_age,
+                       const char *confirm_cmd, unsigned min_depth)
 {
     (void)wif;
     dogecoin_psbt *psbt = NULL;
@@ -228,6 +373,15 @@ static int handle_open(int fd, session *s, const pc_envelope *in,
     if (r != PC_OK) {
         return send_reject(fd, r == PC_ERR_STATE ? "locktime too near"
                                                  : "funding does not check out"), 0;
+    }
+
+    /* Everything above checked the funding against a transaction Alice sent.
+       This is the first thing that checks it against a chain. */
+    if (confirm_cmd) {
+        const char *why = "funding is not confirmed";
+        if (!funding_is_confirmed(confirm_cmd, &s->ch, min_depth, &why))
+            return send_reject(fd, why), 0;
+        printf("funding  confirmed to at least %u blocks\n", min_depth);
     }
 
     /* The ratchet belongs to the outpoint, not to this connection. Claim it
@@ -369,6 +523,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                              uint32_t height, uint32_t slack,
                              const char *state_dir,
                              const char *height_file, unsigned height_max_age,
+                             const char *confirm_cmd, unsigned min_depth,
                              const char **prices, int nprices)
 {
     session s;
@@ -394,7 +549,8 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                order count and the held transaction survive from the first */
             if (opened) { alive = send_reject(fd, "channel already open"); break; }
             alive = handle_open(fd, &s, &in, wif, chain, bob_pub, height, slack,
-                                state_dir, height_file, height_max_age);
+                                state_dir, height_file, height_max_age,
+                                confirm_cmd, min_depth);
             if (alive) {
                 opened = 1;
                 if (!send_invoice(fd, &s, bob_addr, prices, nprices)) {
@@ -457,8 +613,8 @@ int main(int argc, char **argv)
     const char *prices[MAX_ORDERS];
     int nprices = 0;
     uint32_t height = 0, slack = 100;
-    const char *state_dir = NULL, *height_file = NULL;
-    unsigned height_max_age = 600;
+    const char *state_dir = NULL, *height_file = NULL, *confirm_cmd = NULL;
+    unsigned height_max_age = 600, min_depth = 6;
     int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
     int want_pubkey = 0, once = 0;
@@ -471,6 +627,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--height"))    { const char *v = NEXT(); height = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--state"))     { state_dir = NEXT(); }
         else if (!strcmp(a, "--height-file")) { height_file = NEXT(); }
+        else if (!strcmp(a, "--confirm-cmd")) { confirm_cmd = NEXT(); }
+        else if (!strcmp(a, "--min-depth"))  { const char *v = NEXT(); min_depth = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--height-max-age")) { const char *v = NEXT(); height_max_age = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--min-slack")) { const char *v = NEXT(); slack  = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--max-per-ip")){ const char *v = NEXT(); max_per_ip = v ? (int)strtol(v, NULL, 10) : 0; }
@@ -607,7 +765,8 @@ int main(int argc, char **argv)
             limit_child();
             serve_connection(fd, wif, chain, bob_pub, bob_addr,
                              height, slack, state_dir, height_file,
-                             height_max_age, prices, nprices);
+                             height_max_age, confirm_cmd, min_depth,
+                             prices, nprices);
             close(fd);
             _exit(0);
         }
