@@ -101,14 +101,31 @@ jobs:
       # the same reading as the code agrees with the code and with nothing else,
       # which is how --confirm-cmd shipped unable to invoke the tool it exists
       # for. This is the only thing that checks the contract.
+      #
+      # koinu is private, so this needs a read-only deploy key in
+      # secrets.KOINU_DEPLOY_KEY. Without one the step skips and regtest.sh
+      # says so rather than passing quietly: a check that silently stops
+      # running is worse than one that was never added.
       - name: build koinu
+        env:
+          KOINU_DEPLOY_KEY: ${{ secrets.KOINU_DEPLOY_KEY }}
         run: |
-          git clone --recurse-submodules https://github.com/xanimo/koinu koinu
+          if [ -z "${KOINU_DEPLOY_KEY:-}" ]; then
+              echo "no KOINU_DEPLOY_KEY set: skipping the confirmation backend"
+              exit 0
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KOINU_DEPLOY_KEY" > ~/.ssh/koinu
+          chmod 600 ~/.ssh/koinu
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/koinu -o IdentitiesOnly=yes" \
+              git clone --recurse-submodules git@github.com:xanimo/koinu koinu
           make -C koinu -j"$(nproc)"
           ./koinu/kw 2>&1 | head -1
       - run: |
-          CLI="$GITHUB_WORKSPACE/doge-cli" KW="$GITHUB_WORKSPACE/koinu/kw" \
-              ./contrib/regtest.sh
+          KWBIN=""
+          [ -x "$GITHUB_WORKSPACE/koinu/kw" ] && KWBIN="$GITHUB_WORKSPACE/koinu/kw"
+          CLI="$GITHUB_WORKSPACE/doge-cli" KW="$KWBIN" ./contrib/regtest.sh
       - if: failure()
         run: docker logs doge-ci
 
