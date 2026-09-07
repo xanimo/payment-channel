@@ -112,8 +112,18 @@ in `KOINU_DEPLOY_KEY` while that repository is private, so the day it is public
 nothing here changes. a stub is enough to check what bob does with an answer
 and useless for checking that the question is right.
 
-it is run with execvp and no shell, since the txid on that line came off the
-wire, and it has three seconds to answer. that is deliberately under the peer's
+`--broadcast-cmd` hands the close to the chain instead of printing it for
+someone to relay, which is the window alice's refund is racing and the one place
+a funding output can be spent out from under a transaction bob is still holding.
+it runs after alice has been answered, so it is not inside her read budget, and
+it re-checks the funding first and says so loudly if it has gone. the contract
+is koinu's `kw send`, which takes the hex on stdin and reports no reject rather
+than claiming acceptance, since p2p has no positive acknowledgement.
+
+    --broadcast-cmd "kw send --node NODE"
+
+both are run with execvp and no shell, since the txid on that line came off the
+wire, and the confirmation has three seconds to answer. that is deliberately under the peer's
 read budget: a backend slower than that cannot produce a reject alice is still
 connected to read. warm the header cache out of band.
 

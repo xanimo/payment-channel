@@ -106,7 +106,7 @@ static void usage(void)
       "usage: bob --wif WIF|@FILE|- [--listen [HOST:]PORT] [--testnet|--regtest]\n"
       "           [--height N | --height-file PATH] [--height-max-age SEC]\n"
       "           [--min-slack N] [--state DIR] [--price DOGE ...]\n"
-      "           [--confirm-cmd CMD] [--min-depth N]\n"
+      "           [--confirm-cmd CMD] [--min-depth N] [--broadcast-cmd CMD]\n"
       "           [--max-per-ip N] [--once]\n"
       "       bob --wif WIF|@FILE|- --pubkey\n"
       "\n"
@@ -218,18 +218,24 @@ static int read_height_file(const char *path, unsigned max_age,
 #define PC_CONFIRM_SECONDS 3
 #define PC_CONFIRM_MAX_ARGV 32
 
-static int run_confirm(const char *cmd, const char *addr, const char *outpoint,
+/* Run (cmd), split into argv, with (extra) appended and (feed) written to its
+   stdin. Shared by the confirmation and the broadcast because they differ only
+   in their arguments and their budget. */
+static int run_backend(const char *cmd, const char *const *extra, size_t nextra,
+                       const char *feed, unsigned seconds,
                        char *out, size_t cap, int *status)
 {
-    int fds[2];
+    int fds[2], in[2];
     if (pipe(fds) != 0) return 0;
+    if (pipe(in) != 0) { close(fds[0]); close(fds[1]); return 0; }
 
     pid_t pid = fork();
-    if (pid < 0) { close(fds[0]); close(fds[1]); return 0; }
+    if (pid < 0) { close(fds[0]); close(fds[1]); close(in[0]); close(in[1]); return 0; }
     if (pid == 0) {
-        close(fds[0]);
+        close(fds[0]); close(in[1]);
         dup2(fds[1], STDOUT_FILENO);
-        close(fds[1]);
+        dup2(in[0], STDIN_FILENO);
+        close(fds[1]); close(in[0]);
 
         /* The command is split on spaces because the backend it exists for
            needs its own arguments: kw outpoint requires --node, so a single
@@ -242,22 +248,29 @@ static int run_confirm(const char *cmd, const char *addr, const char *outpoint,
         char split[512];
         snprintf(split, sizeof(split), "%s", cmd);
         for (char *tok = strtok(split, " \t");
-             tok && argc + 5 < PC_CONFIRM_MAX_ARGV;
+             tok && argc + nextra + 1 < PC_CONFIRM_MAX_ARGV;
              tok = strtok(NULL, " \t"))
             argv[argc++] = tok;
         if (argc == 0) _exit(127);
-        argv[argc++] = (char *)"--watch";
-        argv[argc++] = (char *)addr;
-        argv[argc++] = (char *)"--outpoint";
-        argv[argc++] = (char *)outpoint;
-        argv[argc]   = NULL;
+        for (size_t i = 0; i < nextra; i++) argv[argc++] = (char *)extra[i];
+        argv[argc] = NULL;
         execvp(argv[0], argv);
         _exit(127);
     }
-    close(fds[1]);
+    close(fds[1]); close(in[0]);
+
+    if (feed) {
+        size_t left = strlen(feed);
+        while (left) {
+            ssize_t w = write(in[1], feed, left);
+            if (w <= 0) { if (w < 0 && errno == EINTR) continue; break; }
+            feed += w; left -= (size_t)w;
+        }
+    }
+    close(in[1]);
 
     size_t n = 0;
-    time_t deadline = time(NULL) + PC_CONFIRM_SECONDS;
+    time_t deadline = time(NULL) + seconds;
     int timed_out = 0;
     for (;;) {
         struct pollfd pfd = { fds[0], POLLIN, 0 };
@@ -299,6 +312,45 @@ static int confirm_field(const char *s, const char *key, unsigned long long *out
         *out = acc;
         return 1;
     }
+    return 0;
+}
+
+static int run_confirm(const char *cmd, const char *addr, const char *outpoint,
+                       char *out, size_t cap, int *status)
+{
+    const char *extra[4] = { "--watch", addr, "--outpoint", outpoint };
+    return run_backend(cmd, extra, 4, NULL, PC_CONFIRM_SECONDS,
+                       out, cap, status);
+}
+
+/* Hand the transaction to the chain rather than to the operator.
+ *
+ * Bob printed it and someone else had to broadcast it, which left the money
+ * sitting between the last payment and whenever that person got round to it.
+ * That window is the one Alice's refund is racing, so the shorter it is the
+ * less the timeout matters. It is also where a funding output can be spent out
+ * from under a transaction Bob is still holding.
+ *
+ * The contract is koinu's kw send: --tx - reads the hex from stdin, exit 0 with
+ * "broadcast:" when no reject came back, non-zero and "rejected: <reason>"
+ * otherwise. p2p has no positive acknowledgement, so no reject is the strongest
+ * answer there is and the wording says so rather than claiming acceptance. */
+#define PC_BROADCAST_SECONDS 30
+
+static int broadcast(const char *cmd, const char *raw_tx_hex)
+{
+    const char *extra[2] = { "--tx", "-" };
+    char out[512];
+    int status = -1;
+    if (!run_backend(cmd, extra, 2, raw_tx_hex, PC_BROADCAST_SECONDS,
+                     out, sizeof(out), &status)) {
+        printf("broadcast did not answer in %ds, broadcast it yourself\n",
+               PC_BROADCAST_SECONDS);
+        return 0;
+    }
+    for (char *p = out; *p; p++) if (*p == '\n') *p = ' ';
+    if (status == 0) { printf("%s\n", out); return 1; }
+    printf("broadcast refused (%d) %s, broadcast it yourself\n", status, out);
     return 0;
 }
 
@@ -539,6 +591,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                              const char *state_dir,
                              const char *height_file, unsigned height_max_age,
                              const char *confirm_cmd, unsigned min_depth,
+                             const char *broadcast_cmd,
                              const char **prices, int nprices)
 {
     session s;
@@ -548,7 +601,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
     pc_state_disable(&s.st);
 
     pc_envelope in, out;
-    int alive = 1, opened = 0;
+    int alive = 1, opened = 0, sent = 0;
     while (alive && pc_wire_recv(fd, &in) == 1) {
         switch (in.type) {
         case PC_MSG_REQUEST:                      /* [1][2] */
@@ -605,6 +658,17 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
             snprintf(out.psbt_hex, sizeof(out.psbt_hex), "%s", s.best);
             pc_wire_send(fd, &out);
             printf("closed   at %" PRIu64 " koinu\n", s.best_amount);
+
+            /* Alice has been answered, so what follows is Bob's own business
+               and is not inside her read budget. That is why the broadcast can
+               take longer than a confirmation is allowed to. */
+            if (confirm_cmd) {
+                const char *why = "";
+                if (!funding_is_confirmed(confirm_cmd, &s.ch, 1, &why))
+                    printf("WARNING  the funding output is gone: %s\n"
+                           "         the transaction below cannot confirm\n", why);
+            }
+            if (broadcast_cmd) sent = broadcast(broadcast_cmd, s.best);
             alive = 0;
             break;
 
@@ -615,7 +679,8 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
     }
 
     if (s.best) {
-        printf("\nbroadcast this to take the money:\n%s\n\n", s.best);
+        printf(sent ? "\nsent, keep this in case it needs sending again:\n%s\n\n"
+                    : "\nbroadcast this to take the money:\n%s\n\n", s.best);
         fflush(stdout);
         dogecoin_free(s.best);
     }
@@ -629,6 +694,7 @@ int main(int argc, char **argv)
     int nprices = 0;
     uint32_t height = 0, slack = 100;
     const char *state_dir = NULL, *height_file = NULL, *confirm_cmd = NULL;
+    const char *broadcast_cmd = NULL;
     unsigned height_max_age = 600, min_depth = 6;
     int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
@@ -643,6 +709,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--state"))     { state_dir = NEXT(); }
         else if (!strcmp(a, "--height-file")) { height_file = NEXT(); }
         else if (!strcmp(a, "--confirm-cmd")) { confirm_cmd = NEXT(); }
+        else if (!strcmp(a, "--broadcast-cmd")) { broadcast_cmd = NEXT(); }
         else if (!strcmp(a, "--min-depth"))  { const char *v = NEXT(); min_depth = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--height-max-age")) { const char *v = NEXT(); height_max_age = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--min-slack")) { const char *v = NEXT(); slack  = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
@@ -781,7 +848,7 @@ int main(int argc, char **argv)
             serve_connection(fd, wif, chain, bob_pub, bob_addr,
                              height, slack, state_dir, height_file,
                              height_max_age, confirm_cmd, min_depth,
-                             prices, nprices);
+                             broadcast_cmd, prices, nprices);
             close(fd);
             _exit(0);
         }
