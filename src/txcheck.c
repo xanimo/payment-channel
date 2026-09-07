@@ -149,6 +149,12 @@ static int rd_push(const unsigned char *p, size_t len, size_t *off,
 /* The legacy SIGHASH_ALL digest for the one input, with (script_code) standing
    in where the scriptSig sits.
 
+   (script_code) is spliced in whole. A real signer removes everything up to and
+   including the last OP_CODESEPARATOR first, so this is only correct for
+   scripts that contain none. The channel's redeem script does not, and the
+   signature is deterministic given the script, but the signature here is
+   general enough to be handed one that does. Do not reuse it for that.
+
    dogecoin_tx_sighash() computes the same thing and is LIBDOGECOIN_API, but it
    is declared in tx.h, which include_HEADERS does not install, so it cannot be
    called from what libdogecoin ships. This is a second implementation of a
@@ -193,7 +199,12 @@ static pc_result verify_sigs(const pc_channel *ch,
                              size_t sig_start, size_t sig_end,
                              const unsigned char *ss, size_t sslen)
 {
-    unsigned char redeem[520];
+    /* 256, not the 520 P2SH allows. rd_push() reads a direct push or
+       OP_PUSHDATA1, so a redeem script over 255 bytes cannot appear in a
+       scriptSig this reads at all, and a buffer sized past that advertises a
+       limit the parser opposite it cannot reach. Raising this means adding
+       OP_PUSHDATA2 there first. */
+    unsigned char redeem[256];
     size_t rlen = 0;
     size_t rhexlen = strlen(ch->redeem_script_hex);
     if (rhexlen == 0 || (rhexlen % 2) || rhexlen / 2 > sizeof(redeem) ||
@@ -201,7 +212,6 @@ static pc_result verify_sigs(const pc_channel *ch,
         return PC_ERR_SCRIPT;
     if (!pc_hex_to_bin(ch->redeem_script_hex, redeem, rhexlen / 2)) return PC_ERR_SCRIPT;
     rlen = rhexlen / 2;
-    if (rlen != rhexlen / 2) return PC_ERR_SCRIPT;
 
     /* OP_0 <sig alice> <sig bob> OP_0 <redeem script> */
     size_t off = 0;
@@ -315,13 +325,21 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
         rd_u(&r, 4);
         uint64_t nin = rd_varint(&r);
         for (uint64_t i = 0; i < nin && !r.bad; i++) {
+            /* before advancing, not after. need(&r, 0) afterwards catches the
+               same overrun, but only because a zero-length check still compares
+               off against len, which is a subtlety a reader has to notice. */
+            need(&r, 36);
+            if (r.bad) break;
             r.off += 36;
-            need(&r, 0);
             rd_script(&r, NULL, NULL);
             rd_u(&r, 4);
         }
         uint64_t nout = rd_varint(&r);
-        if (r.bad || nout == 0) goto out;
+        /* the same bound the payment reader uses. it terminates either way,
+           since every iteration consumes bytes, but two walkers over
+           peer-supplied bytes disagreeing about their limits is where the next
+           one goes wrong */
+        if (r.bad || nout == 0 || nout > PC_MAX_OUTPUTS) goto out;
         rc = PC_ERR_AMOUNT;
         for (uint64_t i = 0; i < nout; i++) {
             uint64_t value = rd_u(&r, 8);
@@ -483,6 +501,7 @@ out:
     return rc;
 }
 
+/* Only correct for a (script_code) with no OP_CODESEPARATOR; see sighash_all. */
 pc_result pc_tx_sighash(const char *raw_tx_hex,
                         const unsigned char *script_code, size_t sclen,
                         unsigned char out[32])
