@@ -173,5 +173,38 @@ else
     say "a channel whose funding is gone is not sent" "$(tail -1 "$WORK/sweep2.log")"; fail=1
 fi
 
+# A closed channel is not a finished one. Closing refuses new sessions on the
+# outpoint; what finishes it is that outpoint being spent. Skipping closed
+# channels here switched the safety net off at the moment it was needed: a close
+# with no --broadcast-cmd, or one interrupted between retiring and sending, left
+# the transaction in the file with nothing that would ever send it.
+rm -rf "$WORK/state4"; mkdir -p "$WORK/state4"
+python3 - "$WORK/pristine" "$WORK/state4/$(basename "$(ls "$WORK"/state/*.channel)")" <<'CLOSEIT'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+body = open(src).read().replace("closed 0", "closed 1")
+open(dst, "w").write(body)
+CLOSEIT
+echo ok > "$CONFIRM_ANSWER"
+: > "$SENT_LOG"
+SW4() {
+    ./bob --sweep --state "$WORK/state4" --height-file "$WORK/height" \
+          --broadcast-cmd "$WORK/send" --confirm-cmd "$WORK/confirm" \
+          --sweep-margin 50 2>&1 | tail -1
+}
+# margin 50 against a locktime of 300000 at height 1000: an open channel would
+# wait, a closed one is due now
+SW4 | grep -q "1 broadcast" \
+    && say "a closed channel is broadcast, not skipped" "yes" \
+    || { say "a closed channel is broadcast, not skipped" "no"; fail=1; }
+[ -s "$SENT_LOG" ] || { say "and it actually left" "nothing"; fail=1; }
+grep -q "^closed 1" "$WORK"/state4/*.channel && grep -q "^sent 1" "$WORK"/state4/*.channel \
+    && say "and it stays closed while it is tracked" "yes" \
+    || { say "and it stays closed while it is tracked" "no"; fail=1; }
+echo gone > "$CONFIRM_ANSWER"
+SW4 | grep -q "1 confirmed" \
+    && say "spending the outpoint reports it confirmed" "yes" \
+    || { say "spending the outpoint reports it confirmed" "$(SW4)"; fail=1; }
+
 [ "$fail" = 0 ] || { echo "sweep FAILED" >&2; exit 1; }
 echo "sweep ok"
