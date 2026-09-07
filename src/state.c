@@ -190,6 +190,11 @@ pc_result pc_state_open(pc_state *st, const char *dir, pc_channel *ch)
     if (field_u64(buf, "closed", &v) && v) { rc = PC_ERR_CLOSED; goto out; }
 
     rc = PC_ERR_ARG;
+    /* absent in files written before it was recorded, which is why it is not
+       an error to be missing: zero means nobody has asked a chain yet */
+    if (field_u64(buf, "fheight", &v) && v <= 0xffffffffULL)
+        ch->funding_height = (uint32_t)v;
+
     if (!field_u64(buf, "paid", &v)) goto out;
 
     /* A stored ratchet above the capacity is a corrupt file, not a rich
@@ -225,6 +230,7 @@ static pc_result state_write(pc_state *st, const pc_channel *ch,
                      "alice %s\n"
                      "bob %s\n"
                      "locktime %u\n"
+                     "fheight %u\n"
                      "capacity %llu\n"
                      "paid %llu\n"
                      "closed %d\n"
@@ -232,7 +238,7 @@ static pc_result state_write(pc_state *st, const pc_channel *ch,
                      "tx ",
                      PC_STATE_MAGIC, ch->redeem_script_hex,
                      ch->alice_pubkey_hex, ch->bob_pubkey_hex,
-                     (unsigned)ch->locktime,
+                     (unsigned)ch->locktime, (unsigned)ch->funding_height,
                      (unsigned long long)ch->capacity_koinu,
                      (unsigned long long)ch->paid_to_bob_koinu,
                      closed ? 1 : 0, sent ? 1 : 0);
@@ -316,6 +322,8 @@ pc_result pc_state_adopt(pc_state *st, const char *dir,
     ch->capacity_koinu = u;
     if (!field_u64(buf, "paid", &u) || u > ch->capacity_koinu) goto out;
     ch->paid_to_bob_koinu = u;
+    if (field_u64(buf, "fheight", &u) && u <= 0xffffffffULL)
+        ch->funding_height = (uint32_t)u;
 
     if (closed && field_u64(buf, "closed", &u)) *closed = u ? 1 : 0;
     if (sent && field_u64(buf, "sent", &u)) *sent = u ? 1 : 0;
