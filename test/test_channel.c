@@ -909,6 +909,15 @@ int main(void)
        line would otherwise have its fields scraped through the first */
     CHECK(pc_envelope_decode("{\"type\":\"ack\",\"psbt\":\"01\"} {\"tx\":\"aa\"}",
                              &back) != PC_OK, "two objects on a line refused");
+    /* an uppercase txid is the same outpoint: it decodes and lands lowercase,
+       so it matches a funding id Bob derived lowercase himself */
+    CHECK(pc_envelope_decode(
+              "{\"type\":\"payment\",\"ref\":\"" "AABBCCDDEEFF00112233445566778899"
+              "AABBCCDDEEFF00112233445566778899\",\"to_bob\":1,\"psbt\":\"00\"}",
+              &back) == PC_OK
+          && strcmp(back.ref, "aabbccddeeff00112233445566778899"
+                              "aabbccddeeff00112233445566778899") == 0,
+          "uppercase ref normalised to lowercase");
 
     /* the ack's continuation flag: it ends the payment loop, so a value that
        silently decodes wrong is a hang rather than an error */
