@@ -106,9 +106,10 @@ refuses an output whose on-chain value is not the capacity alice claimed.
 
 `contrib/regtest.sh` checks that path against a real chain when `KW` points at a
 built backend, covering an unconfirmed output, a buried one and one a close
-already spent. without `KW` it says it skipped rather than passing quietly, and
-ci needs a read-only deploy key in `KOINU_DEPLOY_KEY` because the backend lives
-in a private repository. a stub is enough to check what bob does with an answer
+already spent. without `KW` it says it skipped rather than passing quietly. ci
+clones the backend publicly if it can and falls back to a read-only deploy key
+in `KOINU_DEPLOY_KEY` while that repository is private, so the day it is public
+nothing here changes. a stub is enough to check what bob does with an answer
 and useless for checking that the question is right.
 
 it is run with execvp and no shell, since the txid on that line came off the

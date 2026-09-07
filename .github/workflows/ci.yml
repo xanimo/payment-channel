@@ -102,24 +102,37 @@ jobs:
       # which is how --confirm-cmd shipped unable to invoke the tool it exists
       # for. This is the only thing that checks the contract.
       #
-      # koinu is private, so this needs a read-only deploy key in
-      # secrets.KOINU_DEPLOY_KEY. Without one the step skips and regtest.sh
-      # says so rather than passing quietly: a check that silently stops
-      # running is worse than one that was never added.
+      # The public clone is tried first so that the day koinu is public this
+      # step needs no edit and forks get the check too. The deploy key is a
+      # bridge until then, read-only and scoped to that one repository. With
+      # neither, the step skips and regtest.sh says so rather than passing
+      # quietly: a check that silently stops running is worse than one that
+      # was never added.
+      #
+      # The clone is deliberately unpinned. Pinning would make this
+      # reproducible and stop it noticing the thing it exists to notice, which
+      # is kw outpoint's contract moving out from under --confirm-cmd.
       - name: build koinu
         env:
           KOINU_DEPLOY_KEY: ${{ secrets.KOINU_DEPLOY_KEY }}
         run: |
-          if [ -z "${KOINU_DEPLOY_KEY:-}" ]; then
-              echo "no KOINU_DEPLOY_KEY set: skipping the confirmation backend"
+          if GIT_TERMINAL_PROMPT=0 git clone --recurse-submodules \
+                 https://github.com/xanimo/koinu koinu 2>/dev/null; then
+              echo "cloned koinu publicly"
+          elif [ -n "${KOINU_DEPLOY_KEY:-}" ]; then
+              rm -rf koinu
+              mkdir -p ~/.ssh && chmod 700 ~/.ssh
+              printf '%s\n' "$KOINU_DEPLOY_KEY" > ~/.ssh/koinu
+              chmod 600 ~/.ssh/koinu
+              ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+              GIT_SSH_COMMAND="ssh -i ~/.ssh/koinu -o IdentitiesOnly=yes" \
+                  git clone --recurse-submodules git@github.com:xanimo/koinu koinu
+              echo "cloned koinu with the deploy key"
+          else
+              echo "koinu is not reachable and no KOINU_DEPLOY_KEY is set:"
+              echo "skipping the confirmation backend"
               exit 0
           fi
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "$KOINU_DEPLOY_KEY" > ~/.ssh/koinu
-          chmod 600 ~/.ssh/koinu
-          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/koinu -o IdentitiesOnly=yes" \
-              git clone --recurse-submodules git@github.com:xanimo/koinu koinu
           make -C koinu -j"$(nproc)"
           ./koinu/kw 2>&1 | head -1
       - run: |
