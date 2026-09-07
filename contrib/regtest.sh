@@ -181,6 +181,7 @@ echo "refund   returned $R_PAID DOGE to alice, expected 99"
 if [ -n "${KW:-}" ]; then
     [ -x "$KW" ] || { echo "KW=$KW is not executable" >&2; exit 1; }
     KWARGS="$KW --regtest outpoint --node 127.0.0.1 --port ${P2P:-18444} --spv --headers $WORK/hdrs"
+    KWSEND="$KW --regtest send --node 127.0.0.1 --port ${P2P:-18444}"
 
     confirm_bob() {
         rm -rf "$WORK/cstate"; mkdir -p "$WORK/cstate"
@@ -188,6 +189,7 @@ if [ -n "${KW:-}" ]; then
         ./bob $NET --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT + 2))" --once \
                    --min-slack 100 --height-file "$WORK/cheight" \
                    --state "$WORK/cstate" --confirm-cmd "$KWARGS" \
+                   --broadcast-cmd "$KWSEND" \
                    --min-depth "${MIN_DEPTH:-6}" --price 5.0 > "$WORK/cbob.log" 2>&1 &
         CBOB=$!
         for _ in $(seq 1 80); do
@@ -227,6 +229,41 @@ if [ -n "${KW:-}" ]; then
     grep -q "unconfirmed or spent" "$WORK/cbob.log" \
         || { echo "FAIL: a spent funding output was accepted" >&2; exit 1; }
     echo "confirm  spent funding refused"
+
+    # and bob hands the close to the chain himself rather than printing it for
+    # someone to relay, which is the window alice's refund is racing
+    B_LOCKTIME=$(( $("${RPC[@]}" getblockcount) + 500 ))
+    B_CHANNEL=$(./alice $NET --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" \
+                             --locktime "$B_LOCKTIME" --address)
+    B_TXID=$("${RPC[@]}" sendtoaddress "$B_CHANNEL" "$CAPACITY")
+    "${RPC[@]}" generate 6 >/dev/null
+    "${RPC[@]}" getrawtransaction "$B_TXID" > "$WORK/bfunding.hex"
+    rm -rf "$WORK/cstate"; mkdir -p "$WORK/cstate"
+    "${RPC[@]}" getblockcount > "$WORK/cheight"
+    ./bob $NET --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT + 3))" --once \
+               --min-slack 100 --height-file "$WORK/cheight" \
+               --state "$WORK/cstate" --confirm-cmd "$KWARGS" \
+               --broadcast-cmd "$KWSEND" --min-depth "${MIN_DEPTH:-6}" \
+               --price 5.0 > "$WORK/bbob.log" 2>&1 &
+    BBOB=$!
+    for _ in $(seq 1 80); do
+        grep -q listening "$WORK/bbob.log" 2>/dev/null && break; sleep 0.1
+    done
+    ./alice $NET --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$B_LOCKTIME" \
+                 --funding-tx "@$WORK/bfunding.hex" --fee "$FEE" --max "$CAPACITY" \
+                 --connect "127.0.0.1:$((PORT + 3))" --close > "$WORK/balice.log" 2>&1 || true
+    for _ in $(seq 1 60); do
+        grep -q "broadcast:" "$WORK/bbob.log" 2>/dev/null && break; sleep 0.5
+    done
+    kill "$BBOB" 2>/dev/null || true; wait "$BBOB" 2>/dev/null || true
+    B_SENT=$(grep -oE "broadcast: [0-9a-f]{64}" "$WORK/bbob.log" | awk '{print $2}')
+    [ -n "$B_SENT" ] || { echo "FAIL: bob did not broadcast the close" >&2
+                          tail -3 "$WORK/bbob.log" >&2; exit 1; }
+    "${RPC[@]}" generate 1 >/dev/null
+    B_CONFS=$("${RPC[@]}" getrawtransaction "$B_SENT" 1 | python3 -c \
+              'import json,sys; print(json.load(sys.stdin).get("confirmations",0))')
+    [ "$B_CONFS" -ge 1 ] || { echo "FAIL: bob's broadcast did not confirm" >&2; exit 1; }
+    echo "confirm  bob broadcast the close himself, $B_SENT confirmed"
 else
     # Loud, not silent. The confirmation path is the only thing standing
     # between bob and a funding output that was never broadcast, and a stub

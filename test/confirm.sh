@@ -63,6 +63,20 @@ case "$mode" in
   crash)   exit 1 ;;
 esac
 STUB
+cat > "$WORK/send" <<'SEND'
+#!/usr/bin/env bash
+# kw send takes the hex on stdin with --tx -
+[ "$1" = "--node" ] && [ "$3" = "--tx" ] && [ "$4" = "-" ] || { echo "bad argv" >&2; exit 1; }
+read -r hex
+[ ${#hex} -gt 100 ] || { echo "no transaction on stdin" >&2; exit 1; }
+case "$(cat "$SEND_ANSWER")" in
+  ok)       echo "broadcast: ${hex:0:64} (no reject)"; exit 0 ;;
+  rejected) echo "rejected: bad-txns-inputs-missingorspent" >&2; exit 1 ;;
+esac
+SEND
+chmod +x "$WORK/send"
+export SEND_ANSWER="$WORK/sendanswer"
+echo ok > "$SEND_ANSWER"
 chmod +x "$WORK/confirm"
 export CONFIRM_ANSWER="$WORK/answer"
 
@@ -72,6 +86,7 @@ answer unspent 100
 ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --min-slack 100 \
       --height-file "$WORK/height" --state "$WORK/state" \
       --confirm-cmd "$WORK/confirm --node stub" --min-depth 6 \
+      --broadcast-cmd "$WORK/send --node stub" \
       --price 5.0 > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!
 for _ in $(seq 1 100); do
@@ -134,6 +149,20 @@ open_channel recovered
 grep -qi "invoice" "$WORK/alice-recovered.log" \
     && say "and opens again once confirmed" "yes" \
     || { say "and opens again once confirmed" "no"; fail=1; }
+
+# closing hands the transaction to the chain rather than to the operator, which
+# is what shrinks the window alice's refund is racing
+answer unspent 100
+./alice --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$LOCKTIME" \
+        --funding-tx "@$WORK/funding.hex" --connect "127.0.0.1:$PORT" \
+        --max 100.0 --close > "$WORK/alice-close.log" 2>&1 || true
+for _ in $(seq 1 40); do grep -q "broadcast:" "$WORK/bob.log" && break; sleep 0.25; done
+grep -q "broadcast:" "$WORK/bob.log" \
+    && say "the close is broadcast, not printed for a human" "yes" \
+    || { say "the close is broadcast, not printed for a human" "no"; fail=1; }
+grep -q "sent, keep this in case" "$WORK/bob.log" \
+    && say "and it stops asking the operator to send it" "yes" \
+    || { say "and it stops asking the operator to send it" "no"; fail=1; }
 
 kill "$BOB_PID" 2>/dev/null || true
 wait "$BOB_PID" 2>/dev/null || true
