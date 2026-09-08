@@ -12,6 +12,7 @@
 #include "refund.h"
 #include "state.h"
 
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -387,6 +388,35 @@ int main(void)
                   pc_strerror(rc3));
             pc_state_close(&st);
             unlink(path);
+        }
+
+        /* snprintf truncation of the derived names. The guard was < 0, which
+           truncation never returns, so at the top of path's range .tmp and
+           .lock collapse onto path itself: unlink drops the ratchet and flock
+           guards an unlinked inode. Build a directory that puts path at 511, so
+           the outpoint path fits but the derived names do not, and check the
+           refusal. Needs ~436 chars, so nobody reaches it by accident. */
+        {
+            char deep[600];
+            size_t dl = (size_t)snprintf(deep, sizeof(deep), "%s", dir);
+            while (dl < 436) {
+                size_t comp = 436 - dl - 1;      /* reserve the separator */
+                if (comp > 200) comp = 200;      /* under NAME_MAX */
+                deep[dl++] = '/';
+                memset(deep + dl, 'a', comp);
+                dl += comp;
+                deep[dl] = '\0';
+                if (mkdir(deep, 0700) != 0) break;
+            }
+            pc_channel dc;
+            CHECK_OK(pc_channel_init(&dc, pa, pb, 300000, PC_CHAIN_MAIN),
+                     "state: deep-dir channel");
+            CHECK_OK(pc_channel_set_funding(&dc, TXID, 0, 10000000000ULL),
+                     "state: deep-dir funding");
+            pc_state ds;
+            pc_state_disable(&ds);
+            CHECK(pc_state_open(&ds, deep, &dc) == PC_ERR_ARG,
+                  "state: a dir that overflows the derived names is refused");
         }
     }
 
