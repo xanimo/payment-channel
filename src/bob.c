@@ -292,10 +292,24 @@ static int run_backend(const char *cmd, const char *const *extra, size_t nextra,
     out[n] = '\0';
     close(fds[0]);
 
-    if (timed_out) kill(pid, SIGKILL);
     int st = 0;
-    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { }
-    if (timed_out) return 0;
+    if (!timed_out) {
+        /* The read loop also ends on EOF, and a backend can close stdout while
+           it keeps running. Bound the reap by the same deadline so that cannot
+           hang the caller past its budget. */
+        for (;;) {
+            pid_t w = waitpid(pid, &st, WNOHANG);
+            if (w == pid) break;
+            if (w < 0 && errno != EINTR) { timed_out = 1; break; }
+            if (time(NULL) >= deadline) { timed_out = 1; break; }
+            poll(NULL, 0, 20);          /* 20ms, nothing to wait on but the clock */
+        }
+    }
+    if (timed_out) {
+        kill(pid, SIGKILL);
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { }
+        return 0;
+    }
     *status = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
     return 1;
 }
