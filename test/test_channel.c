@@ -918,6 +918,12 @@ int main(void)
           && strcmp(back.ref, "aabbccddeeff00112233445566778899"
                               "aabbccddeeff00112233445566778899") == 0,
           "uppercase ref normalised to lowercase");
+    /* the announce carries Bob's pubkey in psbt and Alice pins it by string
+       compare, so an uppercase key must land lowercase too */
+    CHECK(pc_envelope_decode(
+              "{\"type\":\"announce\",\"psbt\":\"02AABBCCDDEEFF\"}", &back) == PC_OK
+          && strcmp(back.psbt_hex, "02aabbccddeeff") == 0,
+          "uppercase psbt normalised to lowercase");
 
     /* the ack's continuation flag: it ends the payment loop, so a value that
        silently decodes wrong is a hang rather than an error */
