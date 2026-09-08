@@ -136,7 +136,7 @@ pc_result pc_state_open(pc_state *st, const char *dir, pc_channel *ch)
        an unlinked inode from the first save onwards while the next process
        locked the new one and saw nothing in its way. This one is created once
        and never replaced, so the name and the inode stay the same thing. */
-    int lfd = open(st->lock, O_RDWR | O_CREAT, 0600);
+    int lfd = open(st->lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (lfd < 0) return PC_ERR_ARG;
 
     /* Non-blocking: a second session on one outpoint is refused, not queued.
@@ -148,7 +148,7 @@ pc_result pc_state_open(pc_state *st, const char *dir, pc_channel *ch)
     }
     st->lock_fd = lfd;
 
-    int fd = open(st->path, O_RDONLY);
+    int fd = open(st->path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         if (errno == ENOENT) { ch->paid_to_bob_koinu = 0; return PC_OK; }
         pc_state_close(st);
@@ -220,7 +220,7 @@ static pc_result state_write(pc_state *st, const pc_channel *ch,
     /* Temporary, fsync, rename. A crash between the write and the rename
        leaves the previous ratchet intact, which costs Alice a retry; the other
        order costs Bob the payment he already acked. */
-    int fd = open(st->tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int fd = open(st->tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) return PC_ERR_STATE;
 
     char head[PC_MAX_SCRIPT_HEX + 512];
@@ -259,7 +259,7 @@ static pc_result state_write(pc_state *st, const pc_channel *ch,
     char *slash = strrchr(dir, '/');
     if (slash) {
         *slash = '\0';
-        int dfd = open(dir, O_RDONLY);
+        int dfd = open(dir, O_RDONLY | O_CLOEXEC);
         if (dfd >= 0) { fsync(dfd); close(dfd); }
     }
     return PC_OK;
@@ -282,12 +282,12 @@ pc_result pc_state_adopt(pc_state *st, const char *dir,
     if (snprintf(st->tmp,  sizeof(st->tmp),  "%s.tmp",  st->path) < 0) return PC_ERR_ARG;
     if (snprintf(st->lock, sizeof(st->lock), "%s.lock", st->path) < 0) return PC_ERR_ARG;
 
-    int lfd = open(st->lock, O_RDWR | O_CREAT, 0600);
+    int lfd = open(st->lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (lfd < 0) return PC_ERR_ARG;
     if (flock(lfd, LOCK_EX | LOCK_NB) != 0) { close(lfd); return PC_ERR_STATE; }
     st->lock_fd = lfd;
 
-    int fd = open(st->path, O_RDONLY);
+    int fd = open(st->path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) { pc_state_close(st); return PC_ERR_ARG; }
     off_t sz = lseek(fd, 0, SEEK_END);
     if (sz <= 0 || sz > 1024 * 1024) { close(fd); pc_state_close(st); return PC_ERR_ARG; }

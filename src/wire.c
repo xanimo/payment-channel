@@ -28,6 +28,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdio.h>
@@ -99,6 +100,9 @@ int pc_wire_accept(int listen_fd, uint32_t *peer_ip)
     socklen_t plen = sizeof(peer);
     int fd = accept(listen_fd, (struct sockaddr *)&peer, &plen);
     if (fd < 0) return -1;
+    /* The confirm/broadcast backend runs via execvp while a session is open;
+       close-on-exec keeps Alice's socket out of it. */
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
     if (peer_ip)
         *peer_ip = (plen >= sizeof(peer) && peer.sin_family == AF_INET)
                  ? peer.sin_addr.s_addr : 0;
