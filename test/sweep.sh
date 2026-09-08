@@ -39,6 +39,7 @@ cat > "$WORK/confirm" <<'STUB'
 #!/usr/bin/env bash
 case "$(cat "$CONFIRM_ANSWER")" in
   ok)     echo "unspent height 900 depth 100 value 10000000000 koinu"; exit 0 ;;
+  shallow) echo "unspent height 900 depth 2 value 10000000000 koinu"; exit 0 ;;
   gone)   echo "not found (unconfirmed or already spent)"; exit 3 ;;
   broken) echo "the node fell over" >&2; exit 1 ;;
 esac
@@ -157,6 +158,24 @@ if grep -q "leaving it for the next pass" "$WORK/sweep3.log" \
     say "a backend that cannot answer retires nothing" "yes"
 else
     say "a backend that cannot answer retires nothing" "$(tail -1 "$WORK/sweep3.log")"; fail=1
+fi
+
+# funding present but shallower than --min-depth is not a spent output. Folding
+# "not buried deep enough" into "gone" retired a live channel and dropped the
+# payment the moment a reorg or a raised --min-depth put its funding below the
+# bar. It is still unspent, so the sweep broadcasts rather than retires.
+rm -rf "$WORK/state5"; mkdir -p "$WORK/state5"
+cp "$WORK/pristine" "$WORK/state5/$(basename "$(ls "$WORK"/state/*.channel)")"
+echo shallow > "$CONFIRM_ANSWER"
+: > "$SENT_LOG"
+./bob --sweep --state "$WORK/state5" --height-file "$WORK/height" \
+      --broadcast-cmd "$WORK/send" --confirm-cmd "$WORK/confirm" \
+      --min-depth 6 --sweep-margin 400000 > "$WORK/sweep5.log" 2>&1 || true
+if grep -q "1 broadcast" "$WORK/sweep5.log" \
+   && grep -q "^closed 0" "$WORK"/state5/*.channel && [ -s "$SENT_LOG" ]; then
+    say "a shallow funding is broadcast, not retired" "yes"
+else
+    say "a shallow funding is broadcast, not retired" "$(tail -1 "$WORK/sweep5.log")"; fail=1
 fi
 
 # a funding output that has gone: retire it, do not send a dead transaction
