@@ -128,8 +128,12 @@ pc_result pc_state_open(pc_state *st, const char *dir, pc_channel *ch)
     if (!outpoint_path(st->path, sizeof(st->path), dir,
                        ch->funding_txid, ch->funding_vout))
         return PC_ERR_ARG;
-    if (snprintf(st->tmp,  sizeof(st->tmp),  "%s.tmp",  st->path) < 0) return PC_ERR_ARG;
-    if (snprintf(st->lock, sizeof(st->lock), "%s.lock", st->path) < 0) return PC_ERR_ARG;
+    /* snprintf returns the length it wanted, not negative, on truncation, so
+       the bound is >=size: at the top of path's range the derived names would
+       otherwise collapse onto path itself, making tmp the live file unlink()
+       removes and lock the data file flock holds by unlinked inode. */
+    if (snprintf(st->tmp,  sizeof(st->tmp),  "%s.tmp",  st->path) >= (int)sizeof(st->tmp))  return PC_ERR_ARG;
+    if (snprintf(st->lock, sizeof(st->lock), "%s.lock", st->path) >= (int)sizeof(st->lock)) return PC_ERR_ARG;
 
     /* The lock is its own file because the data file gets renamed over, and a
        lock follows the inode rather than the name. Locking the data file held
@@ -279,8 +283,12 @@ pc_result pc_state_adopt(pc_state *st, const char *dir,
 
     if (!outpoint_path(st->path, sizeof(st->path), dir, txid_hex, vout))
         return PC_ERR_ARG;
-    if (snprintf(st->tmp,  sizeof(st->tmp),  "%s.tmp",  st->path) < 0) return PC_ERR_ARG;
-    if (snprintf(st->lock, sizeof(st->lock), "%s.lock", st->path) < 0) return PC_ERR_ARG;
+    /* snprintf returns the length it wanted, not negative, on truncation, so
+       the bound is >=size: at the top of path's range the derived names would
+       otherwise collapse onto path itself, making tmp the live file unlink()
+       removes and lock the data file flock holds by unlinked inode. */
+    if (snprintf(st->tmp,  sizeof(st->tmp),  "%s.tmp",  st->path) >= (int)sizeof(st->tmp))  return PC_ERR_ARG;
+    if (snprintf(st->lock, sizeof(st->lock), "%s.lock", st->path) >= (int)sizeof(st->lock)) return PC_ERR_ARG;
 
     int lfd = open(st->lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (lfd < 0) return PC_ERR_ARG;

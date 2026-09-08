@@ -251,7 +251,9 @@ static int run_backend(const char *cmd, const char *const *extra, size_t nextra,
         char *argv[PC_CONFIRM_MAX_ARGV];
         size_t argc = 0;
         char split[512];
-        snprintf(split, sizeof(split), "%s", cmd);
+        /* Truncation would silently drop the tail of the last token, turning
+           --node host:22556 into --node host:2. Fail the exec instead. */
+        if (snprintf(split, sizeof(split), "%s", cmd) >= (int)sizeof(split)) _exit(127);
         for (char *tok = strtok(split, " \t");
              tok && argc + nextra + 1 < PC_CONFIRM_MAX_ARGV;
              tok = strtok(NULL, " \t"))
