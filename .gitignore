@@ -3,6 +3,7 @@
 /bob
 /test_channel
 /test/mkfunding
+/test/bench
 test/adversary
 fuzz/fuzz_envelope
 fuzz/fuzz_txcheck

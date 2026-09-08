@@ -50,6 +50,9 @@ test/adversary: test/adversary.o $(CORE_OBJ)
 test/mkfunding: test/mkfunding.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+test/bench: test/bench.o $(CORE_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
 # Two hand-rolled parsers consume attacker-controlled bytes: pc_envelope_decode
 # on a line off the socket, and the reader in txcheck.c on peer-supplied
 # transaction hex. Both are read carefully and neither had been fuzzed, which is
