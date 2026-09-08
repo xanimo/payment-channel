@@ -1,21 +1,30 @@
-/* Off-chain cost of the channel: how fast the parts that run per payment go.
+/* What a payment costs off chain, measured, with the parts it does not measure
+ * named so the number cannot be quoted out of what it covers.
  *
- * A payment never touches the chain, so its cost is CPU: Alice signs a PSBT,
- * Bob parses and verifies it, and at close Bob countersigns once. This times
- * each in isolation and the steady-state pair (create + accept) that bounds
- * payments per second, plus the envelope round trip the wire pays each message.
+ * A payment never touches the chain. Per payment Alice signs a PSBT, Bob
+ * countersigns (which is how he verifies both signatures), verifies the
+ * assembled transaction, ratchets, and persists it durably before he acks. The
+ * ratchet compare is nanoseconds; the durable write is an fsync, and that, not
+ * the compare, is the floor a merchant feels. Both are timed here.
  *
- * Not a network benchmark: no sockets, no fork, no libdogecoin ecc setup cost.
- * contrib/regtest.sh is where on-chain latency lives. */
+ * What this does NOT measure, and what the headline therefore excludes: the
+ * socket round trip and its 30s line budget, the per-connection fork, the ecc
+ * context setup (one-time, not per payment), and fsync under concurrent load on
+ * a contended disk. Those live in the real bob and in contrib/regtest.sh, not
+ * here. The scale block at the end states the session model rather than
+ * measuring it, since it is a fixed cap, not a curve. */
 
 #include "channel.h"
 #include "hex.h"
+#include "state.h"
 
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 static double now_s(void)
 {
@@ -161,6 +170,37 @@ int main(int argc, char **argv)
         }
     }
     double d_verify = now_s() - t;
+
+    /* Bob: persist the ratchet durably before acking. This is tmp write, fsync,
+       rename, then an fsync of the directory, so the ack is never sent against a
+       payment a crash would forget. It is the one disk-bound step per payment
+       and the floor a merchant actually feels. */
+    char dir[] = "/tmp/pcbenchXXXXXX";
+    double d_persist = -1.0;
+    long state_bytes = 0;
+    long persist_iters = iters < 2000 ? iters : 2000;   /* fsync is ~1e3x slower */
+    if (mkdtemp(dir)) {
+        pc_state stt;
+        if (pc_state_open(&stt, dir, &ch) == PC_OK) {
+            t = now_s();
+            for (long i = 0; i < persist_iters; i++) {
+                if (pc_state_save(&stt, &ch, raw0) != PC_OK) {
+                    fprintf(stderr, "persist failed\n"); return 1;
+                }
+            }
+            d_persist = now_s() - t;
+            pc_state_close(&stt);
+        }
+        char p[300];
+        snprintf(p, sizeof(p), "%s/%s-0.channel", dir, txid);
+        struct stat sb;
+        if (stat(p, &sb) == 0) state_bytes = (long)sb.st_size;
+        /* leave no state behind */
+        unlink(p);
+        snprintf(p, sizeof(p), "%s/%s-0.channel.lock", dir, txid); unlink(p);
+        snprintf(p, sizeof(p), "%s/%s-0.channel.tmp", dir, txid); unlink(p);
+        rmdir(dir);
+    }
     dogecoin_free(raw0);
 
     /* wire: encode an envelope and parse it back */
@@ -192,17 +232,37 @@ int main(int argc, char **argv)
     report("verify_payment (bob)",        d_verify, iters);
     report("payment_accept (bob)",        d_accept, iters);
     report("envelope encode+decode",      d_env,    iters);
+    if (d_persist > 0) report("state_save fsync (bob)",   d_persist, persist_iters);
 
-    /* Per payment, Alice signs once (create); Bob countersigns, verifies the
-       assembled tx, and ratchets, all before he acks. The two sides run on
+    /* Per payment: Alice signs once (create); Bob countersigns, verifies,
+       ratchets, and persists durably before acking. The two sides run on
        different hosts, so pipelined throughput is bounded by the slower one. */
-    double alice = d_create / (double)iters;
-    double bob   = (d_close + d_verify + d_accept) / (double)iters;
-    double slower = alice > bob ? alice : bob;
+    double alice   = d_create / (double)iters;
+    double persist = d_persist > 0 ? d_persist / (double)persist_iters : 0.0;
+    double bob     = (d_close + d_verify + d_accept) / (double)iters + persist;
+    double slower  = alice > bob ? alice : bob;
     printf("\nper payment: alice %.0f us (create), bob %.0f us "
-           "(countersign+verify+accept)\n", alice * 1e6, bob * 1e6);
-    printf("throughput: %.0f payments/s pipelined across the two hosts, "
-           "%.0f/s if both share one core\n",
+           "(countersign+verify+accept + %.0f us fsync)\n",
+           alice * 1e6, bob * 1e6, persist * 1e6);
+    printf("throughput: %.0f payments/s per channel pipelined across the two "
+           "hosts, %.0f/s if both share one core\n",
            1.0 / slower, 1.0 / (alice + bob));
+    if (persist > 0)
+        printf("            the fsync is %.0f%% of bob's cost and sets the "
+               "per-channel ceiling; it is disk-bound, not CPU-bound\n",
+               100.0 * persist / bob);
+
+    /* Scale is a session cap, not a curve, so it is stated not measured. Bob is
+       fork-per-connection capped at MAX_CONNS concurrent sessions (64 by
+       default, 16 per source ip); the next connection is refused, not queued or
+       degraded. A channel at rest is one ~%zu-byte state file: no process, no
+       memory, no fd, so channels held between sessions are bounded by disk, not
+       by bob. A thousand idle channels cost a thousand small files; a thousand
+       simultaneous opens serve 64 and reject the rest. */
+    printf("\nscale: <= MAX_CONNS concurrent sessions (fork per connection), "
+           "channels at rest are ~%zu-byte files bounded by disk not memory\n",
+           (size_t)state_bytes);
+    printf("not measured here: socket round trip, the fork, ecc setup, fsync "
+           "under concurrent-disk contention\n");
     return 0;
 }
