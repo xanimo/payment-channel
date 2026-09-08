@@ -381,12 +381,20 @@ static int broadcast(const char *cmd, const char *raw_tx_hex)
     return 0;
 }
 
-/* 1 confirmed, 0 definitively not there, -1 could not be determined.
+/* 1 confirmed, 0 spent or absent, 2 present but not yet acceptable, -1 could
+ * not be determined.
  *
- * The third is not a detail. A sweep that treats "the backend fell over" the
- * same as "the output is gone" retires the channel and drops the payment,
- * which is the one outcome worse than doing nothing. An open refuses on
- * anything but 1; a sweep only acts on 0. */
+ * The -1 is not a detail. A sweep that treats "the backend fell over" the same
+ * as "the output is gone" retires the channel and drops the payment, which is
+ * the one outcome worse than doing nothing.
+ *
+ * The gap between 0 and 2 matters as much. 0 is the backend saying the outpoint
+ * is not in the unspent set: it is gone, and a channel on it is finished. 2 is
+ * the outpoint present and unspent but shallower than min_depth or not worth its
+ * stated capacity. The held transaction can still spend it, so the sweep must
+ * keep broadcasting rather than retire; folding this into 0 retired a live
+ * channel the moment a reorg or a raised min_depth put its funding below the
+ * bar. An open refuses on anything but 1; only 0 retires. */
 static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
                                 unsigned min_depth, const char **why,
                                 uint32_t since, uint32_t *height_out)
@@ -437,13 +445,13 @@ static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
         *why = "confirmation gave no depth";
         return -1;
     }
-    if (depth < min_depth) { *why = "funding is not buried deep enough"; return 0; }
+    if (depth < min_depth) { *why = "funding is not buried deep enough"; return 2; }
 
     /* The capacity came from the transaction Alice supplied. The chain is the
        only thing that can say whether that transaction is the one that paid. */
     if (confirm_field(buf, "value", &value) && value != ch->capacity_koinu) {
         *why = "funding is not worth what it says";
-        return 0;
+        return 2;
     }
 
     /* The height it reports is where to start looking next time. */
