@@ -94,6 +94,16 @@ int main(int argc, char **argv)
     }
     if (!wif_arg || !fee_s) { usage(); return 2; }
 
+    /* --peer-pubkey is an operator's paste, compared by strcmp against an
+       announce Alice reads as hex in either case. Fold the paste's hex letters
+       to match, or a wrong-case key reads as "different pubkey, refusing": an
+       attack warning for a paste bug, whose obvious fix is to drop the flag and
+       lose the only defense a plaintext transport has. Non-hex is left alone to
+       fail validation unchanged. */
+    if (peer)
+        for (char *p = (char *)peer; *p; p++)
+            if (*p >= 'A' && *p <= 'F') *p |= 0x20;
+
     /* Pull the key out of argv immediately, so it is not sitting in ps for the
        life of the process. @FILE reads it from a file, - from stdin. */
     char *wif = pc_read_secret_arg(wif_arg);

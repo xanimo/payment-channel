@@ -269,6 +269,10 @@ pc_result pc_envelope_decode(const char *json, pc_envelope *env)
                      sizeof(env->psbt_hex), &plen))
         return PC_ERR_ARG;
     if (plen && !is_hex(env->psbt_hex, plen)) return PC_ERR_ARG;
+    /* Lowercase like ref: an announce carries Bob's pubkey here and Alice pins
+       it with a string compare, so a wrong-case key must not read as a mismatch.
+       |0x20 leaves digits untouched. */
+    for (size_t i = 0; i < plen; i++) env->psbt_hex[i] |= 0x20;
 
     const char *xp = find_key(json, "tx");
     if (xp) {
