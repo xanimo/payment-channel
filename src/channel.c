@@ -617,9 +617,12 @@ pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
     unsigned char ss[1024];
     /* bound the whole assembly before writing any of it, rather than after the
        signatures are already in */
+    /* 255, not 520: the push below is a single-byte PUSHDATA1 operand, so a
+       longer script would truncate mod 256. pc_channel_init builds ~116 bytes,
+       so this only refuses what could never be ours, matching pc_refund_create. */
     if (siglen[alice_idx] == 0 || siglen[alice_idx] > 75 ||
         siglen[bob_idx]   == 0 || siglen[bob_idx]   > 75 ||
-        rlen == 0 || rlen > 520) goto out;
+        rlen == 0 || rlen > 255) goto out;
     size_t pushn = (rlen < 76) ? 1 : 2;
     if (4 + siglen[alice_idx] + siglen[bob_idx] + pushn + rlen > sizeof(ss))
         goto out;
