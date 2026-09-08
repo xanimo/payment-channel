@@ -769,6 +769,12 @@ pc_result pc_refund_create(const pc_channel *ch,
     uint8_t decoded[64];
     if (dogecoin_base58_decode_check(alice_addr, decoded, sizeof(decoded)) != 25)
         return PC_ERR_ARG;
+    /* It must be a P2PKH on this network. A P2SH or wrong-network address
+       decodes to 25 bytes just the same, and paying the refund to one wraps a
+       script hash in a P2PKH output that nothing can spend, losing the whole
+       balance at the timeout with no counterparty to reject it. */
+    if (decoded[0] != pc_chainparams(ch->chain)->b58prefix_pubkey_address)
+        return PC_ERR_ARG;
     unsigned char h160[20];
     memcpy(h160, decoded + 1, sizeof(h160));
 

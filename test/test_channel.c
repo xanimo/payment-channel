@@ -821,6 +821,11 @@ int main(void)
         CHECK(pc_refund_create(&ch, alice_wif, alice_addr,
                                ch.capacity_koinu, &refund) == PC_ERR_AMOUNT,
               "a refund spending the whole capacity on fee is refused");
+        /* a P2SH address decodes to 25 bytes too; paying the refund to one
+           would wrap a script hash in an unspendable P2PKH output */
+        CHECK(pc_refund_create(&ch, alice_wif, ch.p2sh_address, 100000000ULL,
+                               &refund) == PC_ERR_ARG,
+              "a refund to a non-P2PKH address is refused");
     }
 
     free(funding_hex);   /* the opening checks above still read it */
