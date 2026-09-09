@@ -217,12 +217,15 @@ pc_result pc_channel_init(pc_channel *ch,
     if (!hexcat(s, cap, &p, "52ae")) return PC_ERR_SCRIPT;          /* OP_2 CHECKMULTISIG */
     if (!hexcat(s, cap, &p, "68")) return PC_ERR_SCRIPT;            /* OP_ENDIF*/
 
-    /* the helper takes a boolean, and regtest shares testnet's 0xc4 script
-       prefix, so either non-main chain wants the same argument here */
-    if (!get_p2sh_address_from_script(ch->redeem_script_hex,
-                                      ch->chain != PC_CHAIN_MAIN,
-                                      ch->p2sh_address, sizeof(ch->p2sh_address)))
-        return PC_ERR_SCRIPT;
+    /* the P2SH address is the base58check of the chain's script prefix over
+       hash160(redeem), which kw_address_p2sh does from the script bytes */
+    unsigned char *rb = NULL;
+    size_t rblen = 0;
+    if (!hex_to_bytes(ch->redeem_script_hex, &rb, &rblen)) return PC_ERR_SCRIPT;
+    size_t an = kw_address_p2sh(rb, rblen, pc_chainparams(ch->chain)->p2sh,
+                                ch->p2sh_address, sizeof(ch->p2sh_address));
+    free(rb);
+    if (an == 0) return PC_ERR_SCRIPT;
 
     return PC_OK;
 }
