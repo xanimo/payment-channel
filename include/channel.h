@@ -27,7 +27,13 @@
 #ifndef PAYMENT_CHANNEL_H
 #define PAYMENT_CHANNEL_H
 
-#include <dogecoin/libdogecoin.h>
+/* koinu (libkw) provides the crypto, tx, PSBT, base58 and chain parameters this
+   once took from libdogecoin, so pc carries no dependency on an unreleased fork
+   of it. The header needs only the chain parameters for pc_chainparams; the .c
+   files include the specific koinu headers (tx.h, psbt.h, ec.h, ...) they use,
+   which avoids the filename clash between koinu's crypto/hex.h and pc's src/hex.h.
+   See koinu crypto/. */
+#include "chainparams.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -47,7 +53,7 @@ extern "C" {
  * node does not recognise even though the scripts are identical. */
 typedef enum { PC_CHAIN_MAIN = 0, PC_CHAIN_TEST, PC_CHAIN_REGTEST } pc_chain;
 
-const dogecoin_chainparams *pc_chainparams(pc_chain chain);
+const kw_chainparams *pc_chainparams(pc_chain chain);
 
 /* 511 bytes of script as hex plus a NUL, so a maximal 520-byte P2SH redeem
    script does not fit. That 511 is what pc_tx_verify_payment() will read;
