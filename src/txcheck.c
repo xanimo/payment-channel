@@ -168,14 +168,13 @@ static int rd_push(const unsigned char *p, size_t len, size_t *off,
    signature is deterministic given the script, but the signature here is
    general enough to be handed one that does. Do not reuse it for that.
 
-   dogecoin_tx_sighash() computes the same thing and is LIBDOGECOIN_API, but it
-   is declared in tx.h, which include_HEADERS does not install, so it cannot be
-   called from what libdogecoin ships. This is a second implementation of a
-   consensus-critical digest and it stays one, so the guard against the two
-   drifting is that verify_sigs() checks Bob's own signature against this hash
-   as well as Alice's. His came from libdogecoin's signer, so if this ever stops
-   agreeing with theirs the honest path fails on the next payment rather than a
-   forgery passing quietly. Do not drop that check to save a verify. */
+   koinu's kw_tx_signature computes the same digest and pc now signs through it,
+   but this stays a second, independent implementation of a consensus-critical
+   digest. The guard against the two drifting is that verify_sigs() checks Bob's
+   own signature against this hash as well as Alice's: his came from koinu's
+   signer, so if this ever stops agreeing with it the honest path fails on the
+   next payment rather than a forgery passing quietly. Do not drop that check to
+   save a verify. */
 static int sighash_all(const unsigned char *tx, size_t txlen,
                        size_t sig_start, size_t sig_end,
                        const unsigned char *script_code, size_t sclen,
