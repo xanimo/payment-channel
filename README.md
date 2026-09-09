@@ -268,8 +268,21 @@ is `mlock`ed so it never reaches swap and is wiped on exit, bob disables core
 dumps and marks itself non-dumpable so a crash or another user cannot capture
 it, and the decoded key is cleared after each signature. a low `RLIMIT_MEMLOCK`
 makes the lock fail, and bob says so on stderr rather than running as though the
-key were protected. this keeps the key off disk; it does not move it out of the
-process, which is what an external signer or hsm would do and is not yet built.
+key were protected.
+
+to keep the key out of the network-facing process entirely, run bob with
+`--sign-cmd CMD --bob-pubkey HEX` and no `--wif`: it is given only the public
+key, and each payment's psbt is piped to CMD, which holds the private key, signs
+input 0, and returns the signed psbt. bob assembles and re-verifies the result,
+so the signer is used rather than trusted: a signer that returns the wrong thing
+fails `pc_tx_verify_payment` rather than being broadcast. `bob --sign --wif @key`
+is a signer that speaks this contract, meant to run where the key lives (a
+hardened host, an hsm wrapper) reachable only by its own bob, since to anything
+that can reach it the signer is an oracle for the key.
+
+    $ bob --sign-cmd "ssh signer bob --sign --wif @/etc/pc/bob.wif" \
+          --bob-pubkey 02ab... --listen 127.0.0.1:9876 --state channels \
+          --height-file height.txt --price 5.0
 
 do not put the listen port on the open internet. the wire protocol is plaintext
 and unauthenticated, so anyone on the path reads every amount, address and txid,

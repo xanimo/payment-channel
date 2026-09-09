@@ -111,10 +111,13 @@ static void usage(void)
       "           [--min-slack N] [--state DIR] [--price DOGE ...]\n"
       "           [--confirm-cmd CMD] [--min-depth N] [--broadcast-cmd CMD]\n"
       "           [--since-window N]\n"
+      "       bob --sign-cmd CMD --bob-pubkey HEX [--listen [HOST:]PORT] ...\n"
+      "           (as above but with the key held in the signer, not here)\n"
       "       bob --sweep --state DIR --height-file PATH [--broadcast-cmd CMD]\n"
       "           [--sweep-margin N] [--confirm-cmd CMD] [--warn-margin N]\n"
       "           [--watch SEC] [--alert-cmd CMD]\n"
       "       bob --wif WIF|@FILE|- --pubkey\n"
+      "       bob --sign --wif WIF|@FILE|-   (signer: PSBT on stdin, signed out)\n"
       "\n"
       "  --wif @FILE reads the key from a file (mode 0600) and - from stdin;\n"
       "  a bare key is left in argv where ps can read it, so prefer @FILE.\n"
@@ -126,7 +129,11 @@ static void usage(void)
       "  --warn-margin N reports a channel N blocks from its locktime before it\n"
       "  is due, and --alert-cmd is run (CMD \"<reason>\") when one is approaching\n"
       "  or a funding is undetermined or the height feed is stale. Each pass\n"
-      "  prints a sweep-status line with the counts and the koinu at risk.\n");
+      "  prints a sweep-status line with the counts and the koinu at risk.\n"
+      "  --sign-cmd runs a signer that holds the key so this process never does;\n"
+      "  it is fed the payment PSBT on stdin and returns the signed PSBT. The\n"
+      "  signed transaction is still re-verified here, so the signer is used,\n"
+      "  not trusted. `bob --sign` is a signer that speaks that contract.\n");
 }
 
 /* Everything one connection knows. */
@@ -401,6 +408,26 @@ static int broadcast(const char *cmd, const char *raw_tx_hex)
     if (status == 0) { printf("%s\n", out); return 1; }
     printf("broadcast refused (%d) %s, broadcast it yourself\n", status, out);
     return 0;
+}
+
+/* Hand a PSBT to the external signer on its stdin and read the signed PSBT back
+   from its stdout. The signer holds the key; this process does not. The result
+   is still checked by pc_tx_verify_payment downstream, so a signer that returns
+   the wrong thing fails the verify rather than being shipped. Returns an
+   allocated hex string the caller frees, or NULL. */
+static char *run_signer(const char *cmd, const char *psbt_hex)
+{
+    size_t cap = 2 * PC_MAX_PSBT_HEX + 64;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    int status = -1;
+    if (!run_backend(cmd, NULL, 0, psbt_hex, PC_CONFIRM_SECONDS,
+                     out, cap, &status) || status != 0) { free(out); return NULL; }
+    size_t n = strlen(out);
+    while (n && (out[n - 1] == '\n' || out[n - 1] == '\r' ||
+                 out[n - 1] == ' '  || out[n - 1] == '\t')) out[--n] = '\0';
+    if (n == 0) { free(out); return NULL; }
+    return out;
 }
 
 /* 1 confirmed, 0 spent or absent, 2 present but not yet acceptable, -1 could
@@ -830,18 +857,30 @@ static int send_invoice(int fd, session *s, const char *bob_addr,
 
 /* [6][G] A payment counts only once Bob has read what he signed. */
 static int handle_payment(int fd, session *s, const pc_envelope *in,
-                          const char *wif, int more_to_come)
+                          const char *wif, const char *sign_cmd, int more_to_come)
 {
     if (strcmp(in->ref, s->ch.funding_txid) != 0)
         return send_reject(fd, "wrong funding"), 0;
     if (in->to_bob_koinu != s->owed)
         return send_reject(fd, "not the invoiced amount"), 0;
 
-    /* Sign first, then read it. Bob's signature never leaves this process
-       until the transaction checks out, and assembling it is the only way to
-       see the outpoint and the amounts. */
+    /* Sign first, then read it. Bob's signature is added, then the transaction
+       is assembled and re-checked before anything is answered, and assembling it
+       is the only way to see the outpoint and the amounts. With --sign-cmd the
+       signing happens in a separate process that holds the key; this one gets a
+       signed PSBT back and assembles it without ever holding a key. Either way
+       pc_tx_verify_payment below is what makes the result trustworthy, so the
+       signer is not trusted, only used. */
     char *raw = NULL;
-    pc_result r = pc_payment_countersign(&s->ch, in->psbt_hex, wif, &raw);
+    pc_result r;
+    if (sign_cmd) {
+        char *signed_psbt = run_signer(sign_cmd, in->psbt_hex);
+        if (!signed_psbt) return send_reject(fd, "signer did not sign"), 0;
+        r = pc_payment_assemble(&s->ch, signed_psbt, &raw);
+        free(signed_psbt);
+    } else {
+        r = pc_payment_countersign(&s->ch, in->psbt_hex, wif, &raw);
+    }
     if (r != PC_OK) return send_reject(fd, "will not countersign"), 0;
 
     r = pc_tx_verify_payment(&s->ch, raw, in->to_bob_koinu);
@@ -893,6 +932,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                              const char *height_file, unsigned height_max_age,
                              const char *confirm_cmd, unsigned min_depth,
                              const char *broadcast_cmd, unsigned window,
+                             const char *sign_cmd,
                              const char **prices, int nprices)
 {
     session s;
@@ -934,7 +974,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
             int more = invoice_due(&s, prices, nprices, NULL);
             if (!more && s.order < nprices)
                 fprintf(stderr, "order %d would exceed the channel\n", s.order + 1);
-            alive = handle_payment(fd, &s, &in, wif, more);
+            alive = handle_payment(fd, &s, &in, wif, sign_cmd, more);
             /* Not fatal when nothing more is due: Alice still has a close
                to send, and Bob has the transaction she wants back. */
             if (alive && more)
@@ -1003,9 +1043,9 @@ int main(int argc, char **argv)
     uint32_t height = 0, slack = 100;
     const char *state_dir = NULL, *height_file = NULL, *confirm_cmd = NULL;
     const char *broadcast_cmd = NULL;
-    int sweep = 0;
+    int sweep = 0, sign = 0;
     unsigned margin = 50, warn_margin = 0, watch = 0;
-    const char *alert_cmd = NULL;
+    const char *alert_cmd = NULL, *sign_cmd = NULL, *bob_pubkey_arg = NULL;
     unsigned height_max_age = 600, min_depth = 6, window = 0;
     int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
@@ -1021,6 +1061,9 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--height-file")) { height_file = NEXT(); }
         else if (!strcmp(a, "--confirm-cmd")) { confirm_cmd = NEXT(); }
         else if (!strcmp(a, "--broadcast-cmd")) { broadcast_cmd = NEXT(); }
+        else if (!strcmp(a, "--sign"))      { sign = 1; }
+        else if (!strcmp(a, "--sign-cmd"))  { sign_cmd = NEXT(); }
+        else if (!strcmp(a, "--bob-pubkey")) { bob_pubkey_arg = NEXT(); }
         else if (!strcmp(a, "--sweep"))     { sweep = 1; }
         else if (!strcmp(a, "--sweep-margin")) { const char *v = NEXT(); margin = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--warn-margin")) { const char *v = NEXT(); warn_margin = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
@@ -1098,18 +1141,68 @@ int main(int argc, char **argv)
         return srv;
     }
 
-    if (!wif_arg) { usage(); return 2; }
+    /* The signer half of --sign-cmd. Holds the key, sees no socket: reads a PSBT
+       on stdin, adds Bob's signature to input 0, writes the PSBT back. Run it
+       where the key lives, reached only by its own Bob over a trusted link. */
+    if (sign) {
+        if (!wif_arg) { fprintf(stderr, "bob: --sign needs --wif\n"); return 2; }
+        char *skey = pc_read_secret_arg(wif_arg);
+        if (!skey) { fprintf(stderr, "bob: cannot read --wif\n"); return 2; }
+        char *line = NULL;
+        size_t cap = 0;
+        ssize_t n = getline(&line, &cap, stdin);
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' ||
+                         line[n - 1] == ' '  || line[n - 1] == '\t')) line[--n] = '\0';
+        if (n <= 0) { free(line); pc_secret_free(skey);
+                      fprintf(stderr, "bob: no psbt on stdin\n"); return 2; }
+        dogecoin_ecc_start();
+        char *signed_psbt = NULL;
+        pc_result sr = pc_payment_sign(line, skey, chain, &signed_psbt);
+        dogecoin_ecc_stop();
+        free(line);
+        pc_secret_free(skey);
+        if (sr != PC_OK || !signed_psbt) { fprintf(stderr, "bob: sign failed\n"); return 1; }
+        printf("%s\n", signed_psbt);
+        dogecoin_free(signed_psbt);
+        return 0;
+    }
+
+    /* Two ways to hold the signing key: in this process (--wif), or in a separate
+       signer this one drives (--sign-cmd), which keeps the key out of the
+       network-facing process entirely. In the second, Bob is given only its
+       public key, enough to announce itself and know its payout address. */
+    if (sign_cmd) {
+        if (wif_arg) {
+            fprintf(stderr, "bob: --sign-cmd holds the key elsewhere, so --wif "
+                            "does not belong with it\n");
+            return 2;
+        }
+        if (!bob_pubkey_arg) {
+            fprintf(stderr, "bob: --sign-cmd needs --bob-pubkey HEX (the key "
+                            "stays in the signer)\n");
+            return 2;
+        }
+    } else if (!wif_arg) { usage(); return 2; }
 
     /* Pull the key out of argv immediately, so it is not sitting in ps for the
-       life of the process. */
-    char *wif = pc_read_secret_arg(wif_arg);
-    if (!wif) { fprintf(stderr, "bob: cannot read --wif\n"); return 2; }
+       life of the process. In --sign-cmd mode there is no key here at all. */
+    char *wif = NULL;
+    if (!sign_cmd) {
+        wif = pc_read_secret_arg(wif_arg);
+        if (!wif) { fprintf(stderr, "bob: cannot read --wif\n"); return 2; }
+    }
 
     dogecoin_ecc_start();
     int rc = 1;
 
     char bob_pub[PUBKEYHEXLEN], bob_addr[P2PKHLEN];
-    if (!pc_identity(wif, chain, bob_pub, bob_addr)) {
+    if (sign_cmd) {
+        snprintf(bob_pub, sizeof(bob_pub), "%s", bob_pubkey_arg);
+        if (!pc_identity_pub(bob_pub, chain, bob_addr)) {
+            fprintf(stderr, "bob: --bob-pubkey is not a valid compressed pubkey\n");
+            goto done;
+        }
+    } else if (!pc_identity(wif, chain, bob_pub, bob_addr)) {
         fprintf(stderr, "bob: wif would not decode\n");
         goto done;
     }
@@ -1216,7 +1309,7 @@ int main(int argc, char **argv)
             serve_connection(fd, wif, chain, bob_pub, bob_addr,
                              height, slack, state_dir, height_file,
                              height_max_age, confirm_cmd, min_depth,
-                             broadcast_cmd, window, prices, nprices);
+                             broadcast_cmd, window, sign_cmd, prices, nprices);
             close(fd);
             _exit(0);
         }
