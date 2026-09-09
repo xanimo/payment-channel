@@ -17,6 +17,8 @@
 #include "channel.h"
 #include "hex.h"
 #include "state.h"
+#include "kwshim.h"
+#include "tx.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -45,32 +47,33 @@ static void report(const char *name, double secs, long iters)
 static char *make_funding_tx(const char *p2sh_addr, const char *change_addr,
                              char *txid_out)
 {
-    int tix = start_transaction();
-    if (tix < 0) return NULL;
-    if (!add_utxo(tix,
-        (char *)"b4455e7b7b7acb51fb6feba7a2702c42a5100f61f61abafa31851ed6ae076074", 0))
+    uint8_t praw[64], craw[64];
+    size_t pn = 0, cn = 0;
+    if (!kw_base58check_decode(p2sh_addr, praw, sizeof(praw), &pn) || pn != 21 ||
+        !kw_base58check_decode(change_addr, craw, sizeof(craw), &cn) || cn != 21)
         return NULL;
-    if (!add_output(tix, (char *)p2sh_addr, (char *)"100.0")) return NULL;
-    char *hex = (char *)malloc(DOGECOIN_MAX_TX_HEX_LEN);
+    uint8_t spk[23];
+    spk[0] = 0xa9; spk[1] = 0x14; memcpy(spk + 2, praw + 1, 20); spk[22] = 0x87;
+
+    kw_tx tx;
+    kw_tx_init(&tx);
+    if (!kw_tx_add_input(&tx,
+        "b4455e7b7b7acb51fb6feba7a2702c42a5100f61f61abafa31851ed6ae076074", 0) ||
+        !kw_tx_add_output(&tx, 10000000000ULL, spk, sizeof(spk)) ||      /* 100 DOGE */
+        !kw_tx_add_output_p2pkh(&tx, 4900000000ULL, craw + 1))          /* 49 change */
+        return NULL;
+
+    uint8_t raw[8192];
+    size_t n = kw_tx_serialize(&tx, raw, sizeof(raw));
+    if (n == 0) return NULL;
+    char *hex = (char *)malloc(n * 2 + 1);
     if (!hex) return NULL;
-    if (!finalize_transaction_ex(tix, (char *)p2sh_addr, (char *)"1.0",
-                                 (char *)"150.0", (char *)change_addr,
-                                 hex, DOGECOIN_MAX_TX_HEX_LEN)) {
-        free(hex); return NULL;
-    }
-    size_t hl = strlen(hex), blen = 0;
-    unsigned char *b = malloc(hl / 2 + 1);
-    utils_hex_to_bin(hex, b, hl, &blen);
-    dogecoin_tx *tx = dogecoin_tx_new();
-    dogecoin_tx_deserialize(b, blen, tx, NULL);
-    free(b);
-    uint256_t txid;
-    dogecoin_tx_hash(tx, txid);
-    unsigned char rev[32];
+    pc_bin_to_hex(raw, n, hex);
+
+    uint8_t txid[32], rev[32];
+    if (!kw_tx_txid(&tx, txid)) { free(hex); return NULL; }
     for (int i = 0; i < 32; i++) rev[i] = txid[31 - i];
-    utils_bin_to_hex(rev, 32, txid_out);
-    dogecoin_tx_free(tx);
-    remove_all();
+    pc_bin_to_hex(rev, 32, txid_out);
     return hex;
 }
 
@@ -79,7 +82,7 @@ int main(int argc, char **argv)
     long iters = (argc > 1) ? strtol(argv[1], NULL, 10) : 20000;
     if (iters < 1) iters = 1;
 
-    dogecoin_ecc_start();
+    kw_ec_start();
 
     char alice_wif[PRIVKEYWIFLEN], alice_addr[P2PKHLEN];
     char bob_wif[PRIVKEYWIFLEN],   bob_addr[P2PKHLEN];
@@ -126,7 +129,7 @@ int main(int argc, char **argv)
                               to_bob, fee, &p) != PC_OK) {
             fprintf(stderr, "create failed\n"); return 1;
         }
-        dogecoin_free(p);
+        free(p);
     }
     double d_create = now_s() - t;
 
@@ -153,7 +156,7 @@ int main(int argc, char **argv)
         if (pc_payment_countersign(&ch, psbt0, bob_wif, &raw) != PC_OK) {
             fprintf(stderr, "countersign failed\n"); return 1;
         }
-        dogecoin_free(raw);
+        free(raw);
     }
     double d_close = now_s() - t;
 
@@ -201,7 +204,7 @@ int main(int argc, char **argv)
         snprintf(p, sizeof(p), "%s/%s-0.channel.tmp", dir, txid); unlink(p);
         rmdir(dir);
     }
-    dogecoin_free(raw0);
+    free(raw0);
 
     /* wire: encode an envelope and parse it back */
     pc_envelope env, back;
@@ -221,9 +224,9 @@ int main(int argc, char **argv)
     }
     double d_env = now_s() - t;
 
-    dogecoin_free(psbt0);
+    free(psbt0);
     free(funding);
-    dogecoin_ecc_stop();
+    kw_ec_stop();
 
     printf("payment-channel off-chain cost (%ld iterations each)\n", iters);
     report("channel_init (open)",         d_init,   iters);

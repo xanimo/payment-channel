@@ -44,7 +44,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "channel.h"
+#include "../test/kwshim.h"
 #include "refund.h"
 
 static int ready = 0;
@@ -55,7 +55,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
 static void setup(void)
 {
-    dogecoin_ecc_start();
+    kw_ec_start();
     char bwif[PRIVKEYWIFLEN], baddr[P2PKHLEN];
     if (!generatePrivPubKeypair(awif, aaddr, false)) abort();
     if (!generatePrivPubKeypair(bwif, baddr, false)) abort();
@@ -117,7 +117,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         size_t rl = strlen(raw);
         if (rl == 0 || (rl % 2)) abort();
         if (ch.redeem_script_hex[0] && !strstr(raw, ch.redeem_script_hex)) abort();
-        dogecoin_free(raw);
+        free(raw);
     } else if (raw) {
         abort();   /* a refusal must not leave the caller holding a transaction */
     }

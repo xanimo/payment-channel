@@ -41,7 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "channel.h"
+#include "../test/kwshim.h"
 
 static int ready = 0;
 static char apub[PUBKEYHEXLEN], bpub[PUBKEYHEXLEN];
@@ -50,7 +50,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
 static void setup(void)
 {
-    dogecoin_ecc_start();
+    kw_ec_start();
     char awif[PRIVKEYWIFLEN], aaddr[P2PKHLEN];
     char bwif[PRIVKEYWIFLEN], baddr[P2PKHLEN];
     if (!generatePrivPubKeypair(awif, aaddr, false)) abort();
