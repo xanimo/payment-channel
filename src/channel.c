@@ -339,40 +339,41 @@ pc_result pc_channel_open_create(const pc_channel *ch, const char *funding_tx_he
     pc_result r = pc_tx_find_channel_output(ch, funding_tx_hex, txid, &vout, &value);
     if (r != PC_OK) return r;
 
-    char txhex[256];
-    if (!unsigned_1in_0out(txid, (uint32_t)vout, txhex, sizeof(txhex)))
-        return PC_ERR_PSBT;
+    /* The unsigned spend is one input (the funding outpoint) and no outputs yet;
+       kw_tx builds it directly rather than through a serialized round trip. */
+    kw_tx spend;
+    kw_tx_init(&spend);
+    if (!kw_tx_add_input(&spend, txid, (uint32_t)vout)) return PC_ERR_PSBT;
 
-    dogecoin_tx *spend = NULL, *funding = NULL;
-    dogecoin_psbt *psbt = NULL;
-    unsigned char *sbytes = NULL, *fbytes = NULL, *rbytes = NULL;
+    kw_psbt p;
+    kw_psbt_init(&p);
+    unsigned char *fbytes = NULL, *rbytes = NULL, *raw = NULL;
     pc_result rc = PC_ERR_PSBT;
 
-    size_t slen = 0;
-    if (!hex_to_bytes(txhex, &sbytes, &slen)) goto out;
-    spend = dogecoin_tx_new();
-    if (dogecoin_tx_deserialize(sbytes, slen, spend, NULL) == 0) goto out;
+    if (!kw_psbt_create(&p, &spend)) goto out;
 
-    psbt = dogecoin_psbt_create(spend);
-    if (!psbt) goto out;
-
+    /* the input's non-witness utxo is the whole funding transaction, and the
+       redeem script it spends */
     size_t flen = 0;
     if (!hex_to_bytes(funding_tx_hex, &fbytes, &flen)) goto out;
-    funding = dogecoin_tx_new();
-    if (dogecoin_tx_deserialize(fbytes, flen, funding, NULL) == 0) goto out;
-    if (!dogecoin_psbt_input_set_utxo(psbt, 0, funding)) goto out;
+    if (!kw_psbt_set_utxo(&p, 0, fbytes, flen)) goto out;
 
     size_t rlen = 0;
     if (!hex_to_bytes(ch->redeem_script_hex, &rbytes, &rlen)) goto out;
-    if (!dogecoin_psbt_input_set_redeemscript(psbt, 0, rbytes, rlen)) goto out;
+    if (!kw_psbt_set_redeem(&p, 0, rbytes, rlen)) goto out;
 
-    *psbt_hex_out = dogecoin_psbt_to_hex(psbt);
-    rc = *psbt_hex_out ? PC_OK : PC_ERR_PSBT;
+    raw = (unsigned char *)malloc(PC_MAX_PSBT_HEX / 2);
+    if (!raw) goto out;
+    size_t n = kw_psbt_serialize(&p, raw, PC_MAX_PSBT_HEX / 2);
+    if (n == 0) goto out;
+    char *hex = (char *)malloc(n * 2 + 1);
+    if (!hex) goto out;
+    pc_bin_to_hex(raw, n, hex);
+    *psbt_hex_out = hex;
+    rc = PC_OK;
 out:
-    free(sbytes); free(fbytes); free(rbytes);
-    if (psbt)    dogecoin_psbt_free(psbt);
-    if (spend)   dogecoin_tx_free(spend);
-    if (funding) dogecoin_tx_free(funding);
+    free(fbytes); free(rbytes); free(raw);
+    kw_psbt_free(&p);
     return rc;
 }
 
