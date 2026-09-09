@@ -82,6 +82,7 @@ check: $(TESTS) $(BINS)
 	./test/height.sh
 	./test/confirm.sh
 	./test/sweep.sh
+	./test/keyguard.sh
 
 clean:
 	rm -f $(BINS) $(TESTS) src/*.o test/*.o

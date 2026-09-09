@@ -52,6 +52,7 @@
 #include <ctype.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -1046,6 +1047,16 @@ int main(int argc, char **argv)
 
     /* a peer that closes mid-write must not take the process with it */
     signal(SIGPIPE, SIG_IGN);
+
+    /* Keep the key off disk. A core dump of a long-running daemon would carry
+       the WIF and the decoded key in the clear, and PR_SET_DUMPABLE also stops
+       another user from attaching to read the process memory. Set before the key
+       is read and inherited across the per-connection fork. */
+    {
+        struct rlimit no_core = { 0, 0 };
+        setrlimit(RLIMIT_CORE, &no_core);
+        prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
 
     /* A sweep signs nothing and answers nobody: it reads the directory,
        broadcasts what is about to expire, and exits. So it needs no key, which

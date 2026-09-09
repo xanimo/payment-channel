@@ -263,7 +263,13 @@ rather than in it.
 
 pass the key as `--wif @path` or `--wif -`, never as a bare argument: a key on
 the command line sits in `ps` and the shell history for any local user to read.
-the file should be mode 0600, and alice takes the same forms.
+the file should be mode 0600, and alice takes the same forms. once read, the key
+is `mlock`ed so it never reaches swap and is wiped on exit, bob disables core
+dumps and marks itself non-dumpable so a crash or another user cannot capture
+it, and the decoded key is cleared after each signature. a low `RLIMIT_MEMLOCK`
+makes the lock fail, and bob says so on stderr rather than running as though the
+key were protected. this keeps the key off disk; it does not move it out of the
+process, which is what an external signer or hsm would do and is not yet built.
 
 do not put the listen port on the open internet. the wire protocol is plaintext
 and unauthenticated, so anyone on the path reads every amount, address and txid,
