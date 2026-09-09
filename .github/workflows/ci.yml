@@ -1,6 +1,9 @@
-# Every job needs koinu (libkw), so one job builds it at the pinned release tag
-# and the scenarios fan out from it: make check, contrib/regtest.sh against a
-# real node, and a fuzz smoke. pc no longer depends on libdogecoin.
+# Each scenario builds koinu (libkw) itself at the pinned release tag via the
+# build-koinu composite action, then runs: make check, contrib/regtest.sh
+# against a real node, and a fuzz smoke. koinu is private and pc is public, so
+# it is deliberately not passed as an artifact between jobs; a public run's
+# artifacts are world-readable and that would leak the whole private tree. pc no
+# longer depends on libdogecoin.
 name: ci
 
 on:
@@ -12,65 +15,20 @@ permissions:
   contents: read
 
 env:
-  # pc pins a koinu release, not a moving main. Re-fetched with --force because
-  # the tag objects were re-signed; the commit they name is unchanged.
+  # pc pins a koinu release, not a moving main.
   KOINU_TAG: v0.2.1
 
 jobs:
-  # Build koinu's libkw.a + secp256k1 at the pinned tag, once, and hand it to
-  # the scenario jobs. Public clone first so a fork gets it with no secret; the
-  # read-only deploy key is a bridge while the repo is private.
-  koinu:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: build koinu
-        env:
-          KOINU_DEPLOY_KEY: ${{ secrets.KOINU_DEPLOY_KEY }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends autoconf automake libtool
-          if GIT_TERMINAL_PROMPT=0 git clone https://github.com/xanimo/koinu koinu 2>/dev/null; then
-              echo "cloned koinu publicly"
-          elif [ -n "${KOINU_DEPLOY_KEY:-}" ]; then
-              rm -rf koinu
-              mkdir -p ~/.ssh && chmod 700 ~/.ssh
-              printf '%s\n' "$KOINU_DEPLOY_KEY" > ~/.ssh/koinu
-              chmod 600 ~/.ssh/koinu
-              ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-              # exported, not just on the clone, so the tag fetch and the
-              # submodule update below use the key too (the submodule is public
-              # secp256k1, which any authenticated key may read)
-              export GIT_SSH_COMMAND="ssh -i ~/.ssh/koinu -o IdentitiesOnly=yes"
-              git clone git@github.com:xanimo/koinu koinu
-              echo "cloned koinu with the deploy key"
-          else
-              echo "koinu is not reachable and no KOINU_DEPLOY_KEY is set" >&2
-              exit 1
-          fi
-          git -C koinu fetch --tags --force
-          git -C koinu checkout "$KOINU_TAG"
-          git -C koinu submodule update --init --recursive
-          make -C koinu -j"$(nproc)"
-          ./koinu/kw --version
-      - uses: actions/upload-artifact@v4
-        with:
-          name: koinu
-          path: koinu
-          # secp256k1 builds into depends/secp256k1/.libs, which the default
-          # excludes as a hidden path; the pc link needs libsecp256k1.a from it
-          include-hidden-files: true
-
   # test_channel, test/attack, the shell scenarios (loopback, sweep, keyguard,
   # signer, replicate), then the dribble case that outlasts the line deadline.
   check:
-    needs: koinu
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: ./.github/actions/build-koinu
         with:
-          name: koinu
-          path: koinu
+          tag: ${{ env.KOINU_TAG }}
+          deploy-key: ${{ secrets.KOINU_DEPLOY_KEY }}
       - run: make KOINU="$GITHUB_WORKSPACE/koinu" -j"$(nproc)"
       - run: make KOINU="$GITHUB_WORKSPACE/koinu" check
       - run: SLOW=1 ./test/slowpeer.sh
@@ -80,7 +38,6 @@ jobs:
   # refund and the sweep all confirm. KW is the same koinu build, so this also
   # checks --confirm-cmd/--broadcast-cmd against the real kw.
   regtest:
-    needs: koinu
     runs-on: ubuntu-24.04
     env:
       # xanimo/docker feat/1.14.9: 1.14.9-on-bookworm, release binaries verified
@@ -88,10 +45,10 @@ jobs:
       DOCKER_COMMIT: 208ac5a0a5f682a67f3b6e594029d7c37ea06717
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: ./.github/actions/build-koinu
         with:
-          name: koinu
-          path: koinu
+          tag: ${{ env.KOINU_TAG }}
+          deploy-key: ${{ secrets.KOINU_DEPLOY_KEY }}
       - run: make KOINU="$GITHUB_WORKSPACE/koinu" -j"$(nproc)" alice bob test/mkfunding
       - name: build the node image
         run: |
@@ -100,8 +57,10 @@ jobs:
           docker build -t dogecoin-regtest dogecoin-docker/1.14.9/bookworm
       - name: start the node
         run: |
-          # 18444 is published because kw talks to the node over p2p, not rpc
-          docker run -d --name doge-ci -p 18444:18444 dogecoin-regtest \
+          # kw talks to the node over p2p (not rpc), so the host must reach
+          # 18444; bind it to loopback so it is not exposed on the runner's
+          # external interface.
+          docker run -d --name doge-ci -p 127.0.0.1:18444:18444 dogecoin-regtest \
               dogecoind -regtest -txindex=1 -listen=1 -printtoconsole
           printf '#!/bin/sh\nexec docker exec doge-ci dogecoin-cli "$@"\n' > doge-cli
           chmod +x doge-cli
@@ -122,16 +81,15 @@ jobs:
   # the peer-facing parsers under asan and ubsan. setarch -R because asan's
   # shadow mapping collides with aslr before libFuzzer prints its banner.
   fuzz:
-    needs: koinu
     runs-on: ubuntu-24.04
     env:
       ASAN_OPTIONS: detect_leaks=0
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: ./.github/actions/build-koinu
         with:
-          name: koinu
-          path: koinu
+          tag: ${{ env.KOINU_TAG }}
+          deploy-key: ${{ secrets.KOINU_DEPLOY_KEY }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang

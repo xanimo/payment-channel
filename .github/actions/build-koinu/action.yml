@@ -1,0 +1,46 @@
+# Clone and build koinu (libkw.a + secp256k1) at the pinned tag, in the job's
+# own workspace. koinu is private and pc is public, so it is never uploaded as
+# an artifact: a public run's artifacts are world-readable and would leak the
+# whole private tree. Each job that needs libkw runs this instead.
+name: build koinu
+description: clone and build koinu at the pinned tag into ./koinu
+inputs:
+  tag:
+    description: koinu release tag to build
+    required: true
+  deploy-key:
+    description: read-only SSH deploy key, used only if the public clone fails
+    required: false
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        KOINU_TAG: ${{ inputs.tag }}
+        KOINU_DEPLOY_KEY: ${{ inputs.deploy-key }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends autoconf automake libtool
+        if GIT_TERMINAL_PROMPT=0 git clone https://github.com/xanimo/koinu koinu 2>/dev/null; then
+            echo "cloned koinu publicly"
+        elif [ -n "${KOINU_DEPLOY_KEY:-}" ]; then
+            rm -rf koinu
+            mkdir -p ~/.ssh && chmod 700 ~/.ssh
+            printf '%s\n' "$KOINU_DEPLOY_KEY" > ~/.ssh/koinu
+            chmod 600 ~/.ssh/koinu
+            ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+            # exported, not just on the clone, so the tag fetch and the submodule
+            # update below use the key too (the submodule is public secp256k1,
+            # which any authenticated key may read)
+            export GIT_SSH_COMMAND="ssh -i ~/.ssh/koinu -o IdentitiesOnly=yes"
+            git clone git@github.com:xanimo/koinu koinu
+            echo "cloned koinu with the deploy key"
+        else
+            echo "koinu is not reachable and no deploy key is set" >&2
+            exit 1
+        fi
+        git -C koinu fetch --tags --force
+        git -C koinu checkout "$KOINU_TAG"
+        git -C koinu submodule update --init --recursive
+        make -C koinu -j"$(nproc)"
+        ./koinu/kw --version
