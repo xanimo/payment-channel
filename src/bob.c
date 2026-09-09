@@ -57,6 +57,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/types.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 

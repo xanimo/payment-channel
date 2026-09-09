@@ -1,28 +1,26 @@
-# payment-channel: a unidirectional Dogecoin payment channel on libdogecoin
+# payment-channel: a unidirectional Dogecoin payment channel on koinu (libkw)
 #
-# libdogecoin is not yet released with the entry points this needs, so point
-# LIBDOGECOIN at a staged install built from a tree carrying:
-#   dogecoinfoundation/libdogecoin#454 #455 #456 #457 #459
+# The crypto, transactions, PSBT and base58 come from koinu, which is a released
+# static library rather than an unreleased libdogecoin fork. Point KOINU at a
+# koinu checkout built at tag v0.2.0 or later (its `make` produces libkw.a and
+# builds the secp256k1 submodule):
 #
-#   make LIBDOGECOIN=/path/to/staged/install
+#   make KOINU=/path/to/koinu
 #
-# The install must contain include/dogecoin/libdogecoin.h and lib/libdogecoin.a.
+# The checkout must contain libkw.a, depends/secp256k1/.libs/libsecp256k1.a, and
+# the crypto/ net/ wallet/ headers.
 
-LIBDOGECOIN ?= /usr/local
+KOINU ?= ../koinu
 
 CC       ?= cc
 CFLAGS   ?= -std=gnu99 -O2 -g -Wall -Wextra -Wno-unused-parameter
 
-# An implicit declaration here means a libdogecoin entry point that is exported
-# from the archive but missing from the installed header. It links, and then it
-# returns int where the real one returns dogecoin_bool. That is a warning in a
-# wall of output and a bug at runtime, so make it stop the build. Overridden
-# rather than appended so it survives a CFLAGS= on the command line.
+# An implicit declaration means a koinu entry point used without its header, a
+# warning in a wall of output and a bug at runtime, so make it stop the build.
+# Overridden rather than appended so it survives a CFLAGS= on the command line.
 override CFLAGS += -Werror=implicit-function-declaration
-CPPFLAGS += -Iinclude -Isrc -I$(LIBDOGECOIN)/include
-LDFLAGS  += -L$(LIBDOGECOIN)/lib
-LDLIBS   += $(LIBDOGECOIN)/lib/libdogecoin.a -levent -levent_core -levent_extra \
-            -levent_pthreads -lpthread -lm
+CPPFLAGS += -Iinclude -Isrc -I$(KOINU)/crypto -I$(KOINU)/net -I$(KOINU)/wallet
+LDLIBS   += $(KOINU)/libkw.a $(KOINU)/depends/secp256k1/.libs/libsecp256k1.a -lm
 
 CORE_SRC = src/channel.c src/envelope.c src/state.c src/txcheck.c src/wire.c
 CORE_OBJ = $(CORE_SRC:.c=.o)
