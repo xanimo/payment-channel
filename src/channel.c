@@ -299,34 +299,6 @@ out:
     return rc;
 }
 
-/* A transaction with one input and no outputs, serialized by hand. The overlay
-   will not build one: finalize_transaction() needs somewhere to send the money,
-   and the whole point of the opening PSBT is that it does not say yet. */
-static int unsigned_1in_0out(const char *txid_display, uint32_t vout,
-                             char *out, size_t cap)
-{
-    unsigned char prev[32];
-    if (!pc_hex_to_bin(txid_display, prev, 32)) return 0;
-
-    unsigned char tx[64];
-    size_t i = 0;
-    tx[i++] = 0x01; tx[i++] = 0x00; tx[i++] = 0x00; tx[i++] = 0x00;  /* version */
-    tx[i++] = 0x01;                                                  /* 1 input */
-    for (int k = 31; k >= 0; k--) tx[i++] = prev[k];                 /* internal order */
-    tx[i++] = (unsigned char)(vout & 0xFF);
-    tx[i++] = (unsigned char)((vout >> 8) & 0xFF);
-    tx[i++] = (unsigned char)((vout >> 16) & 0xFF);
-    tx[i++] = (unsigned char)((vout >> 24) & 0xFF);
-    tx[i++] = 0x00;                                                  /* empty scriptSig */
-    tx[i++] = 0xFF; tx[i++] = 0xFF; tx[i++] = 0xFF; tx[i++] = 0xFF;  /* sequence */
-    tx[i++] = 0x00;                                                  /* 0 outputs */
-    tx[i++] = 0x00; tx[i++] = 0x00; tx[i++] = 0x00; tx[i++] = 0x00;  /* locktime */
-
-    if (i * 2 + 1 > cap) return 0;
-    pc_bin_to_hex(tx, i, out);
-    return 1;
-}
-
 pc_result pc_channel_open_create(const pc_channel *ch, const char *funding_tx_hex,
                                  char **psbt_hex_out)
 {
@@ -824,11 +796,7 @@ pc_result pc_refund_walk(const unsigned char *buf, size_t fn, size_t sn,
     if (plen != rlen || memcmp(s + k, redeem, rlen) != 0) return PC_ERR_SCRIPT;
 
     if (slen < 2 || rsig[slen - 1] != 0x01) return PC_ERR_KEY;   /* SIGHASH_ALL */
-    /* const off only here: dogecoin_ecc_verify_sig takes a mutable pointer, and
-       the walk above must keep the compiler's guarantee that it never writes. */
-    if (!dogecoin_ecc_verify_sig((unsigned char *)apub, true,
-                                 (unsigned char *)hash,
-                                 (unsigned char *)rsig, slen - 1))
+    if (!kw_ec_verify(apub, hash, rsig, slen - 1))
         return PC_ERR_KEY;
     return PC_OK;
 }
@@ -845,13 +813,14 @@ pc_result pc_refund_create(const pc_channel *ch,
     *raw_tx_hex_out = NULL;
 
     uint8_t decoded[64];
-    if (dogecoin_base58_decode_check(alice_addr, decoded, sizeof(decoded)) != 25)
+    size_t dn = 0;
+    if (!kw_base58check_decode(alice_addr, decoded, sizeof(decoded), &dn) || dn != 21)
         return PC_ERR_ARG;
     /* It must be a P2PKH on this network. A P2SH or wrong-network address
-       decodes to 25 bytes just the same, and paying the refund to one wraps a
-       script hash in a P2PKH output that nothing can spend, losing the whole
-       balance at the timeout with no counterparty to reject it. */
-    if (decoded[0] != pc_chainparams(ch->chain)->b58prefix_pubkey_address)
+       decodes to a 21-byte payload just the same, and paying the refund to one
+       wraps a script hash in a P2PKH output that nothing can spend, losing the
+       whole balance at the timeout with no counterparty to reject it. */
+    if (decoded[0] != pc_chainparams(ch->chain)->p2pkh)
         return PC_ERR_ARG;
     unsigned char h160[20];
     memcpy(h160, decoded + 1, sizeof(h160));
@@ -908,15 +877,14 @@ pc_result pc_refund_create(const pc_channel *ch,
     if (rc != PC_OK) goto out;
     rc = PC_ERR_PSBT;
 
-    dogecoin_key key;
-    dogecoin_privkey_init(&key);
-    if (!dogecoin_privkey_decode_wif((char *)alice_wif, pc_chainparams(ch->chain), &key)) {
-        rc = PC_ERR_KEY; goto out;
-    }
+    uint8_t sk[32];
+    int comp = 0;
+    uint8_t ver = 0;
+    if (!kw_wif_decode(alice_wif, sk, &comp, &ver)) { rc = PC_ERR_KEY; goto out; }
     unsigned char sig[80];
     size_t siglen = sizeof(sig);
-    int signed_ok = dogecoin_ecc_sign(key.privkey, hash, sig, &siglen);
-    dogecoin_privkey_cleanse(&key);
+    int signed_ok = kw_ec_sign(sk, hash, sig, &siglen);
+    { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
     if (!signed_ok || siglen == 0 || siglen > 74) goto out;
     sig[siglen++] = 0x01;                          /* SIGHASH_ALL */
 
@@ -973,9 +941,8 @@ pc_result pc_refund_create(const pc_channel *ch,
         if (rc != PC_OK) goto out;
     }
 
-    /* the caller frees this with dogecoin_free(), which goes through the
-       library's mem mapper, so it has to come from dogecoin_malloc() */
-    char *outhex = (char *)dogecoin_malloc(fn * 2 + 1);
+    /* the caller frees this with free() */
+    char *outhex = (char *)malloc(fn * 2 + 1);
     if (!outhex) { rc = PC_ERR_ARG; goto out; }
     pc_bin_to_hex(buf, fn, outhex);
 
@@ -994,7 +961,7 @@ pc_result pc_refund_create(const pc_channel *ch,
     unsigned char h2[32];
     if (pc_tx_sighash(outhex, redeem, rlen, h2) != PC_OK ||
         memcmp(h2, hash, sizeof(h2)) != 0) {
-        dogecoin_free(outhex);
+        free(outhex);
         rc = PC_ERR_TX;
         goto out;
     }
