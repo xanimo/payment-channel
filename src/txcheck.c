@@ -120,6 +120,11 @@ uint64_t pc_min_fee(size_t txbytes, size_t soft_dust_outputs)
     return relay > block ? relay : block;
 }
 
+uint64_t pc_fee_for_feerate(uint64_t koinu_per_kb, size_t txbytes)
+{
+    return fee_at(koinu_per_kb, txbytes);
+}
+
 /* The 0xff case is unreachable from here, since every caller passes a script of
    at most 520 bytes, but leaving it out made a length at or above 2^32 encode
    as a truncated 0xfe rather than refuse. Silently wrong is the wrong direction

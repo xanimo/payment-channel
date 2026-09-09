@@ -52,8 +52,8 @@ static void usage(void)
     fprintf(stderr,
       "usage: alice --wif WIF|@FILE|- --peer-pubkey HEX --locktime N --address\n"
       "       alice --wif WIF|@FILE|- --locktime N --funding-tx HEX|@FILE\n"
-      "             [--peer-pubkey HEX] [--fee DOGE] [--max DOGE] [--close]\n"
-      "             [--connect [HOST:]PORT] [--testnet|--regtest]\n"
+      "             [--peer-pubkey HEX] [--fee DOGE|--feerate DOGE/kB] [--max DOGE]\n"
+      "             [--close] [--connect [HOST:]PORT] [--testnet|--regtest]\n"
       "       alice --wif WIF|@FILE|- --pubkey\n"
       "\n"
       "  --wif @FILE reads the key from a file (mode 0600), - from stdin; a\n"
@@ -62,13 +62,45 @@ static void usage(void)
       "  --peer-pubkey pins Bob's key; without it Alice trusts what he answers.\n"
       "  --max refuses to pay more than that in total.\n"
       "  --refund builds Alice's unilateral close, valid once --locktime\n"
-      "  passes. It needs no peer, which is the situation it is for.\n");
+      "  passes. It needs no peer, which is the situation it is for.\n"
+      "  --feerate DOGE/kB sizes the fee from a live rate instead of --fee;\n"
+      "  --feerate-cmd runs a command (dogecoin-cli estimatefee) for it.\n");
+}
+
+/* A live feerate in DOGE/kB, from a literal or a command's stdout, returned as
+ * koinu per kB. dogecoin-cli estimatefee prints -1 when it has too little
+ * history to estimate; that, an empty line, a non-zero exit or any unparseable
+ * value all read as unavailable (returns 0), so the caller falls back to the
+ * policy floor rather than block a close it needs to make. */
+static uint64_t read_feerate_kpkb(const char *literal, const char *cmd)
+{
+    char buf[64];
+    const char *s = literal;
+    if (cmd) {
+        FILE *p = popen(cmd, "r");
+        if (!p) return 0;
+        char *line = fgets(buf, sizeof(buf), p);
+        int st = pclose(p);
+        if (!line || st != 0) return 0;
+        s = buf;
+    }
+    /* the first whitespace-delimited token */
+    char tok[48];
+    size_t n = 0;
+    while (*s && isspace((unsigned char)*s)) s++;
+    while (*s && !isspace((unsigned char)*s) && n + 1 < sizeof(tok)) tok[n++] = *s++;
+    tok[n] = '\0';
+    uint64_t kpkb = 0;
+    if (n == 0 || pc_doge_to_koinu(tok, &kpkb) != PC_OK || kpkb == 0) return 0;
+    return kpkb;
 }
 
 int main(int argc, char **argv)
 {
     const char *wif_arg = NULL, *peer = NULL, *ftx_arg = NULL;
     const char *connect_to = NULL, *fee_s = "1.0", *max_s = NULL;
+    const char *feerate_s = NULL, *feerate_cmd = NULL;
+    int fee_set = 0;
     uint32_t locktime = 0;
     pc_chain chain = PC_CHAIN_MAIN;
     int want_pubkey = 0, want_address = 0, want_close = 0, want_refund = 0;
@@ -79,7 +111,9 @@ int main(int argc, char **argv)
         if      (!strcmp(a, "--wif"))         wif_arg = NEXT();
         else if (!strcmp(a, "--peer-pubkey")) peer = NEXT();
         else if (!strcmp(a, "--funding-tx"))  ftx_arg = NEXT();
-        else if (!strcmp(a, "--fee"))         fee_s = NEXT();
+        else if (!strcmp(a, "--fee"))         { fee_s = NEXT(); fee_set = 1; }
+        else if (!strcmp(a, "--feerate"))     feerate_s = NEXT();
+        else if (!strcmp(a, "--feerate-cmd")) feerate_cmd = NEXT();
         else if (!strcmp(a, "--max"))         max_s = NEXT();
         else if (!strcmp(a, "--connect"))     connect_to = NEXT();
         else if (!strcmp(a, "--locktime"))    { const char *v = NEXT(); locktime = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
@@ -93,6 +127,15 @@ int main(int argc, char **argv)
         #undef NEXT
     }
     if (!wif_arg || !fee_s) { usage(); return 2; }
+    if (feerate_s && feerate_cmd) {
+        fprintf(stderr, "alice: give one of --feerate or --feerate-cmd\n");
+        return 2;
+    }
+    if ((feerate_s || feerate_cmd) && fee_set) {
+        fprintf(stderr, "alice: --fee and --feerate are two ways to set the "
+                        "same thing, pass one\n");
+        return 2;
+    }
 
     /* --peer-pubkey is an operator's paste, compared by strcmp against an
        announce Alice reads as hex in either case. Fold the paste's hex letters
@@ -141,6 +184,27 @@ int main(int argc, char **argv)
     uint64_t fee = 0, maximum = UINT64_MAX;
     if (pc_doge_to_koinu(fee_s, &fee) != PC_OK) {
         fprintf(stderr, "alice: --fee is not an amount\n"); goto done;
+    }
+
+    /* A live feerate replaces the flat --fee. Size it on PC_TYPICAL_TX_BYTES,
+       the same basis the floor check below uses, since the real size is not
+       known until Bob countersigns, and never let it fall under the policy
+       floor. This also feeds the refund, where paying the current network rate
+       is exactly what a time-critical unilateral close wants. */
+    if (feerate_s || feerate_cmd) {
+        uint64_t floor = pc_min_fee(PC_TYPICAL_TX_BYTES, 0);
+        uint64_t kpkb = read_feerate_kpkb(feerate_s, feerate_cmd);
+        if (kpkb == 0) {
+            fee = floor;
+            fprintf(stderr, "alice: live feerate unavailable, using the policy "
+                            "floor\n");
+        } else {
+            uint64_t live = pc_fee_for_feerate(kpkb, PC_TYPICAL_TX_BYTES);
+            fee = live > floor ? live : floor;
+        }
+        char d[32];
+        pc_koinu_to_doge(fee, d, sizeof(d));
+        fprintf(stderr, "alice: fee %s DOGE\n", d);
     }
 
     /* The refund needs no peer on the other end, which is the whole point of
