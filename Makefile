@@ -66,8 +66,7 @@ fuzz: $(FUZZERS)
 
 fuzz/fuzz_%: fuzz/fuzz_%.c $(CORE_SRC)
 	clang -std=gnu99 -O1 -g $(FUZZ_SAN) $(CPPFLAGS) -o $@ $^ \
-	      $(LIBDOGECOIN)/lib/libdogecoin.a -levent -levent_core -levent_extra \
-	      -levent_pthreads -lpthread -lm
+	      $(KOINU)/libkw.a $(KOINU)/depends/secp256k1/.libs/libsecp256k1.a -lm
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<

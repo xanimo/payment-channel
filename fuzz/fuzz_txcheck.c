@@ -39,7 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "channel.h"
+#include "../test/kwshim.h"
 
 static int ready = 0;
 static pc_channel ch;
@@ -55,7 +55,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
 static void setup(void)
 {
-    dogecoin_ecc_start();
+    kw_ec_start();
     if (pc_channel_init(&ch, ALICE_PUB, BOB_PUB, 300000, PC_CHAIN_MAIN) != PC_OK)
         abort();
     /* a funding outpoint, so the reader gets past its state guard and reaches
