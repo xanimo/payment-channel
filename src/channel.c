@@ -28,6 +28,15 @@
 #include "hex.h"
 #include "refund.h"
 
+/* koinu crypto, the tx/psbt/ec/base58 primitives this file signs and assembles
+   with. Its crypto/hex.h is deliberately not included: pc uses its own hex.h
+   (pc_hex_to_bin/pc_bin_to_hex), whose filename would otherwise clash. */
+#include "tx.h"
+#include "psbt.h"
+#include "ec.h"
+#include "address.h"
+#include "base58.h"
+
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -65,14 +74,14 @@ const char *pc_strerror(pc_result r)
 
 /* ── helpers ─────────────────────────────────────────────────── */
 
-const dogecoin_chainparams *pc_chainparams(pc_chain chain)
+const kw_chainparams *pc_chainparams(pc_chain chain)
 {
     switch (chain) {
-    case PC_CHAIN_TEST:    return &dogecoin_chainparams_test;
-    case PC_CHAIN_REGTEST: return &dogecoin_chainparams_regtest;
+    case PC_CHAIN_TEST:    return &KW_DOGE_TESTNET;
+    case PC_CHAIN_REGTEST: return &KW_DOGE_REGTEST;
     case PC_CHAIN_MAIN:    break;
     }
-    return &dogecoin_chainparams_main;
+    return &KW_DOGE_MAINNET;
 }
 
 static int hexcat(char *dst, size_t cap, size_t *len, const char *fmt, ...)
