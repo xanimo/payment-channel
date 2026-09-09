@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# A payment reaches a second place before Bob acks it, so a disk that dies
+# between the payment and the sweep is not a lost payment. --replicate-cmd is run
+# as CMD <state-file> after each save and before the ack; a non-zero exit fails
+# the ack to a retry rather than answering for a payment only one disk holds.
+set -eu
+
+cd "$(dirname "$0")/.."
+PORT=${PORT:-19895}
+LOCKTIME=${LOCKTIME:-300000}
+for b in alice bob test/mkfunding; do
+    [ -x "$b" ] || { echo "build first: make check" >&2; exit 1; }
+done
+
+WORK=$(mktemp -d)
+BOB_PID=
+trap 'rm -rf "$WORK"; [ -n "$BOB_PID" ] && kill "$BOB_PID" 2>/dev/null || true' EXIT
+mkdir -p "$WORK/state" "$WORK/mirror"
+
+read -r ALICE_WIF ALICE_ADDR < <(./test/mkfunding --keys)
+read -r BOB_WIF   _          < <(./test/mkfunding --keys)
+BOB_PUB=$(./bob --wif "$BOB_WIF" --pubkey)
+CHANNEL=$(./alice --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$LOCKTIME" --address)
+read -r FUNDING_HEX _ _ < <(./test/mkfunding "$CHANNEL" "$ALICE_ADDR" 100.0)
+printf '%s' "$FUNDING_HEX" > "$WORK/funding.hex"
+
+fail=0
+say() { printf "  %-52s %s\n" "$1" "$2"; }
+
+run_alice() {
+    ./alice --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$LOCKTIME" \
+            --funding-tx "@$WORK/funding.hex" --connect "127.0.0.1:$1" \
+            --max 5.0 > "$WORK/alice.log" 2>&1 || true
+}
+
+echo "a payment is durable in a second place before the ack:"
+
+# a replica that succeeds: the state file is mirrored and the payment is acked
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once --height 1000 \
+      --min-slack 100 --state "$WORK/state" --price 5.0 \
+      --replicate-cmd "cp -t $WORK/mirror" > "$WORK/bob.log" 2>&1 &
+BOB_PID=$!
+for _ in $(seq 1 100); do grep -q listening "$WORK/bob.log" 2>/dev/null && break; sleep 0.1; done
+run_alice "$PORT"
+wait "$BOB_PID" 2>/dev/null || true; BOB_PID=
+
+grep -q "koinu held" "$WORK/bob.log" \
+    && say "the payment is acked" "yes" \
+    || { say "the payment is acked" "no"; fail=1; }
+ls "$WORK/mirror"/*.channel >/dev/null 2>&1 \
+    && say "and the state reached the replica" "yes" \
+    || { say "and the state reached the replica" "no"; fail=1; }
+# what the replica holds matches the live state, so a failover sees the payment
+if [ -f "$WORK/state"/*.channel ] && diff -q "$WORK"/state/*.channel "$WORK"/mirror/*.channel >/dev/null; then
+    say "the replica matches the live ratchet" "yes"
+else
+    say "the replica matches the live ratchet" "no"; fail=1
+fi
+
+# a replica that fails: the payment is refused, not acked against one disk
+rm -rf "$WORK/state2"; mkdir -p "$WORK/state2"
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT+1))" --once --height 1000 \
+      --min-slack 100 --state "$WORK/state2" --price 5.0 \
+      --replicate-cmd "false" > "$WORK/bob2.log" 2>&1 &
+BOB_PID=$!
+for _ in $(seq 1 100); do grep -q listening "$WORK/bob2.log" 2>/dev/null && break; sleep 0.1; done
+run_alice "$((PORT+1))"
+wait "$BOB_PID" 2>/dev/null || true; BOB_PID=
+
+grep -q "cannot replicate" "$WORK/alice.log" \
+    && say "a failed replica refuses the payment" "yes" \
+    || { say "a failed replica refuses the payment" "$(tail -1 "$WORK/alice.log")"; fail=1; }
+grep -q "koinu held" "$WORK/bob2.log" \
+    && { say "and nothing is acked against one disk" "acked anyway"; fail=1; } \
+    || say "and nothing is acked against one disk" "yes"
+
+[ "$fail" = 0 ] || { echo "replicate FAILED" >&2; exit 1; }
+echo "replicate ok"

@@ -133,7 +133,10 @@ static void usage(void)
       "  --sign-cmd runs a signer that holds the key so this process never does;\n"
       "  it is fed the payment PSBT on stdin and returns the signed PSBT. The\n"
       "  signed transaction is still re-verified here, so the signer is used,\n"
-      "  not trusted. `bob --sign` is a signer that speaks that contract.\n");
+      "  not trusted. `bob --sign` is a signer that speaks that contract.\n"
+      "  --replicate-cmd is run (CMD <state-file>) after each payment and close\n"
+      "  is saved and before it is acked, so a payment reaches a second place\n"
+      "  before Bob answers for it; a non-zero exit fails the ack to a retry.\n");
 }
 
 /* Everything one connection knows. */
@@ -428,6 +431,23 @@ static char *run_signer(const char *cmd, const char *psbt_hex)
                  out[n - 1] == ' '  || out[n - 1] == '\t')) out[--n] = '\0';
     if (n == 0) { free(out); return NULL; }
     return out;
+}
+
+/* Copy the just-written state somewhere a single disk failure will not take
+   with it. Run as CMD <state-file-path> with no shell, the path being one this
+   process built. Its exit status gates the ack: a payment not yet on the replica
+   is one Bob must not answer for, so a non-zero exit fails the save it follows.
+   Must be fast, since it runs inside the payer's read budget; a slow or remote
+   replica risks her timeout, which fails closed to a retry rather than a loss. */
+static int replicate(const char *cmd, const char *path)
+{
+    const char *extra[1] = { path };
+    char out[256];
+    int status = -1;
+    if (!run_backend(cmd, extra, 1, NULL, PC_CONFIRM_SECONDS,
+                     out, sizeof(out), &status))
+        return 0;
+    return status == 0;
 }
 
 /* 1 confirmed, 0 spent or absent, 2 present but not yet acceptable, -1 could
@@ -857,7 +877,8 @@ static int send_invoice(int fd, session *s, const char *bob_addr,
 
 /* [6][G] A payment counts only once Bob has read what he signed. */
 static int handle_payment(int fd, session *s, const pc_envelope *in,
-                          const char *wif, const char *sign_cmd, int more_to_come)
+                          const char *wif, const char *sign_cmd,
+                          const char *replicate_cmd, int more_to_come)
 {
     if (strcmp(in->ref, s->ch.funding_txid) != 0)
         return send_reject(fd, "wrong funding"), 0;
@@ -901,9 +922,13 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
 
     /* Durable before the ack, never after. The ack is what tells a merchant to
        ship, so a crash between the two has to cost Alice a retry rather than
-       cost Bob the payment he already answered for. */
+       cost Bob the payment he already answered for. With --replicate-cmd the
+       same rule extends past one disk: the payment must reach the replica before
+       the ack, so a disk that dies between here and the sweep is not a loss. */
     if (pc_state_save(&s->st, &s->ch, s->best) != PC_OK)
         return send_reject(fd, "cannot record payment"), 0;
+    if (replicate_cmd && !replicate(replicate_cmd, s->st.path))
+        return send_reject(fd, "cannot replicate payment"), 0;
     /* "held" is not "confirmed": Bob cannot see the chain, so this is money only
        once the funding output is buried. Do not ship against this line alone. */
     printf("paid     %" PRIu64 " koinu held (%zu byte tx), "
@@ -932,7 +957,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                              const char *height_file, unsigned height_max_age,
                              const char *confirm_cmd, unsigned min_depth,
                              const char *broadcast_cmd, unsigned window,
-                             const char *sign_cmd,
+                             const char *sign_cmd, const char *replicate_cmd,
                              const char **prices, int nprices)
 {
     session s;
@@ -974,7 +999,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
             int more = invoice_due(&s, prices, nprices, NULL);
             if (!more && s.order < nprices)
                 fprintf(stderr, "order %d would exceed the channel\n", s.order + 1);
-            alive = handle_payment(fd, &s, &in, wif, sign_cmd, more);
+            alive = handle_payment(fd, &s, &in, wif, sign_cmd, replicate_cmd, more);
             /* Not fatal when nothing more is due: Alice still has a close
                to send, and Bob has the transaction she wants back. */
             if (alive && more)
@@ -990,6 +1015,10 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                a transaction this one is about to broadcast. */
             if (pc_state_retire(&s.st, &s.ch, s.best) != PC_OK) {
                 alive = send_reject(fd, "cannot close channel");
+                break;
+            }
+            if (replicate_cmd && !replicate(replicate_cmd, s.st.path)) {
+                alive = send_reject(fd, "cannot replicate the close");
                 break;
             }
             memset(&out, 0, sizeof(out));
@@ -1046,6 +1075,7 @@ int main(int argc, char **argv)
     int sweep = 0, sign = 0;
     unsigned margin = 50, warn_margin = 0, watch = 0;
     const char *alert_cmd = NULL, *sign_cmd = NULL, *bob_pubkey_arg = NULL;
+    const char *replicate_cmd = NULL;
     unsigned height_max_age = 600, min_depth = 6, window = 0;
     int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
@@ -1064,6 +1094,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--sign"))      { sign = 1; }
         else if (!strcmp(a, "--sign-cmd"))  { sign_cmd = NEXT(); }
         else if (!strcmp(a, "--bob-pubkey")) { bob_pubkey_arg = NEXT(); }
+        else if (!strcmp(a, "--replicate-cmd")) { replicate_cmd = NEXT(); }
         else if (!strcmp(a, "--sweep"))     { sweep = 1; }
         else if (!strcmp(a, "--sweep-margin")) { const char *v = NEXT(); margin = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--warn-margin")) { const char *v = NEXT(); warn_margin = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
@@ -1309,7 +1340,8 @@ int main(int argc, char **argv)
             serve_connection(fd, wif, chain, bob_pub, bob_addr,
                              height, slack, state_dir, height_file,
                              height_max_age, confirm_cmd, min_depth,
-                             broadcast_cmd, window, sign_cmd, prices, nprices);
+                             broadcast_cmd, window, sign_cmd, replicate_cmd,
+                             prices, nprices);
             close(fd);
             _exit(0);
         }

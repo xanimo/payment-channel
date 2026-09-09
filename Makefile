@@ -84,6 +84,7 @@ check: $(TESTS) $(BINS)
 	./test/sweep.sh
 	./test/keyguard.sh
 	./test/signer.sh
+	./test/replicate.sh
 
 clean:
 	rm -f $(BINS) $(TESTS) src/*.o test/*.o

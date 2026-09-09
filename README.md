@@ -284,6 +284,17 @@ that can reach it the signer is an oracle for the key.
           --bob-pubkey 02ab... --listen 127.0.0.1:9876 --state channels \
           --height-file height.txt --price 5.0
 
+a payment is one fsync to one local file, so a disk lost between the payment and
+the sweep is the payment lost. `--replicate-cmd CMD` closes that: after each
+payment and close is saved and before it is acked, `CMD <state-file>` is run, so
+the payment reaches a second place before Bob answers for it, and a non-zero exit
+fails the ack to a retry rather than shipping against one disk. it runs inside
+the payer's read budget, so the replica has to be quick (a second local disk, a
+fast link); a slow one times out, which fails closed. the sweep's own writes are
+not yet replicated, so run it against the same replicated state.
+
+    --replicate-cmd "cp -t /mnt/mirror"   # or rsync, an object-store put, ...
+
 do not put the listen port on the open internet. the wire protocol is plaintext
 and unauthenticated, so anyone on the path reads every amount, address and txid,
 and an active man in the middle can substitute the announced pubkey during the
