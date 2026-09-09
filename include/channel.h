@@ -62,11 +62,15 @@ const kw_chainparams *pc_chainparams(pc_chain chain);
 #ifndef PUBKEYHEXLEN
 #define PUBKEYHEXLEN             67
 #endif
+/* A dogecoin base58check address is at most 34 chars on mainnet but 35 on
+   testnet/regtest (the 0x6f/0xc4 prefixes carry into an extra character), so 40
+   with the NUL leaves margin; 35 was too tight and kw_address_p2sh, which
+   returns 0 when its output does not fit, failed only on the regtest path. */
 #ifndef P2PKHLEN
-#define P2PKHLEN                 35
+#define P2PKHLEN                 40
 #endif
 #ifndef P2SHLEN
-#define P2SHLEN                  35
+#define P2SHLEN                  40
 #endif
 #ifndef PRIVKEYWIFLEN
 #define PRIVKEYWIFLEN            53
