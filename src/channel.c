@@ -573,10 +573,10 @@ out:
    what lets a network Bob that holds no key finish a transaction an external
    signer produced (pc_payment_assemble), the same code the in-process
    countersign runs. The caller owns (psbt). */
-static pc_result assemble_two_sig(const pc_channel *ch, dogecoin_psbt *psbt,
+static pc_result assemble_two_sig(const pc_channel *ch, kw_psbt *p,
                                   char **raw_tx_hex_out)
 {
-    unsigned char *rbytes = NULL;
+    unsigned char *rbytes = NULL, *raw = NULL;
     pc_result rc = PC_ERR_PSBT;
 
     /* Two signatures, Alice's and Bob's. No built-in finalizer can build the
@@ -585,29 +585,19 @@ static pc_result assemble_two_sig(const pc_channel *ch, dogecoin_psbt *psbt,
            OP_0 <sig A> <sig B> OP_0 <redeem script>
        The leading OP_0 is CHECKMULTISIG's off-by-one pop. The trailing OP_0 is
        the branch selector: false takes OP_ELSE, the cooperative 2-of-2. */
-    if (dogecoin_psbt_input_num_partial_sigs(psbt, 0) != 2) goto out;
+    if (p->in[0].nsigs != 2) goto out;
 
     /* CHECKMULTISIG requires the signatures in the order the pubkeys appear in
-       the redeem script, which is Alice then Bob. */
-    unsigned char sigs[2][128];
-    size_t siglen[2] = { 0, 0 };
-    /* 33, not sizeof(pk[i]) as a larger buffer would allow. pkhex holds
-       PUBKEYHEXLEN, which is exactly 33 bytes hexed plus a NUL and no more, so
-       a cap above 33 here advertises room the destination does not have. What
-       keeps that from being an overflow today is that the PSBT parser refuses a
-       partial-sig key that is not 34 bytes, which is a fact about libdogecoin
-       rather than about this function. */
-    unsigned char pk[2][33];
-    size_t pklen[2] = { 0, 0 };
-    for (size_t i = 0; i < 2; i++) {
-        if (!dogecoin_psbt_input_get_partial_sig(psbt, 0, i,
-                                                 pk[i], sizeof(pk[i]), &pklen[i],
-                                                 sigs[i], sizeof(sigs[i]), &siglen[i]))
-            goto out;
-        if (pklen[i] != sizeof(pk[i])) goto out;
-    }
+       the redeem script, which is Alice then Bob. Each kw_psbt_sig carries the
+       33-byte pubkey and the DER signature with its hashtype byte. */
+    const uint8_t *sigs[2];
+    size_t siglen[2];
     char pkhex[2][PUBKEYHEXLEN];
-    for (size_t i = 0; i < 2; i++) pc_bin_to_hex(pk[i], pklen[i], pkhex[i]);
+    for (size_t i = 0; i < 2; i++) {
+        sigs[i]   = p->in[0].sigs[i].sig;
+        siglen[i] = p->in[0].sigs[i].siglen;
+        pc_bin_to_hex(p->in[0].sigs[i].pubkey, 33, pkhex[i]);
+    }
     int alice_idx = (strcmp(pkhex[0], ch->alice_pubkey_hex) == 0) ? 0 : 1;
     int bob_idx   = alice_idx ^ 1;
     if (strcmp(pkhex[alice_idx], ch->alice_pubkey_hex) != 0 ||
@@ -645,12 +635,50 @@ static pc_result assemble_two_sig(const pc_channel *ch, dogecoin_psbt *psbt,
     }
     memcpy(ss + n, rbytes, rlen); n += rlen;
 
-    if (!dogecoin_psbt_input_set_final_scriptsig(psbt, 0, ss, n)) goto out;
+    if (!kw_psbt_finalize(p, 0, ss, n)) goto out;
 
-    *raw_tx_hex_out = dogecoin_psbt_extract_hex(psbt);
-    rc = *raw_tx_hex_out ? PC_OK : PC_ERR_PSBT;
+    kw_tx tx;
+    kw_tx_init(&tx);
+    if (!kw_psbt_extract(p, &tx)) goto out;
+    raw = (unsigned char *)malloc(PC_MAX_PSBT_HEX / 2);
+    if (!raw) goto out;
+    size_t tn = kw_tx_serialize(&tx, raw, PC_MAX_PSBT_HEX / 2);
+    if (tn == 0) goto out;
+    char *hex = (char *)malloc(tn * 2 + 1);
+    if (!hex) goto out;
+    pc_bin_to_hex(raw, tn, hex);
+    *raw_tx_hex_out = hex;
+    rc = PC_OK;
 out:
-    free(rbytes);
+    free(rbytes); free(raw);
+    return rc;
+}
+
+/* Parse a psbt hex and add a signature for input 0 with (wif), over the input's
+   redeem script. The key is decoded and wiped here so no caller holds it. On
+   return (p) is always initialised and the caller frees it with kw_psbt_free;
+   PC_OK means it now carries one more signature. */
+static pc_result parse_and_sign(const char *psbt_hex, const char *wif, kw_psbt *p)
+{
+    kw_psbt_init(p);
+    unsigned char *pbytes = NULL;
+    size_t pblen = 0;
+    if (!hex_to_bytes(psbt_hex, &pbytes, &pblen)) return PC_ERR_PSBT;
+
+    pc_result rc = PC_ERR_PSBT;
+    if (!kw_psbt_parse(pbytes, pblen, p)) goto out;
+    const kw_tx *utx = kw_psbt_unsigned_tx(p);
+    if (!utx || utx->nin != 1) goto out;
+
+    uint8_t sk[32];
+    int comp = 0;
+    uint8_t ver = 0;
+    if (!kw_wif_decode(wif, sk, &comp, &ver)) { rc = PC_ERR_KEY; goto out; }
+    int ok = kw_psbt_sign(p, 0, sk, KW_SIGHASH_ALL) == 1;
+    { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
+    rc = ok ? PC_OK : PC_ERR_PSBT;
+out:
+    free(pbytes);
     return rc;
 }
 
@@ -660,24 +688,10 @@ pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
     if (!ch || !psbt_hex || !bob_wif || !raw_tx_hex_out) return PC_ERR_ARG;
     *raw_tx_hex_out = NULL;
 
-    dogecoin_psbt *psbt = NULL;
-    pc_result rc = PC_ERR_PSBT;
-    if (!dogecoin_psbt_from_hex(psbt_hex, &psbt) || !psbt) return PC_ERR_PSBT;
-    if (dogecoin_psbt_num_inputs(psbt) != 1) goto out;
-
-    dogecoin_key key;
-    dogecoin_privkey_init(&key);
-    if (!dogecoin_privkey_decode_wif((char *)bob_wif, pc_chainparams(ch->chain), &key)) {
-        rc = PC_ERR_KEY; goto out;
-    }
-    if (!dogecoin_psbt_sign_input(psbt, 0, &key)) {
-        dogecoin_privkey_cleanse(&key); goto out;
-    }
-    dogecoin_privkey_cleanse(&key);
-
-    rc = assemble_two_sig(ch, psbt, raw_tx_hex_out);
-out:
-    if (psbt) dogecoin_psbt_free(psbt);
+    kw_psbt p;
+    pc_result rc = parse_and_sign(psbt_hex, bob_wif, &p);
+    if (rc == PC_OK) rc = assemble_two_sig(ch, &p, raw_tx_hex_out);
+    kw_psbt_free(&p);
     return rc;
 }
 
@@ -691,13 +705,18 @@ pc_result pc_payment_assemble(const pc_channel *ch, const char *signed_psbt_hex,
     if (!ch || !signed_psbt_hex || !raw_tx_hex_out) return PC_ERR_ARG;
     *raw_tx_hex_out = NULL;
 
-    dogecoin_psbt *psbt = NULL;
+    unsigned char *pbytes = NULL;
+    size_t pblen = 0;
+    if (!hex_to_bytes(signed_psbt_hex, &pbytes, &pblen)) return PC_ERR_PSBT;
+    kw_psbt p;
+    kw_psbt_init(&p);
     pc_result rc = PC_ERR_PSBT;
-    if (!dogecoin_psbt_from_hex(signed_psbt_hex, &psbt) || !psbt) return PC_ERR_PSBT;
-    if (dogecoin_psbt_num_inputs(psbt) != 1) goto out;
-    rc = assemble_two_sig(ch, psbt, raw_tx_hex_out);
-out:
-    if (psbt) dogecoin_psbt_free(psbt);
+    if (kw_psbt_parse(pbytes, pblen, &p)) {
+        const kw_tx *utx = kw_psbt_unsigned_tx(&p);
+        if (utx && utx->nin == 1) rc = assemble_two_sig(ch, &p, raw_tx_hex_out);
+    }
+    kw_psbt_free(&p);
+    free(pbytes);
     return rc;
 }
 
@@ -712,26 +731,19 @@ pc_result pc_payment_sign(const char *psbt_hex, const char *bob_wif,
 {
     if (!psbt_hex || !bob_wif || !signed_psbt_hex_out) return PC_ERR_ARG;
     *signed_psbt_hex_out = NULL;
+    (void)chain;   /* the wif carries its own version; kw_wif_decode needs no chain */
 
-    dogecoin_psbt *psbt = NULL;
-    pc_result rc = PC_ERR_PSBT;
-    if (!dogecoin_psbt_from_hex(psbt_hex, &psbt) || !psbt) return PC_ERR_PSBT;
-    if (dogecoin_psbt_num_inputs(psbt) != 1) goto out;
-
-    dogecoin_key key;
-    dogecoin_privkey_init(&key);
-    if (!dogecoin_privkey_decode_wif((char *)bob_wif, pc_chainparams(chain), &key)) {
-        rc = PC_ERR_KEY; goto out;
+    kw_psbt p;
+    pc_result rc = parse_and_sign(psbt_hex, bob_wif, &p);
+    if (rc == PC_OK) {
+        unsigned char *raw = (unsigned char *)malloc(PC_MAX_PSBT_HEX / 2);
+        size_t n = raw ? kw_psbt_serialize(&p, raw, PC_MAX_PSBT_HEX / 2) : 0;
+        char *hex = n ? (char *)malloc(n * 2 + 1) : NULL;
+        if (hex) { pc_bin_to_hex(raw, n, hex); *signed_psbt_hex_out = hex; }
+        else rc = PC_ERR_PSBT;
+        free(raw);
     }
-    if (!dogecoin_psbt_sign_input(psbt, 0, &key)) {
-        dogecoin_privkey_cleanse(&key); goto out;
-    }
-    dogecoin_privkey_cleanse(&key);
-
-    *signed_psbt_hex_out = dogecoin_psbt_to_hex(psbt);
-    rc = *signed_psbt_hex_out ? PC_OK : PC_ERR_PSBT;
-out:
-    if (psbt) dogecoin_psbt_free(psbt);
+    kw_psbt_free(&p);
     return rc;
 }
 
