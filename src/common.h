@@ -63,6 +63,22 @@ static inline int pc_identity(const char *wif, pc_chain which,
     return 1;
 }
 
+/* Derive the p2pkh address a compressed pubkey controls, no private key. This is
+   how a Bob that delegates signing knows its own identity: it is given the public
+   key (safe to hold) while the key stays in the signer. */
+static inline int pc_identity_pub(const char *pubkey_hex, pc_chain which,
+                                  char addr[P2PKHLEN])
+{
+    if (strlen(pubkey_hex) != 66) return 0;
+    dogecoin_pubkey pub;
+    dogecoin_pubkey_init(&pub);
+    pub.compressed = true;
+    size_t n = 0;
+    utils_hex_to_bin(pubkey_hex, pub.pubkey, 66, &n);
+    if (n != 33 || !dogecoin_pubkey_is_valid(&pub)) return 0;
+    return dogecoin_pubkey_getaddr_p2pkh(&pub, pc_chainparams(which), addr) ? 1 : 0;
+}
+
 /* "txid:vout" */
 static inline int pc_split_outpoint(const char *s, char txid[65], int *vout)
 {

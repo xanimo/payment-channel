@@ -552,32 +552,20 @@ out:
     return rc;
 }
 
-pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
-                                 const char *bob_wif, char **raw_tx_hex_out)
+/* Turn a PSBT already carrying both partial sigs into the broadcastable
+   transaction. This half needs no key: it reads the two signatures, assembles
+   the cooperative-close scriptSig by hand, and extracts. Splitting it out is
+   what lets a network Bob that holds no key finish a transaction an external
+   signer produced (pc_payment_assemble), the same code the in-process
+   countersign runs. The caller owns (psbt). */
+static pc_result assemble_two_sig(const pc_channel *ch, dogecoin_psbt *psbt,
+                                  char **raw_tx_hex_out)
 {
-    if (!ch || !psbt_hex || !bob_wif || !raw_tx_hex_out) return PC_ERR_ARG;
-    *raw_tx_hex_out = NULL;
-
-    dogecoin_psbt *psbt = NULL;
     unsigned char *rbytes = NULL;
     pc_result rc = PC_ERR_PSBT;
 
-    if (!dogecoin_psbt_from_hex(psbt_hex, &psbt) || !psbt) return PC_ERR_PSBT;
-    if (dogecoin_psbt_num_inputs(psbt) != 1) goto out;
-
-    dogecoin_key key;
-    dogecoin_privkey_init(&key);
-    const dogecoin_chainparams *chain = pc_chainparams(ch->chain);
-    if (!dogecoin_privkey_decode_wif((char *)bob_wif, chain, &key)) {
-        rc = PC_ERR_KEY; goto out;
-    }
-    if (!dogecoin_psbt_sign_input(psbt, 0, &key)) {
-        dogecoin_privkey_cleanse(&key); goto out;
-    }
-    dogecoin_privkey_cleanse(&key);
-
-    /* Two signatures now, Alice's and Bob's. No built-in finalizer can build
-       the scriptSig for this redeem script because OP_IF does not classify, so
+    /* Two signatures, Alice's and Bob's. No built-in finalizer can build the
+       scriptSig for this redeem script because OP_IF does not classify, so
        assemble it here:
            OP_0 <sig A> <sig B> OP_0 <redeem script>
        The leading OP_0 is CHECKMULTISIG's off-by-one pop. The trailing OP_0 is
@@ -648,6 +636,86 @@ pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
     rc = *raw_tx_hex_out ? PC_OK : PC_ERR_PSBT;
 out:
     free(rbytes);
+    return rc;
+}
+
+pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
+                                 const char *bob_wif, char **raw_tx_hex_out)
+{
+    if (!ch || !psbt_hex || !bob_wif || !raw_tx_hex_out) return PC_ERR_ARG;
+    *raw_tx_hex_out = NULL;
+
+    dogecoin_psbt *psbt = NULL;
+    pc_result rc = PC_ERR_PSBT;
+    if (!dogecoin_psbt_from_hex(psbt_hex, &psbt) || !psbt) return PC_ERR_PSBT;
+    if (dogecoin_psbt_num_inputs(psbt) != 1) goto out;
+
+    dogecoin_key key;
+    dogecoin_privkey_init(&key);
+    if (!dogecoin_privkey_decode_wif((char *)bob_wif, pc_chainparams(ch->chain), &key)) {
+        rc = PC_ERR_KEY; goto out;
+    }
+    if (!dogecoin_psbt_sign_input(psbt, 0, &key)) {
+        dogecoin_privkey_cleanse(&key); goto out;
+    }
+    dogecoin_privkey_cleanse(&key);
+
+    rc = assemble_two_sig(ch, psbt, raw_tx_hex_out);
+out:
+    if (psbt) dogecoin_psbt_free(psbt);
+    return rc;
+}
+
+/* Finish a payment from a PSBT an external signer already added Bob's signature
+   to. No key: the network Bob runs this on the signer's output so it never holds
+   one. The result is still checked by pc_tx_verify_payment, so a signer that
+   returns the wrong thing cannot make Bob ship it. */
+pc_result pc_payment_assemble(const pc_channel *ch, const char *signed_psbt_hex,
+                              char **raw_tx_hex_out)
+{
+    if (!ch || !signed_psbt_hex || !raw_tx_hex_out) return PC_ERR_ARG;
+    *raw_tx_hex_out = NULL;
+
+    dogecoin_psbt *psbt = NULL;
+    pc_result rc = PC_ERR_PSBT;
+    if (!dogecoin_psbt_from_hex(signed_psbt_hex, &psbt) || !psbt) return PC_ERR_PSBT;
+    if (dogecoin_psbt_num_inputs(psbt) != 1) goto out;
+    rc = assemble_two_sig(ch, psbt, raw_tx_hex_out);
+out:
+    if (psbt) dogecoin_psbt_free(psbt);
+    return rc;
+}
+
+/* The signer's half: add Bob's signature to input 0 of a PSBT and hand it back,
+   still a PSBT. This is the only step that needs the key, so it is the only step
+   that runs where the key lives, which is a process the network never reaches.
+   It signs whatever input 0 it is given: the key is a signing oracle, so the
+   signer must be reachable only by its own Bob over a trusted link, the same
+   rule an HSM lives by. The network Bob re-verifies the finished transaction. */
+pc_result pc_payment_sign(const char *psbt_hex, const char *bob_wif,
+                          pc_chain chain, char **signed_psbt_hex_out)
+{
+    if (!psbt_hex || !bob_wif || !signed_psbt_hex_out) return PC_ERR_ARG;
+    *signed_psbt_hex_out = NULL;
+
+    dogecoin_psbt *psbt = NULL;
+    pc_result rc = PC_ERR_PSBT;
+    if (!dogecoin_psbt_from_hex(psbt_hex, &psbt) || !psbt) return PC_ERR_PSBT;
+    if (dogecoin_psbt_num_inputs(psbt) != 1) goto out;
+
+    dogecoin_key key;
+    dogecoin_privkey_init(&key);
+    if (!dogecoin_privkey_decode_wif((char *)bob_wif, pc_chainparams(chain), &key)) {
+        rc = PC_ERR_KEY; goto out;
+    }
+    if (!dogecoin_psbt_sign_input(psbt, 0, &key)) {
+        dogecoin_privkey_cleanse(&key); goto out;
+    }
+    dogecoin_privkey_cleanse(&key);
+
+    *signed_psbt_hex_out = dogecoin_psbt_to_hex(psbt);
+    rc = *signed_psbt_hex_out ? PC_OK : PC_ERR_PSBT;
+out:
     if (psbt) dogecoin_psbt_free(psbt);
     return rc;
 }

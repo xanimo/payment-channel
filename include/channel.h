@@ -172,6 +172,19 @@ pc_result pc_payment_countersign(const pc_channel *ch,
                                  const char *bob_wif,
                                  char **raw_tx_hex_out);
 
+/* Signing isolation. pc_payment_sign is the only step that needs the key and is
+ * run where the key lives; pc_payment_assemble finishes the signer's output with
+ * no key at all, so a network Bob holds none. The finished transaction is still
+ * checked by pc_tx_verify_payment, so a wrong or hostile signer cannot make Bob
+ * ship. Both return hex freed with dogecoin_free(). */
+pc_result pc_payment_sign(const char *psbt_hex,
+                          const char *bob_wif,
+                          pc_chain chain,
+                          char **signed_psbt_hex_out);
+pc_result pc_payment_assemble(const pc_channel *ch,
+                              const char *signed_psbt_hex,
+                              char **raw_tx_hex_out);
+
 /* ── Opening: Alice proposes a funding, Bob checks it ────────── */
 
 /* Read a channel redeem script back into its parts, so Bob can learn who he is
