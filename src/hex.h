@@ -75,4 +75,17 @@ static inline int pc_hex_to_bin(const char *hex, unsigned char *out, size_t nbyt
     return 1;
 }
 
+/* (nbytes) to lowercase hex plus a NUL. (out) holds at least nbytes*2 + 1. pc
+   carries its own so no file needs koinu's crypto/hex.h, whose name collides
+   with this one, replacing libdogecoin's utils_bin_to_hex. */
+static inline void pc_bin_to_hex(const unsigned char *in, size_t nbytes, char *out)
+{
+    static const char h[] = "0123456789abcdef";
+    for (size_t i = 0; i < nbytes; i++) {
+        out[i * 2]     = h[in[i] >> 4];
+        out[i * 2 + 1] = h[in[i] & 0x0f];
+    }
+    out[nbytes * 2] = '\0';
+}
+
 #endif /* PAYMENT_CHANNEL_HEX_H */
