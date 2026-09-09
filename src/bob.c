@@ -951,7 +951,7 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
 
     r = pc_tx_verify_payment(&s->ch, raw, in->to_bob_koinu);
     if (r != PC_OK) {
-        dogecoin_free(raw);
+        free(raw);
         /* say which. four of these are nothing to do with the amount, and a
            customer told "pays less than it says" over a short fee has no route
            from that to the problem. */
@@ -959,9 +959,9 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
     }
 
     r = pc_payment_accept(&s->ch, in->psbt_hex, in->to_bob_koinu);
-    if (r != PC_OK) { dogecoin_free(raw); return send_reject(fd, "does not advance the channel"), 0; }
+    if (r != PC_OK) { free(raw); return send_reject(fd, "does not advance the channel"), 0; }
 
-    if (s->best) dogecoin_free(s->best);
+    if (s->best) free(s->best);
     s->best = raw;
     s->best_amount = in->to_bob_koinu;
 
@@ -1099,7 +1099,7 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
         printf(sent ? "\nsent, keep this in case it needs sending again:\n%s\n\n"
                     : "\nbroadcast this to take the money:\n%s\n\n", s.best);
         fflush(stdout);
-        dogecoin_free(s.best);
+        free(s.best);
     }
     pc_state_close(&s.st);
 }
@@ -1189,7 +1189,7 @@ int main(int argc, char **argv)
         }
         /* rebuilding a channel validates both pubkeys, which needs the curve
            context, so this cannot run before it is up */
-        dogecoin_ecc_start();
+        kw_ec_start();
         int srv = 0;
         if (watch) {
             /* Supervised mode: one pass every --watch seconds until a signal,
@@ -1216,7 +1216,7 @@ int main(int argc, char **argv)
                            window, warn_margin, alert_cmd, replicate_cmd,
                            metrics_file);
         }
-        dogecoin_ecc_stop();
+        kw_ec_stop();
         return srv;
     }
 
@@ -1234,15 +1234,15 @@ int main(int argc, char **argv)
                          line[n - 1] == ' '  || line[n - 1] == '\t')) line[--n] = '\0';
         if (n <= 0) { free(line); pc_secret_free(skey);
                       fprintf(stderr, "bob: no psbt on stdin\n"); return 2; }
-        dogecoin_ecc_start();
+        kw_ec_start();
         char *signed_psbt = NULL;
         pc_result sr = pc_payment_sign(line, skey, chain, &signed_psbt);
-        dogecoin_ecc_stop();
+        kw_ec_stop();
         free(line);
         pc_secret_free(skey);
         if (sr != PC_OK || !signed_psbt) { fprintf(stderr, "bob: sign failed\n"); return 1; }
         printf("%s\n", signed_psbt);
-        dogecoin_free(signed_psbt);
+        free(signed_psbt);
         return 0;
     }
 
@@ -1271,7 +1271,7 @@ int main(int argc, char **argv)
         if (!wif) { fprintf(stderr, "bob: cannot read --wif\n"); return 2; }
     }
 
-    dogecoin_ecc_start();
+    kw_ec_start();
     int rc = 1;
 
     char bob_pub[PUBKEYHEXLEN], bob_addr[P2PKHLEN];
@@ -1404,6 +1404,6 @@ int main(int argc, char **argv)
     rc = 0;
 done:
     pc_secret_free(wif);
-    dogecoin_ecc_stop();
+    kw_ec_stop();
     return rc;
 }
