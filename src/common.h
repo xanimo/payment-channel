@@ -33,9 +33,11 @@
 #include "wire.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #define PC_DEFAULT_PORT 9876
 
@@ -105,6 +107,19 @@ static inline char *pc_read_hex_arg(const char *arg)
    should be mode 0600; "-" reads one line from stdin. A bare value still works
    for the tests, but it is the insecure form and the docs say so. Caller frees
    with pc_secret_free(), which wipes the copy first. */
+/* Pin a secret in RAM so it is never written to swap, which is the plaintext
+   copy of the key custody is supposed to prevent. Best effort but loud: mlock
+   fails under a low RLIMIT_MEMLOCK, and an operator who is one page short of
+   locking their key should hear it rather than believe it is protected. */
+static inline char *pc_secret_harden(char *s)
+{
+    if (!s) return NULL;
+    if (mlock(s, strlen(s) + 1) != 0)
+        fprintf(stderr, "warning: mlock of secret failed (%s): "
+                        "the key may reach swap\n", strerror(errno));
+    return s;
+}
+
 static inline char *pc_read_secret_arg(const char *arg)
 {
     if (!arg) return NULL;
@@ -117,7 +132,7 @@ static inline char *pc_read_secret_arg(const char *arg)
         if (!f) return NULL;
         owned = 1;
     } else {
-        return strdup(arg);
+        return pc_secret_harden(strdup(arg));
     }
     char *line = NULL;
     size_t cap = 0;
@@ -128,7 +143,7 @@ static inline char *pc_read_secret_arg(const char *arg)
                      line[n - 1] == ' '  || line[n - 1] == '\t'))
         line[--n] = '\0';
     if (n == 0) { free(line); return NULL; }
-    return line;
+    return pc_secret_harden(line);
 }
 
 /* Wipe through a volatile pointer so the clear is not optimized away, then free.
@@ -137,9 +152,11 @@ static inline char *pc_read_secret_arg(const char *arg)
 static inline void pc_secret_free(char *s)
 {
     if (!s) return;
-    volatile char *p = (volatile char *)s;
     size_t n = strlen(s);
-    while (n--) *p++ = 0;
+    volatile char *p = (volatile char *)s;
+    size_t k = n;
+    while (k--) *p++ = 0;
+    munlock(s, n + 1);              /* wipe first, then release the lock */
     free(s);
 }
 
