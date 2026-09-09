@@ -2,8 +2,9 @@
 #
 # The crypto, transactions, PSBT and base58 come from koinu, which is a released
 # static library rather than an unreleased libdogecoin fork. Point KOINU at a
-# koinu checkout built at tag v0.2.0 or later (its `make` produces libkw.a and
-# builds the secp256k1 submodule):
+# koinu checkout built at tag v0.2.1 or later (its `make` produces libkw.a and
+# builds the secp256k1 submodule; v0.2.1 carries the scriptSig-length fix a
+# P2SH multisig spend needs):
 #
 #   make KOINU=/path/to/koinu
 #
