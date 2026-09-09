@@ -37,8 +37,11 @@ jobs:
               printf '%s\n' "$KOINU_DEPLOY_KEY" > ~/.ssh/koinu
               chmod 600 ~/.ssh/koinu
               ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-              GIT_SSH_COMMAND="ssh -i ~/.ssh/koinu -o IdentitiesOnly=yes" \
-                  git clone git@github.com:xanimo/koinu koinu
+              # exported, not just on the clone, so the tag fetch and the
+              # submodule update below use the key too (the submodule is public
+              # secp256k1, which any authenticated key may read)
+              export GIT_SSH_COMMAND="ssh -i ~/.ssh/koinu -o IdentitiesOnly=yes"
+              git clone git@github.com:xanimo/koinu koinu
               echo "cloned koinu with the deploy key"
           else
               echo "koinu is not reachable and no KOINU_DEPLOY_KEY is set" >&2
