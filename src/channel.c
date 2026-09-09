@@ -169,11 +169,9 @@ pc_result pc_channel_init(pc_channel *ch,
        announces; without this the check only runs in one direction. */
     for (int i = 0; i < 2; i++) {
         const char *hex = i ? bob_pubkey_hex : alice_pubkey_hex;
-        dogecoin_pubkey pk;
-        dogecoin_pubkey_init(&pk);
-        pk.compressed = true;
-        if (!pc_hex_to_bin(hex, pk.pubkey, 33)) return PC_ERR_KEY;
-        if (!dogecoin_pubkey_is_valid(&pk)) return PC_ERR_KEY;
+        uint8_t raw[33], pk[33];
+        if (!pc_hex_to_bin(hex, raw, 33)) return PC_ERR_KEY;
+        if (!kw_ec_pubkey_parse(raw, 33, pk)) return PC_ERR_KEY;   /* on the curve */
     }
 
     /* A channel is between two parties. One key in both slots builds a script
