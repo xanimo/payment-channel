@@ -225,5 +225,58 @@ SW4 | grep -q "1 confirmed" \
     && say "spending the outpoint reports it confirmed" "yes" \
     || { say "spending the outpoint reports it confirmed" "$(SW4)"; fail=1; }
 
+# running as a service: a channel approaching its locktime but not yet due is
+# reported, an alert fires, and the machine-readable status line carries the
+# money at risk. height 1000, locktime 300000: with a huge warn-margin the
+# channel is inside the warning band but a small sweep-margin keeps it not due.
+rm -rf "$WORK/state6"; mkdir -p "$WORK/state6"
+cp "$WORK/pristine" "$WORK/state6/$(basename "$(ls "$WORK"/state/*.channel)")"
+echo ok > "$CONFIRM_ANSWER"
+cat > "$WORK/alert" <<'ALERT'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$ALERT_LOG"
+ALERT
+chmod +x "$WORK/alert"
+export ALERT_LOG="$WORK/alerts"; : > "$ALERT_LOG"
+./bob --sweep --state "$WORK/state6" --height-file "$WORK/height" \
+      --confirm-cmd "$WORK/confirm" --sweep-margin 50 --warn-margin 400000 \
+      --alert-cmd "$WORK/alert" > "$WORK/sweep6.log" 2>&1 || true
+grep -q "WARNING" "$WORK/sweep6.log" \
+    && say "a channel nearing its locktime is reported" "yes" \
+    || { say "a channel nearing its locktime is reported" "no"; fail=1; }
+grep -q "approaching=1" "$WORK/sweep6.log" \
+    && say "the status line counts it approaching" "yes" \
+    || { say "the status line counts it approaching" "$(grep sweep-status "$WORK/sweep6.log")"; fail=1; }
+grep -q "at_risk_koinu=[1-9]" "$WORK/sweep6.log" \
+    && say "and reports the koinu at risk" "yes" \
+    || { say "and reports the koinu at risk" "no"; fail=1; }
+grep -q "approaching locktime" "$ALERT_LOG" \
+    && say "and the alert command fires" "yes" \
+    || { say "and the alert command fires" "$(cat "$ALERT_LOG")"; fail=1; }
+
+# a stale height feed is the emergency for a sweep: it alerts and refuses
+printf '1\n' > "$WORK/oldheight"; touch -d "1 hour ago" "$WORK/oldheight"
+: > "$ALERT_LOG"
+./bob --sweep --state "$WORK/state6" --height-file "$WORK/oldheight" \
+      --height-max-age 60 --alert-cmd "$WORK/alert" > "$WORK/sweep7.log" 2>&1 || true
+grep -q "stale" "$ALERT_LOG" \
+    && say "a stale height feed alerts" "yes" \
+    || { say "a stale height feed alerts" "$(cat "$ALERT_LOG")"; fail=1; }
+
+# --watch runs more than one pass and stops on a signal
+: > "$WORK/watch.log"
+./bob --sweep --state "$WORK/state6" --height-file "$WORK/height" \
+      --confirm-cmd "$WORK/confirm" --sweep-margin 50 --watch 1 \
+      > "$WORK/watch.log" 2>&1 &
+WPID=$!
+sleep 3
+kill -TERM "$WPID" 2>/dev/null || true; wait "$WPID" 2>/dev/null || true
+[ "$(grep -c '^sweep-status' "$WORK/watch.log")" -ge 2 ] \
+    && say "--watch runs repeated passes" "yes" \
+    || { say "--watch runs repeated passes" "$(grep -c '^sweep-status' "$WORK/watch.log") passes"; fail=1; }
+grep -q "stopped" "$WORK/watch.log" \
+    && say "and stops cleanly on a signal" "yes" \
+    || { say "and stops cleanly on a signal" "no"; fail=1; }
+
 [ "$fail" = 0 ] || { echo "sweep FAILED" >&2; exit 1; }
 echo "sweep ok"

@@ -111,8 +111,8 @@ static void usage(void)
       "           [--confirm-cmd CMD] [--min-depth N] [--broadcast-cmd CMD]\n"
       "           [--since-window N]\n"
       "       bob --sweep --state DIR --height-file PATH [--broadcast-cmd CMD]\n"
-      "           [--sweep-margin N] [--confirm-cmd CMD]\n"
-      "           [--max-per-ip N] [--once]\n"
+      "           [--sweep-margin N] [--confirm-cmd CMD] [--warn-margin N]\n"
+      "           [--watch SEC] [--alert-cmd CMD]\n"
       "       bob --wif WIF|@FILE|- --pubkey\n"
       "\n"
       "  --wif @FILE reads the key from a file (mode 0600) and - from stdin;\n"
@@ -120,7 +120,12 @@ static void usage(void)
       "  --price is what each order costs, charged in the order given.\n"
       "  --height is the current chain height; Bob cannot see the chain and\n"
       "  refuses a channel whose locktime is not --min-slack blocks above it.\n"
-      "  --max-per-ip caps live connections per source address (0 disables).\n");
+      "  --max-per-ip caps live connections per source address (0 disables).\n"
+      "  --watch runs the sweep every SEC seconds as a service, not one pass.\n"
+      "  --warn-margin N reports a channel N blocks from its locktime before it\n"
+      "  is due, and --alert-cmd is run (CMD \"<reason>\") when one is approaching\n"
+      "  or a funding is undetermined or the height feed is stale. Each pass\n"
+      "  prints a sweep-status line with the counts and the koinu at risk.\n");
 }
 
 /* Everything one connection knows. */
@@ -477,6 +482,19 @@ static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
     return 1;
 }
 
+/* Fire an operator alert. The message is one string this process built from
+   counts and a height, never anything off the wire, appended to the command and
+   run like the other backends: execvp, no shell, bounded by the confirm budget.
+   Best effort, the exit status is not read: an alert that cannot be delivered is
+   not a reason to stop sweeping. */
+static void run_alert(const char *cmd, const char *msg)
+{
+    const char *extra[1] = { msg };
+    char buf[256];
+    int status = -1;
+    run_backend(cmd, extra, 1, NULL, PC_CONFIRM_SECONDS, buf, sizeof(buf), &status);
+}
+
 /* One pass over the state directory, broadcasting what is about to expire.
  *
  * A session that ends without a close leaves the payment in its state file and
@@ -495,19 +513,23 @@ static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
 static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                     const char *broadcast_cmd, const char *confirm_cmd,
                     unsigned min_depth, unsigned margin, pc_chain chain,
-                    unsigned window)
+                    unsigned window, unsigned warn_margin, const char *alert_cmd)
 {
     const char *why = "";
     uint32_t height = 0;
     if (!read_height_file(height_file, max_age, &height, &why)) {
         fprintf(stderr, "bob: %s: %s\n", height_file, why);
+        /* A sweep that cannot read a fresh height is blind to every deadline, so
+           this is the emergency, not a quiet skip. */
+        if (alert_cmd) run_alert(alert_cmd, "height feed is stale or unreadable");
         return 1;
     }
 
     DIR *d = opendir(dir);
     if (!d) { fprintf(stderr, "bob: cannot read %s\n", dir); return 1; }
 
-    int swept = 0, held = 0, waiting = 0, dead = 0, unknown = 0, confirmed = 0;
+    int swept = 0, held = 0, waiting = 0, warning = 0, dead = 0, unknown = 0, confirmed = 0;
+    uint64_t at_risk = 0;   /* koinu held in channels not yet spent on chain */
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
         /* <64 hex>-<vout>.channel, and nothing else in the directory */
@@ -592,10 +614,24 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
            sending early costs a customer the rest of the channel. A closed one
            has no rest of the channel to lose and is due now. */
         if (!closed && (uint64_t)ch.locktime > (uint64_t)height + margin) {
-            waiting++;
+            at_risk += ch.paid_to_bob_koinu;
+            /* Approaching, but not yet due. Surface it now so a channel drifting
+               toward its locktime, or a height feed that stopped advancing, is
+               seen coming rather than discovered at the broadcast. warn_margin
+               of 0 disables the tier. */
+            if (warn_margin && (uint64_t)ch.locktime <= (uint64_t)height + warn_margin) {
+                printf("sweep    WARNING %s:%d %" PRIu64 " blocks to locktime, "
+                       "%" PRIu64 " koinu held\n",
+                       txid, vout, (uint64_t)ch.locktime - (uint64_t)height,
+                       ch.paid_to_bob_koinu);
+                warning++;
+            } else {
+                waiting++;
+            }
             pc_state_close(&st);
             continue;
         }
+        at_risk += ch.paid_to_bob_koinu;   /* due now, still not on chain */
 
         printf("sweep    %s:%d locktime %u, height %u, %" PRIu64 " koinu%s%s\n",
                txid, vout, ch.locktime, height, ch.paid_to_bob_koinu,
@@ -629,10 +665,27 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
         pc_state_close(&st);
     }
     closedir(d);
-    printf("sweep    %d broadcast, %d confirmed, %d waiting, %d held by a "
-           "session, %d dead, %d undetermined\n",
-           swept, confirmed, waiting, held, dead, unknown);
+    /* One machine-readable line per pass, so a monitor scrapes state by its
+       prefix without parsing prose. at_risk_koinu is the money Bob is holding
+       that the chain has not yet made final, the number a merchant watches. The
+       human summary follows it and stays last, so a reader's eye lands there. */
+    printf("sweep-status height=%u broadcast=%d confirmed=%d waiting=%d "
+           "approaching=%d held=%d dead=%d undetermined=%d at_risk_koinu=%" PRIu64 "\n",
+           height, swept, confirmed, waiting, warning, held, dead, unknown, at_risk);
+    printf("sweep    %d broadcast, %d confirmed, %d waiting, %d approaching, "
+           "%d held by a session, %d dead, %d undetermined\n",
+           swept, confirmed, waiting, warning, held, dead, unknown);
     fflush(stdout);
+    /* An operator needs to hear about the two states nobody should sit on: a
+       channel nearing its locktime, and a funding the backend could not resolve.
+       Best effort, since an alert that fails is no reason to stop sweeping. */
+    if (alert_cmd && (warning > 0 || unknown > 0)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "%d approaching locktime, %d undetermined at height %u",
+                 warning, unknown, height);
+        run_alert(alert_cmd, msg);
+    }
     return 0;
 }
 
@@ -936,6 +989,11 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
     pc_state_close(&s.st);
 }
 
+/* Set by SIGTERM/SIGINT so a --watch loop finishes its sleep and exits between
+   passes rather than mid-broadcast. */
+static volatile sig_atomic_t g_stop = 0;
+static void on_stop(int sig) { (void)sig; g_stop = 1; }
+
 int main(int argc, char **argv)
 {
     const char *wif_arg = NULL, *listen_at = NULL;
@@ -945,7 +1003,8 @@ int main(int argc, char **argv)
     const char *state_dir = NULL, *height_file = NULL, *confirm_cmd = NULL;
     const char *broadcast_cmd = NULL;
     int sweep = 0;
-    unsigned margin = 50;
+    unsigned margin = 50, warn_margin = 0, watch = 0;
+    const char *alert_cmd = NULL;
     unsigned height_max_age = 600, min_depth = 6, window = 0;
     int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
@@ -963,6 +1022,9 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--broadcast-cmd")) { broadcast_cmd = NEXT(); }
         else if (!strcmp(a, "--sweep"))     { sweep = 1; }
         else if (!strcmp(a, "--sweep-margin")) { const char *v = NEXT(); margin = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
+        else if (!strcmp(a, "--warn-margin")) { const char *v = NEXT(); warn_margin = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
+        else if (!strcmp(a, "--alert-cmd"))  { alert_cmd = NEXT(); }
+        else if (!strcmp(a, "--watch"))      { const char *v = NEXT(); watch = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--min-depth"))  { const char *v = NEXT(); min_depth = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--since-window")) { const char *v = NEXT(); window = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--height-max-age")) { const char *v = NEXT(); height_max_age = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
@@ -997,9 +1059,30 @@ int main(int argc, char **argv)
         /* rebuilding a channel validates both pubkeys, which needs the curve
            context, so this cannot run before it is up */
         dogecoin_ecc_start();
-        int srv = do_sweep(state_dir, height_file, height_max_age,
+        int srv = 0;
+        if (watch) {
+            /* Supervised mode: one pass every --watch seconds until a signal,
+               so the deadline safety net is a running service rather than a
+               cron line that can silently stop being installed. A pass that
+               fails (a stale height feed) does not end the loop; the next
+               interval retries and the alert has already fired. */
+            signal(SIGTERM, on_stop);
+            signal(SIGINT,  on_stop);
+            printf("sweep    watching %s every %u s\n", state_dir, watch);
+            fflush(stdout);
+            while (!g_stop) {
+                srv = do_sweep(state_dir, height_file, height_max_age,
+                               broadcast_cmd, confirm_cmd, min_depth, margin,
+                               chain, window, warn_margin, alert_cmd);
+                for (unsigned s = 0; s < watch && !g_stop; s++) poll(NULL, 0, 1000);
+            }
+            printf("sweep    stopped\n");
+            srv = 0;
+        } else {
+            srv = do_sweep(state_dir, height_file, height_max_age,
                            broadcast_cmd, confirm_cmd, min_depth, margin, chain,
-                           window);
+                           window, warn_margin, alert_cmd);
+        }
         dogecoin_ecc_stop();
         return srv;
     }
