@@ -112,7 +112,7 @@ int main(int argc, char **argv)
     /* a peer that closes mid-write must not take the process with it */
     signal(SIGPIPE, SIG_IGN);
 
-    dogecoin_ecc_start();
+    kw_ec_start();
     int rc = 1, fd = -1;
     char *funding_tx = NULL;
 
@@ -170,7 +170,7 @@ int main(int argc, char **argv)
            nLockTime == locktime first becomes final in the block after it */
         printf("refund transaction, spendable from block %u:\n%s\n",
                locktime + 1, refund);
-        dogecoin_free(refund);
+        free(refund);
         rc = 0;
         goto done;
     }
@@ -270,7 +270,7 @@ int main(int argc, char **argv)
     out.to_bob_koinu = locktime;
     snprintf(out.psbt_hex, sizeof(out.psbt_hex), "%s", open_psbt);
     snprintf(out.tx_hex, sizeof(out.tx_hex), "%s", funding_tx);
-    dogecoin_free(open_psbt);
+    free(open_psbt);
     if (!pc_wire_send(fd, &out)) { fprintf(stderr, "alice: send failed\n"); goto done; }
 
     if (pc_wire_recv(fd, &in) != 1) { fprintf(stderr, "alice: no answer\n"); goto done; }
@@ -351,10 +351,10 @@ int main(int argc, char **argv)
         out.to_bob_koinu = total;
         if (strlen(psbt) + 1 > sizeof(out.psbt_hex)) {
             fprintf(stderr, "alice: psbt does not fit an envelope\n");
-            dogecoin_free(psbt); goto done;
+            free(psbt); goto done;
         }
         snprintf(out.psbt_hex, sizeof(out.psbt_hex), "%s", psbt);
-        dogecoin_free(psbt);
+        free(psbt);
         if (!pc_wire_send(fd, &out)) { fprintf(stderr, "alice: send failed\n"); goto done; }
 
         if (pc_wire_recv(fd, &in) != 1) { fprintf(stderr, "alice: no ack\n"); goto done; }
@@ -392,6 +392,6 @@ done:
     if (fd >= 0) close(fd);
     free(funding_tx);
     pc_secret_free(wif);
-    dogecoin_ecc_stop();
+    kw_ec_stop();
     return rc;
 }
