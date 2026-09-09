@@ -55,6 +55,26 @@ typedef enum { PC_CHAIN_MAIN = 0, PC_CHAIN_TEST, PC_CHAIN_REGTEST } pc_chain;
 
 const kw_chainparams *pc_chainparams(pc_chain chain);
 
+/* Buffer sizes that were libdogecoin's, kept under the same names so the call
+   sites do not churn. A compressed pubkey is 33 bytes (66 hex + NUL); a dogecoin
+   base58 address is at most 34 chars + NUL; a WIF at most 52 + NUL; a hash is 32
+   bytes (64 hex + NUL). */
+#ifndef PUBKEYHEXLEN
+#define PUBKEYHEXLEN             67
+#endif
+#ifndef P2PKHLEN
+#define P2PKHLEN                 35
+#endif
+#ifndef P2SHLEN
+#define P2SHLEN                  35
+#endif
+#ifndef PRIVKEYWIFLEN
+#define PRIVKEYWIFLEN            53
+#endif
+#ifndef DOGECOIN_HASH_HEX_LENGTH
+#define DOGECOIN_HASH_HEX_LENGTH 65
+#endif
+
 /* 511 bytes of script as hex plus a NUL, so a maximal 520-byte P2SH redeem
    script does not fit. That 511 is what pc_tx_verify_payment() will read;
    pc_refund_create() refuses over 255 separately, because it pushes the script
