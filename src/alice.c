@@ -225,13 +225,11 @@ int main(int argc, char **argv)
     /* sixty-six hex characters is not a public key. one that is not a point on
        the curve still builds a fundable p2sh, and nothing can ever spend it. */
     {
-        dogecoin_pubkey bp;
-        dogecoin_pubkey_init(&bp);
-        bp.compressed = true;
-        if (!pc_hex_to_bin(in.psbt_hex, bp.pubkey, 33)) {
+        uint8_t braw[33], bp[33];
+        if (strlen(in.psbt_hex) != 66 || !pc_hex_to_bin(in.psbt_hex, braw, 33)) {
             fprintf(stderr, "alice: peer key is not 33 bytes of hex\n"); goto done;
         }
-        if (!dogecoin_pubkey_is_valid(&bp)) {
+        if (!kw_ec_pubkey_parse(braw, 33, bp)) {
             fprintf(stderr, "alice: peer key is not a point on the curve\n");
             goto done;
         }
