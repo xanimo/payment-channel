@@ -82,11 +82,37 @@ printf '#!/usr/bin/env bash\nread -r _\necho sent\n' > "$WORK/send"; chmod +x "$
 printf '1000\n' > "$WORK/height"
 ./bob --sweep --state "$WORK/state" --height-file "$WORK/height" \
       --broadcast-cmd "$WORK/send" --sweep-margin 400000 \
-      --replicate-cmd "cp -t $WORK/mirror2" > "$WORK/sweep.log" 2>&1 || true
+      --replicate-cmd "cp -t $WORK/mirror2" --metrics-file "$WORK/metrics" \
+      > "$WORK/sweep.log" 2>&1 || true
 if grep -q "1 broadcast" "$WORK/sweep.log" && ls "$WORK/mirror2"/*.channel >/dev/null 2>&1; then
     say "the sweep replicates its own writes" "yes"
 else
     say "the sweep replicates its own writes" "$(tail -1 "$WORK/sweep.log")"; fail=1
+fi
+# observability: the status line carries replica health and the metrics file is
+# a scrapable snapshot a monitor reads
+grep -q "replica=ok" "$WORK/sweep.log" \
+    && say "the status line reports replica health" "yes" \
+    || { say "the status line reports replica health" "$(grep sweep-status "$WORK/sweep.log")"; fail=1; }
+if grep -q "^pc_sweep_broadcast 1" "$WORK/metrics" \
+   && grep -q "^pc_sweep_replica_stale 0" "$WORK/metrics"; then
+    say "the metrics file is a scrapable snapshot" "yes"
+else
+    say "the metrics file is a scrapable snapshot" "no"; fail=1
+fi
+
+# a replica that fails mid-sweep shows stale in the status and metrics, best
+# effort, without stopping the broadcast
+rm -rf "$WORK/state3"; mkdir -p "$WORK/state3"
+cp "$WORK"/state/*.channel "$WORK/state3"/ 2>/dev/null || true
+./bob --sweep --state "$WORK/state3" --height-file "$WORK/height" \
+      --broadcast-cmd "$WORK/send" --sweep-margin 400000 \
+      --replicate-cmd "false" --metrics-file "$WORK/metrics3" \
+      > "$WORK/sweep3.log" 2>&1 || true
+if [ -s "$WORK/state3"/*.channel ] 2>/dev/null; then
+    grep -q "replica=stale" "$WORK/sweep3.log" && grep -q "^pc_sweep_replica_stale 1" "$WORK/metrics3" \
+        && say "a lagging replica reads stale, sweep still runs" "yes" \
+        || { say "a lagging replica reads stale, sweep still runs" "no"; fail=1; }
 fi
 
 [ "$fail" = 0 ] || { echo "replicate FAILED" >&2; exit 1; }
