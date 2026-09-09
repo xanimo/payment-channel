@@ -34,6 +34,13 @@
 #include "channel.h"
 #include "hex.h"
 
+/* koinu crypto: the sha256/hash160, ec verify, and base58 this file needs.
+   koinu's crypto/hex.h is not included; pc uses its own. */
+#include "sha2.h"
+#include "ripemd160.h"
+#include "ec.h"
+#include "base58.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -190,8 +197,8 @@ static int sighash_all(const unsigned char *tx, size_t txlen,
     buf[o++] = 0x01; buf[o++] = 0x00; buf[o++] = 0x00; buf[o++] = 0x00;
 
     unsigned char h1[32];
-    sha256_raw(buf, o, h1);
-    sha256_raw(h1, sizeof(h1), out);
+    kw_sha256(buf, o, h1);
+    kw_sha256(h1, sizeof(h1), out);
     free(buf);
     return 1;
 }
@@ -247,9 +254,9 @@ static pc_result verify_sigs(const pc_channel *ch,
     if (!pc_hex_to_bin(ch->alice_pubkey_hex, apub, sizeof(apub))) return PC_ERR_KEY;
     if (!pc_hex_to_bin(ch->bob_pubkey_hex, bpub, sizeof(bpub))) return PC_ERR_KEY;
 
-    if (!dogecoin_ecc_verify_sig(apub, true, hash, (unsigned char *)sa, salen - 1))
+    if (!kw_ec_verify(apub, hash, sa, salen - 1))
         return PC_ERR_PSBT;
-    if (!dogecoin_ecc_verify_sig(bpub, true, hash, (unsigned char *)sb, sblen - 1))
+    if (!kw_ec_verify(bpub, hash, sb, sblen - 1))
         return PC_ERR_PSBT;
     return PC_OK;
 }
@@ -280,10 +287,10 @@ static int standard_spk(const unsigned char *spk, size_t len)
 static int p2sh_script_for(const pc_channel *ch, unsigned char out[23])
 {
     uint8_t raw[64];
-    /* returns the payload plus the 4 checksum bytes it just verified, so a
-       21-byte version+hash160 comes back as 25 */
-    size_t n = dogecoin_base58_decode_check(ch->p2sh_address, raw, sizeof(raw));
-    if (n != 25) return 0;
+    /* the checked payload is the version byte and the 20-byte script hash */
+    size_t n = 0;
+    if (!kw_base58check_decode(ch->p2sh_address, raw, sizeof(raw), &n) || n != 21)
+        return 0;
     out[0] = 0xa9; out[1] = 0x14;
     memcpy(out + 2, raw + 1, 20);
     out[22] = 0x87;
@@ -312,17 +319,18 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
     int found_vout = 0;
     uint64_t found_value = 0;
 
-    /* txid over the whole serialization, in display order */
-    dogecoin_tx *tx = dogecoin_tx_new();
     pc_result rc = PC_ERR_PSBT;
-    if (!tx) { free(buf); return PC_ERR_PSBT; }
-    if (dogecoin_tx_deserialize(buf, blen, tx, NULL) == 0) goto out;
+
+    /* txid = double-SHA256 of the whole serialization, in display (reversed)
+       order. A dogecoin transaction is legacy, so the txid is the hash of
+       exactly these bytes; no deserialize-and-reserialize is needed. The walk
+       below is what rejects a malformed transaction. */
     {
-        uint256_t h;
-        dogecoin_tx_hash(tx, h);
-        unsigned char disp[32];
-        for (int i = 0; i < 32; i++) disp[i] = h[31 - i];
-        if (txid_out) utils_bin_to_hex(disp, 32, txid_out);
+        unsigned char h1[32], h2[32], disp[32];
+        kw_sha256(buf, blen, h1);
+        kw_sha256(h1, sizeof(h1), h2);
+        for (int i = 0; i < 32; i++) disp[i] = h2[31 - i];
+        if (txid_out) pc_bin_to_hex(disp, 32, txid_out);
     }
 
     /* walk the outputs for the one paying this channel */
@@ -372,7 +380,6 @@ out:
         if (vout_out)  *vout_out  = found_vout;
         if (value_out) *value_out = found_value;
     }
-    dogecoin_tx_free(tx);
     free(buf);
     return rc;
 }
@@ -385,12 +392,10 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     if (!ch->funding_txid[0]) return PC_ERR_STATE;
 
     /* the p2pkh script paying the key in the redeem script */
-    dogecoin_pubkey bob;
-    dogecoin_pubkey_init(&bob);
-    bob.compressed = true;
-    if (!pc_hex_to_bin(ch->bob_pubkey_hex, bob.pubkey, 33)) return PC_ERR_ARG;
-    uint160_t bob_h160;
-    dogecoin_pubkey_get_hash160(&bob, bob_h160);
+    unsigned char bpub[33];
+    if (!pc_hex_to_bin(ch->bob_pubkey_hex, bpub, 33)) return PC_ERR_ARG;
+    uint8_t bob_h160[20];
+    kw_hash160(bpub, 33, bob_h160);
 
     unsigned char want[25];
     want[0] = 0x76; want[1] = 0xa9; want[2] = 0x14;
@@ -440,7 +445,7 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     unsigned char disp[32];
     for (int i = 0; i < 32; i++) disp[i] = prev[31 - i];
     char txid[65];
-    utils_bin_to_hex(disp, 32, txid);
+    pc_bin_to_hex(disp, 32, txid);
     if (strcmp(txid, ch->funding_txid) != 0)      goto out;
     if (vout != (uint32_t)ch->funding_vout)       goto out;
 
