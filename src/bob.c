@@ -129,7 +129,8 @@ static void usage(void)
       "  --warn-margin N reports a channel N blocks from its locktime before it\n"
       "  is due, and --alert-cmd is run (CMD \"<reason>\") when one is approaching\n"
       "  or a funding is undetermined or the height feed is stale. Each pass\n"
-      "  prints a sweep-status line with the counts and the koinu at risk.\n"
+      "  prints a sweep-status line with the counts, the koinu at risk, and the\n"
+      "  replica health; --metrics-file writes those as a scrapable snapshot.\n"
       "  --sign-cmd runs a signer that holds the key so this process never does;\n"
       "  it is fed the payment PSBT on stdin and returns the signed PSBT. The\n"
       "  signed transaction is still re-verified here, so the signer is used,\n"
@@ -562,7 +563,7 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                     const char *broadcast_cmd, const char *confirm_cmd,
                     unsigned min_depth, unsigned margin, pc_chain chain,
                     unsigned window, unsigned warn_margin, const char *alert_cmd,
-                    const char *replicate_cmd)
+                    const char *replicate_cmd, const char *metrics_file)
 {
     const char *why = "";
     uint32_t height = 0;
@@ -578,6 +579,7 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
     if (!d) { fprintf(stderr, "bob: cannot read %s\n", dir); return 1; }
 
     int swept = 0, held = 0, waiting = 0, warning = 0, dead = 0, unknown = 0, confirmed = 0;
+    int replica_stale = 0;  /* a replication this pass failed; the replica lags */
     uint64_t at_risk = 0;   /* koinu held in channels not yet spent on chain */
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
@@ -652,8 +654,10 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                 printf("sweep    %s:%d %s\n", txid, vout,
                        already_sent ? "the close confirmed" : why);
                 pc_state_retire(&st, &ch, tx);
-                if (replicate_cmd && !replicate(replicate_cmd, st.path))
+                if (replicate_cmd && !replicate(replicate_cmd, st.path)) {
                     fprintf(stderr, "sweep    %s:%d replica not updated\n", txid, vout);
+                    replica_stale = 1;
+                }
                 if (already_sent) confirmed++; else dead++;
                 pc_state_close(&st);
                 continue;
@@ -707,9 +711,11 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                 if (w != PC_OK)
                     fprintf(stderr, "sweep    %s:%d sent but not recorded\n",
                             txid, vout);
-                else if (replicate_cmd && !replicate(replicate_cmd, st.path))
+                else if (replicate_cmd && !replicate(replicate_cmd, st.path)) {
                     fprintf(stderr, "sweep    %s:%d replica not updated\n",
                             txid, vout);
+                    replica_stale = 1;
+                }
                 swept++;
             }
         } else {
@@ -723,13 +729,46 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
        prefix without parsing prose. at_risk_koinu is the money Bob is holding
        that the chain has not yet made final, the number a merchant watches. The
        human summary follows it and stays last, so a reader's eye lands there. */
+    /* off when no replica is configured, stale when one fell behind this pass,
+       ok when every write reached it: the health a monitor pages on. */
+    const char *replica = replicate_cmd ? (replica_stale ? "stale" : "ok") : "off";
     printf("sweep-status height=%u broadcast=%d confirmed=%d waiting=%d "
-           "approaching=%d held=%d dead=%d undetermined=%d at_risk_koinu=%" PRIu64 "\n",
-           height, swept, confirmed, waiting, warning, held, dead, unknown, at_risk);
+           "approaching=%d held=%d dead=%d undetermined=%d at_risk_koinu=%" PRIu64
+           " replica=%s\n",
+           height, swept, confirmed, waiting, warning, held, dead, unknown,
+           at_risk, replica);
     printf("sweep    %d broadcast, %d confirmed, %d waiting, %d approaching, "
            "%d held by a session, %d dead, %d undetermined\n",
            swept, confirmed, waiting, warning, held, dead, unknown);
     fflush(stdout);
+
+    /* A metrics snapshot for a scraper (Prometheus textfile collector reads this
+       shape), written atomically so a poll never sees a half-file. Best effort:
+       a monitor that finds it stale learns as much as one that finds it missing. */
+    if (metrics_file) {
+        char mtmp[600];
+        if (snprintf(mtmp, sizeof(mtmp), "%s.tmp", metrics_file) < (int)sizeof(mtmp)) {
+            FILE *mf = fopen(mtmp, "w");
+            if (mf) {
+                fprintf(mf,
+                    "pc_sweep_height %u\n"
+                    "pc_sweep_broadcast %d\n"
+                    "pc_sweep_confirmed %d\n"
+                    "pc_sweep_waiting %d\n"
+                    "pc_sweep_approaching %d\n"
+                    "pc_sweep_held %d\n"
+                    "pc_sweep_dead %d\n"
+                    "pc_sweep_undetermined %d\n"
+                    "pc_sweep_at_risk_koinu %" PRIu64 "\n"
+                    "pc_sweep_replica_enabled %d\n"
+                    "pc_sweep_replica_stale %d\n",
+                    height, swept, confirmed, waiting, warning, held, dead,
+                    unknown, at_risk, replicate_cmd ? 1 : 0, replica_stale);
+                if (fclose(mf) == 0) rename(mtmp, metrics_file);
+                else unlink(mtmp);
+            }
+        }
+    }
     /* An operator needs to hear about the two states nobody should sit on: a
        channel nearing its locktime, and a funding the backend could not resolve.
        Best effort, since an alert that fails is no reason to stop sweeping. */
@@ -1081,7 +1120,7 @@ int main(int argc, char **argv)
     int sweep = 0, sign = 0;
     unsigned margin = 50, warn_margin = 0, watch = 0;
     const char *alert_cmd = NULL, *sign_cmd = NULL, *bob_pubkey_arg = NULL;
-    const char *replicate_cmd = NULL;
+    const char *replicate_cmd = NULL, *metrics_file = NULL;
     unsigned height_max_age = 600, min_depth = 6, window = 0;
     int max_per_ip = DEFAULT_MAX_PER_IP;
     pc_chain chain = PC_CHAIN_MAIN;
@@ -1101,6 +1140,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--sign-cmd"))  { sign_cmd = NEXT(); }
         else if (!strcmp(a, "--bob-pubkey")) { bob_pubkey_arg = NEXT(); }
         else if (!strcmp(a, "--replicate-cmd")) { replicate_cmd = NEXT(); }
+        else if (!strcmp(a, "--metrics-file")) { metrics_file = NEXT(); }
         else if (!strcmp(a, "--sweep"))     { sweep = 1; }
         else if (!strcmp(a, "--sweep-margin")) { const char *v = NEXT(); margin = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
         else if (!strcmp(a, "--warn-margin")) { const char *v = NEXT(); warn_margin = v ? (unsigned)strtoul(v, NULL, 10) : 0; }
@@ -1164,7 +1204,8 @@ int main(int argc, char **argv)
             while (!g_stop) {
                 srv = do_sweep(state_dir, height_file, height_max_age,
                                broadcast_cmd, confirm_cmd, min_depth, margin,
-                               chain, window, warn_margin, alert_cmd, replicate_cmd);
+                               chain, window, warn_margin, alert_cmd,
+                               replicate_cmd, metrics_file);
                 for (unsigned s = 0; s < watch && !g_stop; s++) poll(NULL, 0, 1000);
             }
             printf("sweep    stopped\n");
@@ -1172,7 +1213,8 @@ int main(int argc, char **argv)
         } else {
             srv = do_sweep(state_dir, height_file, height_max_age,
                            broadcast_cmd, confirm_cmd, min_depth, margin, chain,
-                           window, warn_margin, alert_cmd, replicate_cmd);
+                           window, warn_margin, alert_cmd, replicate_cmd,
+                           metrics_file);
         }
         dogecoin_ecc_stop();
         return srv;
