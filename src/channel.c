@@ -397,22 +397,24 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
     if (r != PC_OK) return r;
     if (value == 0) return PC_ERR_AMOUNT;
 
-    dogecoin_psbt *psbt = NULL;
-    if (!dogecoin_psbt_from_hex(psbt_hex, &psbt) || !psbt) return PC_ERR_PSBT;
+    unsigned char *pbytes = NULL;
+    size_t pblen = 0;
+    if (!hex_to_bytes(psbt_hex, &pbytes, &pblen)) return PC_ERR_PSBT;
 
+    kw_psbt p;
+    kw_psbt_init(&p);
     pc_result rc = PC_ERR_PSBT;
-    if (dogecoin_psbt_num_inputs(psbt) != 1) goto out;
-    if (dogecoin_psbt_num_outputs(psbt) != 0) goto out;   /* nothing promised yet */
-    if (dogecoin_psbt_input_num_partial_sigs(psbt, 0) != 0) goto out;
+    if (!kw_psbt_parse(pbytes, pblen, &p)) goto out;
+
+    const kw_tx *utx = kw_psbt_unsigned_tx(&p);
+    if (!utx || utx->nin != 1 || utx->nout != 0) goto out;  /* nothing promised yet */
+    if (p.in[0].nsigs != 0) goto out;
 
     /* The redeem script commits Bob's key and the locktime, so matching it
        against the one he computed is what makes the rest of this his channel. */
-    size_t rlen = 0;
-    unsigned char rbuf[520];
-    if (!dogecoin_psbt_input_get_redeemscript(psbt, 0, rbuf, sizeof(rbuf), &rlen)) goto out;
+    if (p.in[0].redeemlen == 0 || p.in[0].redeemlen * 2 + 1 > PC_MAX_SCRIPT_HEX) goto out;
     char rhex[PC_MAX_SCRIPT_HEX];
-    if (rlen * 2 + 1 > sizeof(rhex)) goto out;
-    pc_bin_to_hex(rbuf, rlen, rhex);
+    pc_bin_to_hex(p.in[0].redeem, p.in[0].redeemlen, rhex);
     if (strcmp(rhex, ch->redeem_script_hex) != 0) goto out;
 
     r = pc_channel_set_funding(ch, txid, vout, value);
@@ -420,7 +422,8 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
     if (capacity_out) *capacity_out = value;
     rc = PC_OK;
 out:
-    if (psbt) dogecoin_psbt_free(psbt);
+    kw_psbt_free(&p);
+    free(pbytes);
     return rc;
 }
 
@@ -534,28 +537,32 @@ pc_result pc_payment_accept(pc_channel *ch, const char *psbt_hex,
     if (claimed_to_bob_koinu <= ch->paid_to_bob_koinu) return PC_ERR_AMOUNT;
     if (claimed_to_bob_koinu > ch->capacity_koinu)     return PC_ERR_AMOUNT;
 
-    dogecoin_psbt *psbt = NULL;
-    if (!dogecoin_psbt_from_hex(psbt_hex, &psbt) || !psbt) return PC_ERR_PSBT;
+    unsigned char *pbytes = NULL;
+    size_t pblen = 0;
+    if (!hex_to_bytes(psbt_hex, &pbytes, &pblen)) return PC_ERR_PSBT;
 
+    kw_psbt p;
+    kw_psbt_init(&p);
     pc_result rc = PC_ERR_PSBT;
-    if (dogecoin_psbt_num_inputs(psbt) != 1) goto out;
+    if (!kw_psbt_parse(pbytes, pblen, &p)) goto out;
+
+    const kw_tx *utx = kw_psbt_unsigned_tx(&p);
+    if (!utx || utx->nin != 1) goto out;
 
     /* it must carry Alice's signature already */
-    if (dogecoin_psbt_input_num_partial_sigs(psbt, 0) < 1) goto out;
+    if (p.in[0].nsigs < 1) goto out;
 
     /* and it must be spending this channel's redeem script */
-    size_t rlen = 0;
-    unsigned char rbuf[520];
-    if (!dogecoin_psbt_input_get_redeemscript(psbt, 0, rbuf, sizeof(rbuf), &rlen)) goto out;
+    if (p.in[0].redeemlen == 0 || p.in[0].redeemlen * 2 + 1 > PC_MAX_SCRIPT_HEX) goto out;
     char rhex[PC_MAX_SCRIPT_HEX];
-    if (rlen * 2 + 1 > sizeof(rhex)) goto out;
-    pc_bin_to_hex(rbuf, rlen, rhex);
+    pc_bin_to_hex(p.in[0].redeem, p.in[0].redeemlen, rhex);
     if (strcmp(rhex, ch->redeem_script_hex) != 0) goto out;
 
     ch->paid_to_bob_koinu = claimed_to_bob_koinu;
     rc = PC_OK;
 out:
-    if (psbt) dogecoin_psbt_free(psbt);
+    kw_psbt_free(&p);
+    free(pbytes);
     return rc;
 }
 
