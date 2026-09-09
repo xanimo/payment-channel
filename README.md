@@ -290,8 +290,10 @@ payment and close is saved and before it is acked, `CMD <state-file>` is run, so
 the payment reaches a second place before Bob answers for it, and a non-zero exit
 fails the ack to a retry rather than shipping against one disk. it runs inside
 the payer's read budget, so the replica has to be quick (a second local disk, a
-fast link); a slow one times out, which fails closed. the sweep's own writes are
-not yet replicated, so run it against the same replicated state.
+fast link); a slow one times out, which fails closed. the sweep replicates its
+own writes too, best effort: it broadcasts first, so a replica that is briefly
+unreachable warns and is caught up on the next pass rather than holding the
+transaction back.
 
     --replicate-cmd "cp -t /mnt/mirror"   # or rsync, an object-store put, ...
 

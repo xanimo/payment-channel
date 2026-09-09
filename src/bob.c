@@ -561,7 +561,8 @@ static void run_alert(const char *cmd, const char *msg)
 static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                     const char *broadcast_cmd, const char *confirm_cmd,
                     unsigned min_depth, unsigned margin, pc_chain chain,
-                    unsigned window, unsigned warn_margin, const char *alert_cmd)
+                    unsigned window, unsigned warn_margin, const char *alert_cmd,
+                    const char *replicate_cmd)
 {
     const char *why = "";
     uint32_t height = 0;
@@ -651,6 +652,8 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                 printf("sweep    %s:%d %s\n", txid, vout,
                        already_sent ? "the close confirmed" : why);
                 pc_state_retire(&st, &ch, tx);
+                if (replicate_cmd && !replicate(replicate_cmd, st.path))
+                    fprintf(stderr, "sweep    %s:%d replica not updated\n", txid, vout);
                 if (already_sent) confirmed++; else dead++;
                 pc_state_close(&st);
                 continue;
@@ -703,6 +706,9 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                                 : pc_state_retire(&st, &ch, tx);
                 if (w != PC_OK)
                     fprintf(stderr, "sweep    %s:%d sent but not recorded\n",
+                            txid, vout);
+                else if (replicate_cmd && !replicate(replicate_cmd, st.path))
+                    fprintf(stderr, "sweep    %s:%d replica not updated\n",
                             txid, vout);
                 swept++;
             }
@@ -1158,7 +1164,7 @@ int main(int argc, char **argv)
             while (!g_stop) {
                 srv = do_sweep(state_dir, height_file, height_max_age,
                                broadcast_cmd, confirm_cmd, min_depth, margin,
-                               chain, window, warn_margin, alert_cmd);
+                               chain, window, warn_margin, alert_cmd, replicate_cmd);
                 for (unsigned s = 0; s < watch && !g_stop; s++) poll(NULL, 0, 1000);
             }
             printf("sweep    stopped\n");
@@ -1166,7 +1172,7 @@ int main(int argc, char **argv)
         } else {
             srv = do_sweep(state_dir, height_file, height_max_age,
                            broadcast_cmd, confirm_cmd, min_depth, margin, chain,
-                           window, warn_margin, alert_cmd);
+                           window, warn_margin, alert_cmd, replicate_cmd);
         }
         dogecoin_ecc_stop();
         return srv;

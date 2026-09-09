@@ -74,5 +74,20 @@ grep -q "koinu held" "$WORK/bob2.log" \
     && { say "and nothing is acked against one disk" "acked anyway"; fail=1; } \
     || say "and nothing is acked against one disk" "yes"
 
+# the sweep replicates its own writes too. the paid channel from the first run
+# is still in state; sweep it due (huge margin) with a broadcast stub and no
+# confirm backend, so it broadcasts and retires, and check the replica updated.
+mkdir -p "$WORK/mirror2"
+printf '#!/usr/bin/env bash\nread -r _\necho sent\n' > "$WORK/send"; chmod +x "$WORK/send"
+printf '1000\n' > "$WORK/height"
+./bob --sweep --state "$WORK/state" --height-file "$WORK/height" \
+      --broadcast-cmd "$WORK/send" --sweep-margin 400000 \
+      --replicate-cmd "cp -t $WORK/mirror2" > "$WORK/sweep.log" 2>&1 || true
+if grep -q "1 broadcast" "$WORK/sweep.log" && ls "$WORK/mirror2"/*.channel >/dev/null 2>&1; then
+    say "the sweep replicates its own writes" "yes"
+else
+    say "the sweep replicates its own writes" "$(tail -1 "$WORK/sweep.log")"; fail=1
+fi
+
 [ "$fail" = 0 ] || { echo "replicate FAILED" >&2; exit 1; }
 echo "replicate ok"
