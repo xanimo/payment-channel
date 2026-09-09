@@ -1,6 +1,6 @@
-# Every job needs the patched libdogecoin, so one job stages it (cached on the
-# pinned commit plus the patch series) and the three scenarios fan out from it:
-# make check, contrib/regtest.sh against a real node, and a fuzz smoke.
+# Every job needs koinu (libkw), so one job builds it at the pinned release tag
+# and the scenarios fan out from it: make check, contrib/regtest.sh against a
+# real node, and a fuzz smoke. pc no longer depends on libdogecoin.
 name: ci
 
 on:
@@ -12,73 +12,84 @@ permissions:
   contents: read
 
 env:
-  LIBDOGECOIN_COMMIT: bf3f9df41263a67bf54e6ca6329fa74432c05067
-  # xanimo/docker feat/1.14.9: the 1.14.9-on-bookworm image, release binaries
-  # verified against pinned sha256sums and the release signer key
-  DOCKER_COMMIT: 208ac5a0a5f682a67f3b6e594029d7c37ea06717
+  # pc pins a koinu release, not a moving main. Re-fetched with --force because
+  # the tag objects were re-signed; the commit they name is unchanged.
+  KOINU_TAG: v0.2.1
 
 jobs:
-  libdogecoin:
+  # Build koinu's libkw.a + secp256k1 at the pinned tag, once, and hand it to
+  # the scenario jobs. Public clone first so a fork gets it with no secret; the
+  # read-only deploy key is a bridge while the repo is private.
+  koinu:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - id: cache
-        uses: actions/cache@v4
-        with:
-          path: staged
-          key: libdogecoin-${{ env.LIBDOGECOIN_COMMIT }}-${{ hashFiles('depends/patches/*.patch') }}
-      - if: steps.cache.outputs.cache-hit != 'true'
+      - name: build koinu
+        env:
+          KOINU_DEPLOY_KEY: ${{ secrets.KOINU_DEPLOY_KEY }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends autoconf automake libtool libevent-dev
-          git clone https://github.com/dogecoinfoundation/libdogecoin
-          cd libdogecoin
-          git checkout "$LIBDOGECOIN_COMMIT"
-          git -c user.name=ci -c user.email=ci@localhost am ../depends/patches/*.patch
-          ./autogen.sh
-          ./configure --prefix="$GITHUB_WORKSPACE/staged"
-          make -j"$(nproc)"
-          make install
+          sudo apt-get install -y --no-install-recommends autoconf automake libtool
+          if GIT_TERMINAL_PROMPT=0 git clone https://github.com/xanimo/koinu koinu 2>/dev/null; then
+              echo "cloned koinu publicly"
+          elif [ -n "${KOINU_DEPLOY_KEY:-}" ]; then
+              rm -rf koinu
+              mkdir -p ~/.ssh && chmod 700 ~/.ssh
+              printf '%s\n' "$KOINU_DEPLOY_KEY" > ~/.ssh/koinu
+              chmod 600 ~/.ssh/koinu
+              ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+              GIT_SSH_COMMAND="ssh -i ~/.ssh/koinu -o IdentitiesOnly=yes" \
+                  git clone git@github.com:xanimo/koinu koinu
+              echo "cloned koinu with the deploy key"
+          else
+              echo "koinu is not reachable and no KOINU_DEPLOY_KEY is set" >&2
+              exit 1
+          fi
+          git -C koinu fetch --tags --force
+          git -C koinu checkout "$KOINU_TAG"
+          git -C koinu submodule update --init --recursive
+          make -C koinu -j"$(nproc)"
+          ./koinu/kw --version
       - uses: actions/upload-artifact@v4
         with:
-          name: staged
-          path: staged
+          name: koinu
+          path: koinu
+          # secp256k1 builds into depends/secp256k1/.libs, which the default
+          # excludes as a hidden path; the pc link needs libsecp256k1.a from it
+          include-hidden-files: true
 
-  # test_channel, test/attack, then loopback.sh: alice against bob over a
-  # socket, plus the adversary cases that exercise bob's refusals
+  # test_channel, test/attack, the shell scenarios (loopback, sweep, keyguard,
+  # signer, replicate), then the dribble case that outlasts the line deadline.
   check:
-    needs: libdogecoin
+    needs: koinu
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: staged
-          path: staged
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev
-      - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" -j"$(nproc)"
-      - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" check
-      # the dribble case outlasts the whole-line deadline, so it is
-      # skipped in make check and run once here
+          name: koinu
+          path: koinu
+      - run: make KOINU="$GITHUB_WORKSPACE/koinu" -j"$(nproc)"
+      - run: make KOINU="$GITHUB_WORKSPACE/koinu" check
       - run: SLOW=1 ./test/slowpeer.sh
 
-  # the only job that proves the transactions are valid: broadcasts the close
-  # and the refund to a released 1.14.9 and checks both confirm and pay out
+  # the only job that proves the transactions are valid: builds bob/alice on
+  # koinu, funds a 2-of-2 on a released 1.14.9 node, and checks the close, the
+  # refund and the sweep all confirm. KW is the same koinu build, so this also
+  # checks --confirm-cmd/--broadcast-cmd against the real kw.
   regtest:
-    needs: libdogecoin
+    needs: koinu
     runs-on: ubuntu-24.04
+    env:
+      # xanimo/docker feat/1.14.9: 1.14.9-on-bookworm, release binaries verified
+      # against pinned sha256sums and the release signer key
+      DOCKER_COMMIT: 208ac5a0a5f682a67f3b6e594029d7c37ea06717
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: staged
-          path: staged
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev
-      - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" -j"$(nproc)" alice bob test/mkfunding
+          name: koinu
+          path: koinu
+      - run: make KOINU="$GITHUB_WORKSPACE/koinu" -j"$(nproc)" alice bob test/mkfunding
       - name: build the node image
         run: |
           git clone https://github.com/xanimo/docker dogecoin-docker
@@ -97,55 +108,18 @@ jobs:
           done
           ./doge-cli -regtest getblockcount
           ./doge-cli -regtest generate 200 >/dev/null
-      # The confirmation backend, built rather than stubbed. A stub written from
-      # the same reading as the code agrees with the code and with nothing else,
-      # which is how --confirm-cmd shipped unable to invoke the tool it exists
-      # for. This is the only thing that checks the contract.
-      #
-      # The public clone is tried first so that the day koinu is public this
-      # step needs no edit and forks get the check too. The deploy key is a
-      # bridge until then, read-only and scoped to that one repository. With
-      # neither, the step skips and regtest.sh says so rather than passing
-      # quietly: a check that silently stops running is worse than one that
-      # was never added.
-      #
-      # The clone is deliberately unpinned. Pinning would make this
-      # reproducible and stop it noticing the thing it exists to notice, which
-      # is kw outpoint's contract moving out from under --confirm-cmd.
-      - name: build koinu
-        env:
-          KOINU_DEPLOY_KEY: ${{ secrets.KOINU_DEPLOY_KEY }}
+      - name: regtest.sh with the real kw
         run: |
-          if GIT_TERMINAL_PROMPT=0 git clone --recurse-submodules \
-                 https://github.com/xanimo/koinu koinu 2>/dev/null; then
-              echo "cloned koinu publicly"
-          elif [ -n "${KOINU_DEPLOY_KEY:-}" ]; then
-              rm -rf koinu
-              mkdir -p ~/.ssh && chmod 700 ~/.ssh
-              printf '%s\n' "$KOINU_DEPLOY_KEY" > ~/.ssh/koinu
-              chmod 600 ~/.ssh/koinu
-              ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-              GIT_SSH_COMMAND="ssh -i ~/.ssh/koinu -o IdentitiesOnly=yes" \
-                  git clone --recurse-submodules git@github.com:xanimo/koinu koinu
-              echo "cloned koinu with the deploy key"
-          else
-              echo "koinu is not reachable and no KOINU_DEPLOY_KEY is set:"
-              echo "skipping the confirmation backend"
-              exit 0
-          fi
-          make -C koinu -j"$(nproc)"
-          ./koinu/kw 2>&1 | head -1
-      - run: |
-          KWBIN=""
-          [ -x "$GITHUB_WORKSPACE/koinu/kw" ] && KWBIN="$GITHUB_WORKSPACE/koinu/kw"
-          CLI="$GITHUB_WORKSPACE/doge-cli" KW="$KWBIN" ./contrib/regtest.sh
+          chmod +x koinu/kw
+          CLI="$GITHUB_WORKSPACE/doge-cli" KW="$GITHUB_WORKSPACE/koinu/kw" \
+              ./contrib/regtest.sh
       - if: failure()
         run: docker logs doge-ci
 
-  # both peer-facing parsers under asan and ubsan. setarch -R because asan's
+  # the peer-facing parsers under asan and ubsan. setarch -R because asan's
   # shadow mapping collides with aslr before libFuzzer prints its banner.
   fuzz:
-    needs: libdogecoin
+    needs: koinu
     runs-on: ubuntu-24.04
     env:
       ASAN_OPTIONS: detect_leaks=0
@@ -153,12 +127,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: staged
-          path: staged
+          name: koinu
+          path: koinu
       - run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev clang
-      - run: make LIBDOGECOIN="$GITHUB_WORKSPACE/staged" fuzz
+          sudo apt-get install -y --no-install-recommends clang
+      - run: make KOINU="$GITHUB_WORKSPACE/koinu" fuzz
       - run: |
           for f in envelope txcheck opening refund payment; do
               mkdir -p "work-$f"
