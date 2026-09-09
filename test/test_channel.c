@@ -12,14 +12,47 @@
 #include "refund.h"
 #include "state.h"
 
+#include "ec.h"
+#include "address.h"
+#include "base58.h"
+#include "tx.h"
+#include "rng.h"
+
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* koinu shims for the libdogecoin key helpers the tests were written against,
+   kept under the same names and shapes so the call sites do not change. */
+static int generatePrivPubKeypair(char *wif, char *addr, int is_test)
+{
+    uint8_t sk[32], pub[33];
+    if (!kw_random_bytes(sk, sizeof(sk)) || !kw_ec_pubkey(sk, pub)) return 0;
+    const kw_chainparams *cp = is_test ? &KW_DOGE_TESTNET : &KW_DOGE_MAINNET;
+    int ok = kw_wif_encode(sk, 1, cp->wif, wif, PRIVKEYWIFLEN) &&
+             (!addr || kw_address_p2pkh(pub, cp->p2pkh, addr, P2PKHLEN));
+    { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
+    return ok;
+}
+static int getPubkeyFromPrivkey(const char *wif, int is_test, char *pubhex, size_t *plen)
+{
+    (void)is_test;
+    uint8_t sk[32], pub[33];
+    int comp = 0;
+    uint8_t ver = 0;
+    int ok = kw_wif_decode(wif, sk, &comp, &ver) && kw_ec_pubkey(sk, pub);
+    { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
+    if (!ok) return 0;
+    pc_bin_to_hex(pub, 33, pubhex);
+    if (plen) *plen = 66;
+    return 1;
+}
 
 static int failures = 0;
 static int checks   = 0;
@@ -41,10 +74,8 @@ static int hex_bytes(const char *hex, unsigned char **out, size_t *outlen)
     if (n == 0 || (n % 2)) return 0;
     unsigned char *b = (unsigned char *)malloc(n / 2 + 1);
     if (!b) return 0;
-    size_t got = 0;
-    utils_hex_to_bin(hex, b, n, &got);
-    if (got != n / 2) { free(b); return 0; }
-    *out = b; *outlen = got;
+    if (!pc_hex_to_bin(hex, b, n / 2)) { free(b); return 0; }
+    *out = b; *outlen = n / 2;
     return 1;
 }
 
@@ -67,8 +98,7 @@ static size_t adversary_bytes(const pc_channel *ch, const unsigned char *bob160,
     n += put_u64le(o + n, 1, 4);
     o[n++] = 0x01;
     unsigned char txid[32];
-    size_t tn = 0;
-    utils_hex_to_bin(ch->funding_txid, txid, 64, &tn);
+    pc_hex_to_bin(ch->funding_txid, txid, 32);
     for (int i = 0; i < 32; i++) o[n + i] = txid[31 - i];
     n += 32;
     n += put_u64le(o + n, (uint64_t)ch->funding_vout, 4);
@@ -98,19 +128,20 @@ static char *build_adversary(const pc_channel *ch, const char *alice_wif,
                              uint64_t v_bob, uint64_t v_chg)
 {
     unsigned char bh[64], ah[64];
-    if (dogecoin_base58_decode_check(bob_addr, bh, sizeof(bh)) != 25) return NULL;
-    if (dogecoin_base58_decode_check(alice_addr, ah, sizeof(ah)) != 25) return NULL;
+    size_t bhn = 0, ahn = 0;
+    if (!kw_base58check_decode(bob_addr, bh, sizeof(bh), &bhn) || bhn != 21) return NULL;
+    if (!kw_base58check_decode(alice_addr, ah, sizeof(ah), &ahn) || ahn != 21) return NULL;
 
     unsigned char redeem[520];
-    size_t rlen = 0;
-    utils_hex_to_bin(ch->redeem_script_hex, redeem,
-                     strlen(ch->redeem_script_hex), &rlen);
+    size_t rlen = strlen(ch->redeem_script_hex) / 2;
+    if (rlen > sizeof(redeem) || !pc_hex_to_bin(ch->redeem_script_hex, redeem, rlen))
+        return NULL;
 
     unsigned char buf[2048];
     size_t un = adversary_bytes(ch, bh + 1, ah + 1, v_bob, v_chg, NULL, 0, buf);
     char *uhex = (char *)malloc(un * 2 + 1);
     if (!uhex) return NULL;
-    utils_bin_to_hex(buf, un, uhex);
+    pc_bin_to_hex(buf, un, uhex);
 
     unsigned char hash[32];
     if (pc_tx_sighash(uhex, redeem, rlen, hash) != PC_OK) { free(uhex); return NULL; }
@@ -120,12 +151,12 @@ static char *build_adversary(const pc_channel *ch, const char *alice_wif,
     size_t sl[2] = { sizeof(sig[0]), sizeof(sig[1]) };
     const char *wifs[2] = { alice_wif, bob_wif };
     for (int k = 0; k < 2; k++) {
-        dogecoin_key key;
-        dogecoin_privkey_init(&key);
-        if (!dogecoin_privkey_decode_wif((char *)wifs[k],
-                                         pc_chainparams(ch->chain), &key)) return NULL;
-        int ok = dogecoin_ecc_sign(key.privkey, hash, sig[k], &sl[k]);
-        dogecoin_privkey_cleanse(&key);
+        uint8_t sk[32];
+        int comp = 0;
+        uint8_t ver = 0;
+        if (!kw_wif_decode(wifs[k], sk, &comp, &ver)) return NULL;
+        int ok = kw_ec_sign(sk, hash, sig[k], &sl[k]);
+        { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
         if (!ok) return NULL;
         sig[k][sl[k]++] = 0x01;
     }
@@ -145,7 +176,7 @@ static char *build_adversary(const pc_channel *ch, const char *alice_wif,
     size_t fn = adversary_bytes(ch, bh + 1, ah + 1, v_bob, v_chg, ss, sn, buf);
     char *hex = (char *)malloc(fn * 2 + 1);
     if (!hex) return NULL;
-    utils_bin_to_hex(buf, fn, hex);
+    pc_bin_to_hex(buf, fn, hex);
     return hex;
 }
 
@@ -159,48 +190,51 @@ static char *build_adversary(const pc_channel *ch, const char *alice_wif,
     }                                                           \
 } while (0)
 
-/* A funding transaction paying the channel's P2SH address. Built through the
- * overlay so the test uses only the public surface, same as the library does. */
+/* A funding transaction paying the channel's P2SH address, built with kw_tx.
+ * Never signed or broadcast; nothing verifies its input in this test. */
 static char *make_funding_tx(const char *p2sh_addr, const char *change_addr,
                              const char *doge_amount, const char *total,
                              char *txid_out)
 {
-    int tix = start_transaction();
-    if (tix < 0) return NULL;
-    /* any prevout will do: nothing verifies it in this test */
-    if (!add_utxo(tix,
-        (char *)"b4455e7b7b7acb51fb6feba7a2702c42a5100f61f61abafa31851ed6ae076074", 0))
-        return NULL;
-    if (!add_output(tix, (char *)p2sh_addr, (char *)doge_amount)) return NULL;
-    char *hex = (char *)malloc(DOGECOIN_MAX_TX_HEX_LEN);
-    if (!hex) return NULL;
-    if (!finalize_transaction_ex(tix, (char *)p2sh_addr, (char *)"1.0",
-                                 (char *)total, (char *)change_addr,
-                                 hex, DOGECOIN_MAX_TX_HEX_LEN)) {
-        free(hex);
-        return NULL;
-    }
+    uint64_t amt = 0, tot = 0;
+    if (pc_doge_to_koinu(doge_amount, &amt) != PC_OK ||
+        pc_doge_to_koinu(total, &tot) != PC_OK) return NULL;
+    if (tot < amt + 100000000ULL) return NULL;           /* fee of 1.0 */
+    uint64_t change = tot - amt - 100000000ULL;
 
-    /* the txid, in display order */
-    size_t hl = strlen(hex), blen = 0;
-    unsigned char *b = malloc(hl / 2 + 1);
-    utils_hex_to_bin(hex, b, hl, &blen);
-    dogecoin_tx *tx = dogecoin_tx_new();
-    dogecoin_tx_deserialize(b, blen, tx, NULL);
-    free(b);
-    uint256_t txid;
-    dogecoin_tx_hash(tx, txid);
-    unsigned char rev[32];
+    uint8_t praw[64], craw[64];
+    size_t pn = 0, cn = 0;
+    if (!kw_base58check_decode(p2sh_addr, praw, sizeof(praw), &pn) || pn != 21 ||
+        !kw_base58check_decode(change_addr, craw, sizeof(craw), &cn) || cn != 21)
+        return NULL;
+    uint8_t spk[23];
+    spk[0] = 0xa9; spk[1] = 0x14; memcpy(spk + 2, praw + 1, 20); spk[22] = 0x87;
+
+    kw_tx tx;
+    kw_tx_init(&tx);
+    if (!kw_tx_add_input(&tx,
+        "b4455e7b7b7acb51fb6feba7a2702c42a5100f61f61abafa31851ed6ae076074", 0) ||
+        !kw_tx_add_output(&tx, amt, spk, sizeof(spk)) ||
+        (change > 0 && !kw_tx_add_output_p2pkh(&tx, change, craw + 1)))
+        return NULL;
+
+    uint8_t raw[8192];
+    size_t n = kw_tx_serialize(&tx, raw, sizeof(raw));
+    if (n == 0) return NULL;
+    char *hex = (char *)malloc(n * 2 + 1);
+    if (!hex) return NULL;
+    pc_bin_to_hex(raw, n, hex);
+
+    uint8_t txid[32], rev[32];
+    if (!kw_tx_txid(&tx, txid)) { free(hex); return NULL; }
     for (int i = 0; i < 32; i++) rev[i] = txid[31 - i];
-    utils_bin_to_hex(rev, 32, txid_out);
-    dogecoin_tx_free(tx);
-    remove_all();
+    pc_bin_to_hex(rev, 32, txid_out);
     return hex;
 }
 
 int main(void)
 {
-    dogecoin_ecc_start();
+    kw_ec_start();
 
     /* ── two parties ─────────────────────────────────────────── */
     char alice_wif[PRIVKEYWIFLEN], alice_addr[P2PKHLEN];
@@ -227,10 +261,8 @@ int main(void)
         char nulled[9];
         memcpy(nulled, "deadbeef", 9);
         nulled[4] = '\0';
-        size_t n = 99;
-        utils_hex_to_bin(nulled, o, 8, &n);
-        CHECK(n <= 4, "hex: the shipped converter writes no more than asked");
-        CHECK(!pc_hex_to_bin(nulled, o, 4), "hex: and this one refuses it");
+        CHECK(!pc_hex_to_bin(nulled, o, 4),
+              "hex: a short hex string is refused, not half-converted");
     }
 
     /* The minimal-push rule in pc_refund_walk(). The canonical script is 116
@@ -438,8 +470,13 @@ int main(void)
 
     /* the script must round-trip to the same address independently */
     char again[P2SHLEN];
-    CHECK(get_p2sh_address_from_script(ch.redeem_script_hex, 0, again, sizeof(again)),
-          "address from script");
+    {
+        unsigned char rb[520];
+        size_t rl = strlen(ch.redeem_script_hex) / 2;
+        CHECK(rl <= sizeof(rb) && pc_hex_to_bin(ch.redeem_script_hex, rb, rl) &&
+              kw_address_p2sh(rb, rl, KW_DOGE_MAINNET.p2sh, again, sizeof(again)),
+              "address from script");
+    }
     CHECK(strcmp(again, ch.p2sh_address) == 0, "address is deterministic");
 
     /* a different locktime must give a different channel */
@@ -681,7 +718,7 @@ int main(void)
                       "an output under the hard dust limit is refused");
                 free(dusty);
             }
-            dogecoin_free(raw);
+            free(raw);
         }
 
         /* Bob alone cannot countersign a payment Alice never signed */
@@ -690,9 +727,9 @@ int main(void)
         pc_channel_init(&empty, alice_pub, bob_pub, 300000, 0);
         CHECK(pc_payment_countersign(&empty, "not hex", bob_wif, &nope) != PC_OK,
               "garbage psbt refused");
-        dogecoin_free(psbt2);
+        free(psbt2);
     }
-    if (psbt1) dogecoin_free(psbt1);
+    if (psbt1) free(psbt1);
 
     /* ── the opening handshake ───────────────────────────────── */
     {
@@ -763,7 +800,7 @@ int main(void)
                                          1000, 100, &cap) != PC_OK,
                   "an opening naming someone else is refused");
 
-            dogecoin_free(open_psbt);
+            free(open_psbt);
         }
     }
 
@@ -774,8 +811,9 @@ int main(void)
                  "refund built");
         if (refund) {
             unsigned char rb[520];
-            size_t rl2 = 0;
-            utils_hex_to_bin(ch.redeem_script_hex, rb, strlen(ch.redeem_script_hex), &rl2);
+            size_t rl2 = strlen(ch.redeem_script_hex) / 2;
+            if (rl2 > sizeof(rb)) rl2 = 0;
+            else pc_hex_to_bin(ch.redeem_script_hex, rb, rl2);
 
             /* it spends the funding outpoint and pays alice */
             CHECK(strstr(refund, ch.redeem_script_hex) != NULL,
@@ -822,29 +860,26 @@ int main(void)
                 unsigned char h[32];
                 CHECK_OK(pc_tx_sighash(refund, rb, rl2, h), "refund sighash");
                 unsigned char apub[33];
-                size_t an = 0;
-                utils_hex_to_bin(ch.alice_pubkey_hex, apub, 66, &an);
-                CHECK(an == 33, "alice's key decodes");
+                CHECK(pc_hex_to_bin(ch.alice_pubkey_hex, apub, 33), "alice's key decodes");
                 CHECK(sig[siglen - 1] == 0x01, "hashtype is SIGHASH_ALL");
-                CHECK(dogecoin_ecc_verify_sig(apub, true, h,
-                                              (unsigned char *)sig, siglen - 1),
+                CHECK(kw_ec_verify(apub, h, sig, siglen - 1),
                       "alice's refund signature verifies");
                 unsigned char h2[32];
                 memcpy(h2, h, sizeof(h2));
                 h2[0] ^= 0xff;
-                CHECK(!dogecoin_ecc_verify_sig(apub, true, h2,
-                                               (unsigned char *)sig, siglen - 1),
+                CHECK(!kw_ec_verify(apub, h2, sig, siglen - 1),
                       "and does not verify against a different digest");
 
                 /* it pays alice's hash160, not merely someone's */
                 uint8_t ad[64];
-                CHECK(dogecoin_base58_decode_check(alice_addr, ad, sizeof(ad)) == 25,
+                size_t adn = 0;
+                CHECK(kw_base58check_decode(alice_addr, ad, sizeof(ad), &adn) && adn == 21,
                       "alice's address decodes");
                 CHECK(memcmp(rawb + rawn - 26, ad + 1, 20) == 0,
                       "the refund output pays alice's hash160");
                 free(rawb);
             }
-            dogecoin_free(refund);
+            free(refund);
         }
         CHECK(pc_refund_create(&ch, alice_wif, alice_addr, 0, &refund) == PC_ERR_AMOUNT,
               "a zero-fee refund is refused");
@@ -1072,7 +1107,7 @@ int main(void)
     }
 
 done:
-    dogecoin_ecc_stop();
+    kw_ec_stop();
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
