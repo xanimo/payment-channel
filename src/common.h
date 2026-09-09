@@ -31,6 +31,9 @@
 
 #include "channel.h"
 #include "wire.h"
+#include "hex.h"
+#include "ec.h"
+#include "address.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -41,26 +44,33 @@
 
 #define PC_DEFAULT_PORT 9876
 
+/* Wipe key material through a volatile pointer so the clear is not optimized
+   away. */
+static inline void pc_wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    while (n--) *v++ = 0;
+}
+
 /* Derive the compressed pubkey hex and the p2pkh address a WIF key controls. */
 static inline int pc_identity(const char *wif, pc_chain which,
                        char pubkey_hex[PUBKEYHEXLEN], char addr[P2PKHLEN])
 {
-    const dogecoin_chainparams *chain = pc_chainparams(which);
+    const kw_chainparams *cp = pc_chainparams(which);
 
-    dogecoin_key key;
-    dogecoin_privkey_init(&key);
-    if (!dogecoin_privkey_decode_wif((char *)wif, chain, &key)) return 0;
+    uint8_t sk[32], pub[33];
+    int compressed = 0;
+    uint8_t ver = 0;
+    if (!kw_wif_decode(wif, sk, &compressed, &ver) || ver != cp->wif) {
+        pc_wipe(sk, sizeof sk);
+        return 0;
+    }
+    int ok = kw_ec_pubkey(sk, pub);
+    pc_wipe(sk, sizeof sk);
+    if (!ok) return 0;
 
-    dogecoin_pubkey pub;
-    dogecoin_pubkey_init(&pub);
-    pub.compressed = true;
-    dogecoin_pubkey_from_key(&key, &pub);
-    dogecoin_privkey_cleanse(&key);
-
-    if (!pub.compressed) return 0;
-    utils_bin_to_hex(pub.pubkey, 33, pubkey_hex);
-    if (!dogecoin_pubkey_getaddr_p2pkh(&pub, chain, addr)) return 0;
-    return 1;
+    pc_bin_to_hex(pub, 33, pubkey_hex);
+    return kw_address_p2pkh(pub, cp->p2pkh, addr, P2PKHLEN) ? 1 : 0;
 }
 
 /* Derive the p2pkh address a compressed pubkey controls, no private key. This is
@@ -69,14 +79,10 @@ static inline int pc_identity(const char *wif, pc_chain which,
 static inline int pc_identity_pub(const char *pubkey_hex, pc_chain which,
                                   char addr[P2PKHLEN])
 {
-    if (strlen(pubkey_hex) != 66) return 0;
-    dogecoin_pubkey pub;
-    dogecoin_pubkey_init(&pub);
-    pub.compressed = true;
-    size_t n = 0;
-    utils_hex_to_bin(pubkey_hex, pub.pubkey, 66, &n);
-    if (n != 33 || !dogecoin_pubkey_is_valid(&pub)) return 0;
-    return dogecoin_pubkey_getaddr_p2pkh(&pub, pc_chainparams(which), addr) ? 1 : 0;
+    uint8_t raw[33], pub[33];
+    if (strlen(pubkey_hex) != 66 || !pc_hex_to_bin(pubkey_hex, raw, 33)) return 0;
+    if (!kw_ec_pubkey_parse(raw, 33, pub)) return 0;   /* rejects a non-point */
+    return kw_address_p2pkh(pub, pc_chainparams(which)->p2pkh, addr, P2PKHLEN) ? 1 : 0;
 }
 
 /* "txid:vout" */
