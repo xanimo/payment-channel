@@ -252,12 +252,9 @@ int main(void)
         CHECK(!pc_hex_to_bin("deadbeeg", o, 4), "hex: a non-hex digit is refused");
         CHECK(!pc_hex_to_bin("", o, 4), "hex: empty is refused");
 
-        /* The same short string through the shipped converter. Its out-count
-           is deliberately not asserted: before depends/patches 0009 it reports
-           inLen / 2 whatever the string held, after it reports what converted,
-           and the point of pc_hex_to_bin() is that this program does not depend
-           on which. Asserting the broken value pinned the bug, and the patch
-           turned that assertion red, which is how this comment got written. */
+        /* A short string stops at the NUL rather than half-converting.
+           libdogecoin's utils_hex_to_bin reported inLen / 2 whatever the string
+           held, and carrying our own is why that never had to be worked around. */
         char nulled[9];
         memcpy(nulled, "deadbeef", 9);
         nulled[4] = '\0';

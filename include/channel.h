@@ -272,10 +272,11 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
  * matched as scripts, not addresses: base58 encoding has nothing to do with
  * whether the money arrives.
  *
- * This parses the raw transaction here rather than through libdogecoin because
- * dogecoin_tx is opaque in the published header and no PSBT accessor reports an
- * input's prevout or an output's value, so a receiving party cannot check what
- * it is being paid using the shipped surface alone. */
+ * This parses the raw transaction here rather than calling koinu's kw_tx_parse
+ * because the checks run over the same bytes the digest is computed on and need
+ * the exact scriptSig byte range to splice the script code in. Under
+ * libdogecoin there was no choice: dogecoin_tx was opaque and no PSBT accessor
+ * reported an input's prevout or an output's value. */
 pc_result pc_tx_verify_payment(const pc_channel *ch,
                                const char *raw_tx_hex,
                                uint64_t claimed_to_bob_koinu);
@@ -321,9 +322,10 @@ uint64_t pc_fee_for_feerate(uint64_t koinu_per_kb, size_t txbytes);
 #define PC_TYPICAL_TX_BYTES 400
 
 /* The legacy SIGHASH_ALL digest for the single input of (raw_tx_hex), with
- * (script_code) standing in where the scriptSig sits. Computed here because
- * dogecoin_tx_sighash() is LIBDOGECOIN_API but declared in tx.h, which is not
- * an installed header. */
+ * (script_code) standing in where the scriptSig sits. Computed here rather than
+ * through koinu's kw_tx_sighash() so it stays a second, independent
+ * implementation of the digest; see sighash_all() in src/txcheck.c for why that
+ * is deliberate. */
 pc_result pc_tx_sighash(const char *raw_tx_hex,
                         const unsigned char *script_code, size_t sclen,
                         unsigned char out[32]);

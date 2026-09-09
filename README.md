@@ -1,6 +1,6 @@
 # payment-channel
 
-a unidirectional dogecoin payment channel in c, built on libdogecoin. alice
+a unidirectional dogecoin payment channel in c, built on koinu. alice
 locks coins in a 2-of-2 p2sh output with a timelocked refund branch, then hands
 bob a series of partially signed transactions that each pay him more than the
 last. bob holds them and broadcasts only the newest. nothing goes on chain
@@ -36,18 +36,16 @@ reading of the script.
 
 ## building
 
-this does not build against any released libdogecoin, and will not for the
-foreseeable future. it needs entry points that exist upstream but are not in a
-release: #454, #455, #456, #457 and #459 for the build, and #461 for
-`contrib/regtest.sh` to pass reliably. none of them are merged and none of them
-have a timeline, so do not wait for one.
+the crypto, transactions, psbt and base58 come from koinu, which is a released
+static library. point `KOINU` at a koinu checkout built at tag v0.2.1 or later,
+where its own `make` produces `libkw.a` and the bundled secp256k1.
 
-the patches are archived in depends/patches so the build is reproducible from
-this repo alone. see the README there; it is eight patches onto `0.1.5-dev` at
-bf3f9df4, and they apply and build clean.
+    make KOINU=/path/to/koinu
+    make KOINU=/path/to/koinu check
 
-    make LIBDOGECOIN=/path/to/staged/install
-    make LIBDOGECOIN=/path/to/staged/install check
+this used to build against an unreleased libdogecoin fork and needed nine
+patches to do it. those are archived in depends/patches and are no longer part
+of the build.
 
 `make check` runs the protocol test and then runs alice against bob over a
 socket with a locally minted funding transaction, including a peer that
@@ -61,8 +59,8 @@ pick the chain with `--testnet` or `--regtest`. it is not a boolean because
 dogecoin regtest shares testnet's p2sh prefix but not its p2pkh one, 0x6f
 against 0x71, so testnet parameters against a regtest node print addresses the
 node does not recognise even though the scripts are identical. the same reason
-`generatePrivPubKeypair` cannot mint a regtest key: it takes a boolean, and
-regtest's 0xef wif prefix is neither of the two it can produce.
+the tests' `generatePrivPubKeypair` shim cannot mint a regtest key: it takes a
+boolean, and regtest's 0xef wif prefix is neither of the two it can produce.
 
 ## running it
 
@@ -236,10 +234,12 @@ he reads off the funding output, not what he is told it is worth.
 
 every payment is countersigned and then parsed before it counts. bob's signature
 never leaves his process, so assembling the transaction first is free, and it is
-the only way to see the outpoint and the amounts: `dogecoin_tx` is opaque in the
-published libdogecoin header and no psbt accessor reports an input's prevout or
-an output's value, so a receiving party cannot check what it is being paid
-through the shipped surface. src/txcheck.c parses the transaction instead.
+the only way to see the outpoint and the amounts. src/txcheck.c parses the
+serialized transaction itself rather than calling koinu's `kw_tx_parse`, since
+the checks run over the same bytes the digest is computed on and need the exact
+scriptsig byte range to splice the script code in. under libdogecoin there was
+no choice: `dogecoin_tx` was opaque and no psbt accessor reported an input's
+prevout or an output's value.
 
 a payment is money only if it spends the funding outpoint bob confirmed, pays
 bob at least what was claimed, spends no more than the capacity, and pays him
@@ -267,12 +267,12 @@ change output would leave bob's newest state worthless and send him back to an
 older one, and an output under the soft limit adds a full soft limit to the fee
 the transaction owes.
 
-the sighash those signatures are checked against is computed in src/txcheck.c,
-because `dogecoin_tx_sighash` is `LIBDOGECOIN_API` but declared in `tx.h`, which
-is not an installed header. that makes this a second implementation of a
-consensus-critical digest, so bob's own signature is verified alongside alice's:
-his came from libdogecoin's signer, so if the two ever stop agreeing the honest
-path fails on the next payment rather than a forgery passing quietly.
+the sighash those signatures are checked against is computed in src/txcheck.c
+too. koinu's `kw_tx_signature` computes the same digest and pc signs through it,
+so this is a second, independent implementation of a consensus-critical digest.
+bob's own signature is verified alongside alice's to keep the two from drifting:
+his came from koinu's signer, so if they ever stop agreeing the honest path
+fails on the next payment rather than a forgery passing quietly.
 
 ## deployment
 
