@@ -207,7 +207,7 @@ static int sighash_all(const unsigned char *tx, size_t txlen,
     return 1;
 }
 
-/* Both signatures are checked, not just Alice's. Bob's came from libdogecoin's
+/* Both signatures are checked, not just Alice's. Bob's came from koinu's
    signer, so a digest that verifies his verifies that this computation agrees
    with the one that produced it, and a mistake here fails on the honest path
    instead of passing a forgery. */
