@@ -308,6 +308,12 @@ _Static_assert(PC_MAX_OUTPUTS <= UINT64_MAX / PC_MAX_MONEY_KOINU,
  * never mined. */
 uint64_t pc_min_fee(size_t txbytes, size_t soft_dust_outputs);
 
+/* The absolute fee a transaction of (txbytes) owes at (koinu_per_kb), the
+ * CFeeRate::GetFee() proportional rate a node's estimatefee reports in DOGE/kB.
+ * Lets a caller size a live feerate; it does not floor, so pass the result
+ * through max(., pc_min_fee(...)) before spending. */
+uint64_t pc_fee_for_feerate(uint64_t koinu_per_kb, size_t txbytes);
+
 /* Roughly what a payment on this channel serializes to: one input carrying two
  * signatures and the redeem script, and two p2pkh outputs. Alice cannot know
  * the real size before Bob countersigns, so this is what she sizes her fee

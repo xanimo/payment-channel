@@ -83,6 +83,7 @@ check: $(TESTS) $(BINS)
 	./test/keyguard.sh
 	./test/signer.sh
 	./test/replicate.sh
+	./test/feerate.sh
 
 clean:
 	rm -f $(BINS) $(TESTS) src/*.o test/*.o

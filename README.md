@@ -202,6 +202,24 @@ without it she trusts whatever he announces, and the transport is plain tcp in
 the clear. both take `--pubkey` to print their own key. see doc/PROTOCOL.md for
 the wire format.
 
+alice pays a flat `--fee` which defaults to 1.0 doge. `--feerate` sizes it from
+a rate in doge/kB instead, and `--feerate-cmd` runs a command for that rate, so
+a node's own estimate drives it:
+
+    $ alice --wif $ALICE_WIF --peer-pubkey $BOB_PUB --locktime 5200000 \
+            --funding-tx @funding.hex --max 100.0 \
+            --feerate-cmd 'dogecoin-cli estimatefee 6' \
+            --connect 127.0.0.1:9876 --close
+
+the rate is applied to 400 bytes which is what a payment serializes to, since
+the real size is not known until bob countersigns, and the result never falls
+under the policy floor of 0.00400000 doge. `estimatefee` prints -1 when it has
+too little history to answer, and that, a failing command or an unparseable
+line all fall back to the floor rather than block a close alice needs to make.
+the fee she settles on is printed on stderr. it sizes the refund below the same
+way, where paying the current network rate is what a time-critical unilateral
+close wants.
+
 if bob stops answering, alice takes the money back through the timelocked
 branch. it needs no peer, which is the situation it is for, and the transaction
 it prints is worthless to anyone until the locktime passes.
