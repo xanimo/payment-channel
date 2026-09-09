@@ -143,11 +143,21 @@ over the state directory that broadcasts anything within `--sweep-margin` blocks
 of its locktime and retires it. it skips a channel a live session is holding,
 and retires without sending when the funding output has gone rather than
 broadcasting something that cannot confirm. it signs nothing, so it needs no
-key. run it from cron or a systemd timer, more often than the margin is wide:
+key.
 
-    $ bob --sweep --state channels --height-file height.txt \
+a missed sweep is lost principal, so it runs as a service rather than a cron
+line that can quietly stop being installed. `--watch SEC` loops the pass every
+SEC seconds and stops cleanly on SIGTERM, which is what `contrib/bob-sweep.service`
+runs. `--warn-margin N` reports a channel N blocks from its locktime before it is
+due, `--alert-cmd CMD` is run as `CMD "<reason>"` when one is approaching or a
+funding is undetermined or the height feed goes stale, and every pass prints a
+`sweep-status` line carrying the counts and `at_risk_koinu`, the money bob is
+holding that the chain has not yet made final, for a monitor to scrape:
+
+    $ bob --sweep --state channels --height-file height.txt --watch 60 \
           --broadcast-cmd "kw send --node NODE" \
-          --confirm-cmd "kw outpoint --node NODE" --sweep-margin 50
+          --confirm-cmd "kw outpoint --node NODE" \
+          --sweep-margin 50 --warn-margin 200 --alert-cmd "notify-ops"
 
 the margin is a margin rather than a deadline. sweeping early costs a customer
 the rest of the channel; sweeping late costs bob the payment.

@@ -1,0 +1,66 @@
+# The sweep as a service, not a cron line. A missed sweep is lost principal, so
+# this runs bob --sweep --watch under the supervisor, restarting on failure and
+# emitting a sweep-status line each pass for a monitor to scrape. It signs
+# nothing, so unlike bob.service it has no key: what it needs is write access to
+# the state directory and a height file that tracks the chain.
+#
+#   useradd --system --no-create-home --shell /usr/sbin/nologin bob
+#   install -d -o bob -g bob -m 0700 /var/lib/payment-channel/channels
+#   systemctl enable --now bob-sweep
+#
+# Point --confirm-cmd and --broadcast-cmd at your koinu backend, and --alert-cmd
+# at whatever pages an operator. Run --watch more often than --sweep-margin is
+# wide. See README "running it".
+
+[Unit]
+Description=payment channel sweep (deadline safety net)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bob
+Group=bob
+# --watch loops the pass; --warn-margin reports a channel before it is due;
+# --alert-cmd is run on anything an operator must not sit on. The height file is
+# written by whatever can see the chain (e.g. dogecoin-cli getblockcount).
+ExecStart=/usr/local/bin/bob --sweep --watch 60 \
+    --state /var/lib/payment-channel/channels \
+    --height-file /var/lib/payment-channel/height.txt --height-max-age 600 \
+    --broadcast-cmd "kw send --node NODE" \
+    --confirm-cmd "kw outpoint --node NODE" \
+    --sweep-margin 50 --warn-margin 200 --alert-cmd "/usr/local/bin/notify-ops"
+# SIGTERM is handled: the loop finishes its sleep and exits between passes.
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+
+# The state directory is the only thing it writes; the height file it only reads.
+ReadWritePaths=/var/lib/payment-channel/channels
+ReadOnlyPaths=/var/lib/payment-channel/height.txt
+
+# Sandbox: no privileges, no new ones, minimal view of the system.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# It forks the confirm/broadcast/alert backends over an inet socket; nothing else.
+RestrictAddressFamilies=AF_INET AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+TasksMax=64
+MemoryMax=256M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target
