@@ -290,8 +290,8 @@ pc_result pc_redeem_parse(const char *redeem_hex, char alice_pubkey_hex[PUBKEYHE
     if (memcmp(b + alice_at, b + alice2_at, 33) != 0) goto out;
     if (locktime == 0 || locktime >= 500000000u) goto out;
 
-    utils_bin_to_hex(b + alice_at, 33, alice_pubkey_hex);
-    utils_bin_to_hex(b + bob_at,   33, bob_pubkey_hex);
+    pc_bin_to_hex(b + alice_at, 33, alice_pubkey_hex);
+    pc_bin_to_hex(b + bob_at,   33, bob_pubkey_hex);
     if (locktime_out) *locktime_out = locktime;
     rc = PC_OK;
 out:
@@ -323,7 +323,7 @@ static int unsigned_1in_0out(const char *txid_display, uint32_t vout,
     tx[i++] = 0x00; tx[i++] = 0x00; tx[i++] = 0x00; tx[i++] = 0x00;  /* locktime */
 
     if (i * 2 + 1 > cap) return 0;
-    utils_bin_to_hex(tx, i, out);
+    pc_bin_to_hex(tx, i, out);
     return 1;
 }
 
@@ -412,7 +412,7 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
     if (!dogecoin_psbt_input_get_redeemscript(psbt, 0, rbuf, sizeof(rbuf), &rlen)) goto out;
     char rhex[PC_MAX_SCRIPT_HEX];
     if (rlen * 2 + 1 > sizeof(rhex)) goto out;
-    utils_bin_to_hex(rbuf, rlen, rhex);
+    pc_bin_to_hex(rbuf, rlen, rhex);
     if (strcmp(rhex, ch->redeem_script_hex) != 0) goto out;
 
     r = pc_channel_set_funding(ch, txid, vout, value);
@@ -549,7 +549,7 @@ pc_result pc_payment_accept(pc_channel *ch, const char *psbt_hex,
     if (!dogecoin_psbt_input_get_redeemscript(psbt, 0, rbuf, sizeof(rbuf), &rlen)) goto out;
     char rhex[PC_MAX_SCRIPT_HEX];
     if (rlen * 2 + 1 > sizeof(rhex)) goto out;
-    utils_bin_to_hex(rbuf, rlen, rhex);
+    pc_bin_to_hex(rbuf, rlen, rhex);
     if (strcmp(rhex, ch->redeem_script_hex) != 0) goto out;
 
     ch->paid_to_bob_koinu = claimed_to_bob_koinu;
@@ -599,7 +599,7 @@ static pc_result assemble_two_sig(const pc_channel *ch, dogecoin_psbt *psbt,
         if (pklen[i] != sizeof(pk[i])) goto out;
     }
     char pkhex[2][PUBKEYHEXLEN];
-    for (size_t i = 0; i < 2; i++) utils_bin_to_hex(pk[i], pklen[i], pkhex[i]);
+    for (size_t i = 0; i < 2; i++) pc_bin_to_hex(pk[i], pklen[i], pkhex[i]);
     int alice_idx = (strcmp(pkhex[0], ch->alice_pubkey_hex) == 0) ? 0 : 1;
     int bob_idx   = alice_idx ^ 1;
     if (strcmp(pkhex[alice_idx], ch->alice_pubkey_hex) != 0 ||
@@ -898,7 +898,7 @@ pc_result pc_refund_create(const pc_channel *ch,
     if (un == 0) { rc = PC_ERR_STATE; goto out; }
     hex = (char *)malloc(un * 2 + 1);
     if (!hex) { rc = PC_ERR_ARG; goto out; }
-    utils_bin_to_hex(buf, un, hex);
+    pc_bin_to_hex(buf, un, hex);
 
     unsigned char hash[32];
     rc = pc_tx_sighash(hex, redeem, rlen, hash);
@@ -974,7 +974,7 @@ pc_result pc_refund_create(const pc_channel *ch,
        library's mem mapper, so it has to come from dogecoin_malloc() */
     char *outhex = (char *)dogecoin_malloc(fn * 2 + 1);
     if (!outhex) { rc = PC_ERR_ARG; goto out; }
-    utils_bin_to_hex(buf, fn, outhex);
+    pc_bin_to_hex(buf, fn, outhex);
 
     /* And the complement of the walk, which stops at the end of the scriptSig
        and never reads the sequence, the outputs or the locktime. Those are
