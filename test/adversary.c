@@ -66,7 +66,7 @@ int main(int argc, char **argv)
     }
     if (!wif || !peer || !ftx_arg || !which || !locktime) { usage(); return 2; }
 
-    dogecoin_ecc_start();
+    kw_ec_start();
     int rc = 1, fd = -1;
     char *funding_tx = NULL, *open_psbt = NULL;
 
@@ -166,9 +166,9 @@ int main(int argc, char **argv)
 
     usage();
 done:
-    if (open_psbt) dogecoin_free(open_psbt);
+    if (open_psbt) free(open_psbt);
     free(funding_tx);
     if (fd >= 0) close(fd);
-    dogecoin_ecc_stop();
+    kw_ec_stop();
     return rc;
 }

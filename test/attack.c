@@ -38,11 +38,42 @@
  * nothing, and it is not a crash, so no fuzzer reports it. */
 
 #include "channel.h"
+#include "hex.h"
+#include "ec.h"
+#include "address.h"
+#include "base58.h"
+#include "rng.h"
 
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* koinu shims for the libdogecoin key helpers, same names and shapes. */
+static int generatePrivPubKeypair(char *wif, char *addr, int is_test)
+{
+    uint8_t sk[32], pub[33];
+    if (!kw_random_bytes(sk, sizeof(sk)) || !kw_ec_pubkey(sk, pub)) return 0;
+    const kw_chainparams *cp = is_test ? &KW_DOGE_TESTNET : &KW_DOGE_MAINNET;
+    int ok = kw_wif_encode(sk, 1, cp->wif, wif, PRIVKEYWIFLEN) &&
+             (!addr || kw_address_p2pkh(pub, cp->p2pkh, addr, P2PKHLEN));
+    { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
+    return ok;
+}
+static int getPubkeyFromPrivkey(const char *wif, int is_test, char *pubhex, size_t *plen)
+{
+    (void)is_test;
+    uint8_t sk[32], pub[33];
+    int comp = 0;
+    uint8_t ver = 0;
+    int ok = kw_wif_decode(wif, sk, &comp, &ver) && kw_ec_pubkey(sk, pub);
+    { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
+    if (!ok) return 0;
+    pc_bin_to_hex(pub, 33, pubhex);
+    if (plen) *plen = 66;
+    return 1;
+}
 
 typedef struct { uint64_t value; unsigned char spk[64]; size_t spklen; } out_t;
 
@@ -60,8 +91,7 @@ static size_t ser(const pc_channel *ch, uint32_t version, uint32_t sequence,
     n += put_le(o + n, version, 4);
     o[n++] = 0x01;
     unsigned char txid[32];
-    size_t tn = 0;
-    utils_hex_to_bin(ch->funding_txid, txid, 64, &tn);
+    pc_hex_to_bin(ch->funding_txid, txid, 32);
     for (int i = 0; i < 32; i++) o[n + i] = txid[31 - i];
     n += 32;
     n += put_le(o + n, (uint64_t)ch->funding_vout, 4);
@@ -88,15 +118,15 @@ static char *forge(const pc_channel *ch, const char *awif, const char *bwif,
                    const out_t *outs, size_t nout)
 {
     unsigned char redeem[520];
-    size_t rlen = 0;
-    utils_hex_to_bin(ch->redeem_script_hex, redeem,
-                     strlen(ch->redeem_script_hex), &rlen);
+    size_t rlen = strlen(ch->redeem_script_hex) / 2;
+    if (rlen > sizeof(redeem) || !pc_hex_to_bin(ch->redeem_script_hex, redeem, rlen))
+        return NULL;
 
     unsigned char buf[4096];
     size_t un = ser(ch, version, sequence, locktime, outs, nout, NULL, 0, buf);
     char *uhex = (char *)malloc(un * 2 + 1);
     if (!uhex) return NULL;
-    utils_bin_to_hex(buf, un, uhex);
+    pc_bin_to_hex(buf, un, uhex);
 
     unsigned char hash[32];
     pc_result r = pc_tx_sighash(uhex, redeem, rlen, hash);
@@ -107,12 +137,12 @@ static char *forge(const pc_channel *ch, const char *awif, const char *bwif,
     size_t sl[2] = { sizeof(sig[0]), sizeof(sig[1]) };
     const char *wifs[2] = { awif, bwif };
     for (int k = 0; k < 2; k++) {
-        dogecoin_key key;
-        dogecoin_privkey_init(&key);
-        if (!dogecoin_privkey_decode_wif((char *)wifs[k],
-                                         pc_chainparams(ch->chain), &key)) return NULL;
-        int ok = dogecoin_ecc_sign(key.privkey, hash, sig[k], &sl[k]);
-        dogecoin_privkey_cleanse(&key);
+        uint8_t sk[32];
+        int comp = 0;
+        uint8_t ver = 0;
+        if (!kw_wif_decode(wifs[k], sk, &comp, &ver)) return NULL;
+        int ok = kw_ec_sign(sk, hash, sig[k], &sl[k]);
+        { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
         if (!ok) return NULL;
         sig[k][sl[k]++] = 0x01;
     }
@@ -132,7 +162,7 @@ static char *forge(const pc_channel *ch, const char *awif, const char *bwif,
     size_t fn = ser(ch, version, sequence, locktime, outs, nout, ss, sn, buf);
     char *hex = (char *)malloc(fn * 2 + 1);
     if (!hex) return NULL;
-    utils_bin_to_hex(buf, fn, hex);
+    pc_bin_to_hex(buf, fn, hex);
     return hex;
 }
 
@@ -180,7 +210,7 @@ static void p2pkh(out_t *o, const unsigned char h160[20], uint64_t v)
 
 int main(void)
 {
-    dogecoin_ecc_start();
+    kw_ec_start();
     int rc = 1;
 
     char awif[PRIVKEYWIFLEN], aaddr[P2PKHLEN];
@@ -200,8 +230,8 @@ int main(void)
             0, 10000000000ULL) != PC_OK) goto done;
 
     unsigned char ah[64], bh[64];
-    dogecoin_base58_decode_check(aaddr, ah, sizeof(ah));
-    dogecoin_base58_decode_check(baddr, bh, sizeof(bh));
+    { size_t _n=0; kw_base58check_decode(aaddr, ah, sizeof(ah), &_n); }
+    { size_t _n=0; kw_base58check_decode(baddr, bh, sizeof(bh), &_n); }
 
     const uint64_t TO_BOB = 2000000000ULL;
     const uint64_t FEE    = 100000000ULL;
@@ -243,7 +273,7 @@ int main(void)
         /* bare multisig: OP_1 <pubkey> OP_1 OP_CHECKMULTISIG */
         bad[1].spk[0] = 0x51; bad[1].spk[1] = 0x21;
         size_t pn = 0;
-        utils_hex_to_bin(apub, bad[1].spk + 2, 66, &pn);
+        pc_hex_to_bin(apub, bad[1].spk + 2, 33);
         bad[1].spk[35] = 0x51; bad[1].spk[36] = 0xae;
         bad[1].spklen = 37;
         raw = forge(&ch, awif, bwif, 1, 0xffffffffu, 0, bad, 2);
@@ -332,7 +362,7 @@ int main(void)
         if (pc_refund_create(&bad, awif, aaddr, fee, &r) == PC_OK) {
             printf("  ACCEPTED      a funding txid short of 64 hex\n");
             failures++;
-            dogecoin_free(r);
+            free(r);
         } else {
             printf("  refused (short funding txid                   ) "
                    "a funding txid short of 64 hex\n");
@@ -351,7 +381,7 @@ int main(void)
         if (pc_refund_create(&bad, awif, aaddr, fee, &r) == PC_OK) {
             printf("  ACCEPTED      a redeem script that is not this channel's\n");
             failures++;
-            dogecoin_free(r);
+            free(r);
         } else {
             printf("  refused (script is not this channel's         ) "
                    "a redeem script that is not this channel's\n");
@@ -368,7 +398,7 @@ int main(void)
         if (pc_refund_create(&bad, awif, aaddr, fee, &r) == PC_OK) {
             printf("  ACCEPTED      a locktime the redeem script does not carry\n");
             failures++;
-            dogecoin_free(r);
+            free(r);
         } else {
             printf("  refused (locktime is not the script's        ) "
                    "a locktime the redeem script does not carry\n");
@@ -379,6 +409,6 @@ int main(void)
            checks, failures, controls);
     rc = failures ? 1 : 0;
 done:
-    dogecoin_ecc_stop();
+    kw_ec_stop();
     return rc;
 }

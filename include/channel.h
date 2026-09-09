@@ -27,7 +27,13 @@
 #ifndef PAYMENT_CHANNEL_H
 #define PAYMENT_CHANNEL_H
 
-#include <dogecoin/libdogecoin.h>
+/* koinu (libkw) provides the crypto, tx, PSBT, base58 and chain parameters this
+   once took from libdogecoin, so pc carries no dependency on an unreleased fork
+   of it. The header needs only the chain parameters for pc_chainparams; the .c
+   files include the specific koinu headers (tx.h, psbt.h, ec.h, ...) they use,
+   which avoids the filename clash between koinu's crypto/hex.h and pc's src/hex.h.
+   See koinu crypto/. */
+#include "chainparams.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -47,7 +53,31 @@ extern "C" {
  * node does not recognise even though the scripts are identical. */
 typedef enum { PC_CHAIN_MAIN = 0, PC_CHAIN_TEST, PC_CHAIN_REGTEST } pc_chain;
 
-const dogecoin_chainparams *pc_chainparams(pc_chain chain);
+const kw_chainparams *pc_chainparams(pc_chain chain);
+
+/* Buffer sizes that were libdogecoin's, kept under the same names so the call
+   sites do not churn. A compressed pubkey is 33 bytes (66 hex + NUL); a dogecoin
+   base58 address is at most 34 chars + NUL; a WIF at most 52 + NUL; a hash is 32
+   bytes (64 hex + NUL). */
+#ifndef PUBKEYHEXLEN
+#define PUBKEYHEXLEN             67
+#endif
+/* A dogecoin base58check address is at most 34 chars on mainnet but 35 on
+   testnet/regtest (the 0x6f/0xc4 prefixes carry into an extra character), so 40
+   with the NUL leaves margin; 35 was too tight and kw_address_p2sh, which
+   returns 0 when its output does not fit, failed only on the regtest path. */
+#ifndef P2PKHLEN
+#define P2PKHLEN                 40
+#endif
+#ifndef P2SHLEN
+#define P2SHLEN                  40
+#endif
+#ifndef PRIVKEYWIFLEN
+#define PRIVKEYWIFLEN            53
+#endif
+#ifndef DOGECOIN_HASH_HEX_LENGTH
+#define DOGECOIN_HASH_HEX_LENGTH 65
+#endif
 
 /* 511 bytes of script as hex plus a NUL, so a maximal 520-byte P2SH redeem
    script does not fit. That 511 is what pc_tx_verify_payment() will read;
