@@ -40,6 +40,8 @@
 #include "common.h"
 #include "hex.h"
 #include "state.h"
+#include "psbt.h"   /* koinu: read the redeem script out of Alice's opening psbt */
+#include "tx.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -791,20 +793,33 @@ static int handle_open(int fd, session *s, const pc_envelope *in,
                        unsigned window)
 {
     (void)wif;
-    dogecoin_psbt *psbt = NULL;
-    if (!dogecoin_psbt_from_hex(in->psbt_hex, &psbt) || !psbt)
-        return send_reject(fd, "unreadable psbt"), 0;
-
     unsigned char rbuf[520];
     size_t rlen = 0;
-    int ok = dogecoin_psbt_num_inputs(psbt) == 1 &&
-             dogecoin_psbt_input_get_redeemscript(psbt, 0, rbuf, sizeof(rbuf), &rlen);
-    dogecoin_psbt_free(psbt);
+    int ok = 0;
+    size_t hl = strlen(in->psbt_hex);
+    if (hl && !(hl % 2)) {
+        unsigned char *pb = (unsigned char *)malloc(hl / 2);
+        if (pb && pc_hex_to_bin(in->psbt_hex, pb, hl / 2)) {
+            kw_psbt p;
+            kw_psbt_init(&p);
+            if (kw_psbt_parse(pb, hl / 2, &p)) {
+                const kw_tx *utx = kw_psbt_unsigned_tx(&p);
+                if (utx && utx->nin == 1 && p.in[0].redeemlen > 0 &&
+                    p.in[0].redeemlen <= sizeof(rbuf)) {
+                    rlen = p.in[0].redeemlen;
+                    memcpy(rbuf, p.in[0].redeem, rlen);
+                    ok = 1;
+                }
+            }
+            kw_psbt_free(&p);
+        }
+        free(pb);
+    }
     if (!ok) return send_reject(fd, "no redeem script"), 0;
 
     char rhex[PC_MAX_SCRIPT_HEX];
     if (rlen * 2 + 1 > sizeof(rhex)) return send_reject(fd, "script too long"), 0;
-    utils_bin_to_hex(rbuf, rlen, rhex);
+    pc_bin_to_hex(rbuf, rlen, rhex);
 
     /* who is this channel between, and until when */
     char alice_pub[PUBKEYHEXLEN], named_bob[PUBKEYHEXLEN];
