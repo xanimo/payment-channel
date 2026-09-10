@@ -20,3 +20,4 @@ timeout-*
 oom-*
 test/sighash_vectors
 test/__pycache__/
+*.d

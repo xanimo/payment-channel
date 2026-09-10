@@ -71,8 +71,17 @@ fuzz/fuzz_%: fuzz/fuzz_%.c $(CORE_SRC)
 	clang -std=gnu99 -O1 -g $(FUZZ_SAN) $(CPPFLAGS) -o $@ $^ \
 	      $(KOINU)/libkw.a $(KOINU)/depends/secp256k1/.libs/libsecp256k1.a -lm
 
+# -MMD writes a .d beside each .o naming every header that went into it, -MP
+# adds a phony target for each so a deleted header does not wedge the build, and
+# the -include below feeds them back to make. Without this an edit to
+# include/channel.h rebuilt nothing under test/, and renumbering an enum left
+# stale objects whose failures landed in assertions nowhere near the change.
+# On the compile rule rather than in CFLAGS, which is also passed at link time
+# where -MMD would write stray dependency files next to the binaries.
 %.o: %.c
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(CPPFLAGS) -MMD -MP -c -o $@ $<
+
+-include $(wildcard src/*.d test/*.d fuzz/*.d)
 
 check: $(TESTS) $(BINS)
 	./test_channel
@@ -91,6 +100,6 @@ check: $(TESTS) $(BINS)
 	./test/metrics.sh
 
 clean:
-	rm -f $(BINS) $(TESTS) src/*.o test/*.o
+	rm -f $(BINS) $(TESTS) src/*.o test/*.o src/*.d test/*.d fuzz/*.o fuzz/*.d
 
 .PHONY: all check clean fuzz

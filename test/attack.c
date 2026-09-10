@@ -272,7 +272,6 @@ int main(void)
         bad[1].value = CHANGE;
         /* bare multisig: OP_1 <pubkey> OP_1 OP_CHECKMULTISIG */
         bad[1].spk[0] = 0x51; bad[1].spk[1] = 0x21;
-        size_t pn = 0;
         pc_hex_to_bin(apub, bad[1].spk + 2, 33);
         bad[1].spk[35] = 0x51; bad[1].spk[36] = 0xae;
         bad[1].spklen = 37;
