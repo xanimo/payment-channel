@@ -1,0 +1,5 @@
+[submodule "koinu"]
+	path = depends/koinu
+	url = https://github.com/xanimo/koinu.git
+	# building in the submodule leaves objects there; that is not a pc change
+	ignore = dirty
