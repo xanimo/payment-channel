@@ -47,6 +47,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 
 #include <sys/stat.h>
@@ -75,6 +76,43 @@
    tunnel makes every peer share one address, so it is overridable with
    --max-per-ip (0 disables). It does not replace a firewall connlimit. */
 #define DEFAULT_MAX_PER_IP 16
+
+/* What the serving Bob exports. Each connection is served in its own process,
+   so a plain global would count only what one child happened to see. These live
+   in a shared anonymous mapping made before the first fork and are bumped with
+   atomics. Only the parent ever writes the file, so a child cannot leave a
+   half-written one behind. */
+typedef struct {
+    uint64_t connections;      /* forked to serve */
+    uint64_t refused_conns;    /* over MAX_CONNS */
+    uint64_t refused_per_ip;   /* over --max-per-ip */
+    uint64_t opens;            /* channels opened */
+    uint64_t payments;         /* accepted, verified and durable */
+    uint64_t received_koinu;   /* what those payments came to */
+    uint64_t closes;           /* channels the peer closed */
+    uint64_t rejects;          /* every refusal sent, whatever the reason */
+    uint64_t signer_errors;    /* --sign-cmd returned no signature */
+    uint64_t replica_errors;   /* --replicate-cmd failed, so the payment was refused */
+} pc_metrics;
+
+/* NULL unless --metrics-file was given to a serving Bob, which is what makes
+   every counter below a no-op in the default configuration. */
+static pc_metrics *g_mx = NULL;
+
+#define MX(field, n) \
+    do { if (g_mx) __atomic_fetch_add(&g_mx->field, (uint64_t)(n), __ATOMIC_RELAXED); } while (0)
+
+static uint64_t mx_get(const uint64_t *p)
+{
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+}
+
+/* The accept loop blocks, so on an idle Bob the gauges would sit at whatever
+   the last connection left behind. A SIGALRM whose handler does nothing
+   interrupts accept() on a timer and the loop refreshes and re-arms. It must be
+   installed without SA_RESTART or the interrupt never arrives. */
+#define PC_METRICS_SECONDS 15
+static void on_metrics_tick(int sig) { (void)sig; }
 
 /* Per-connection resource bounds, set in the child so one connection cannot
    run the box out of CPU or address space. Generous: an honest session uses
@@ -134,13 +172,16 @@ static void usage(void)
       "  or a funding is undetermined or the height feed is stale. Each pass\n"
       "  prints a sweep-status line with the counts, the koinu at risk, and the\n"
       "  replica health; --metrics-file writes those as a scrapable snapshot.\n"
+      "  --metrics-file also works while serving, where it snapshots the\n"
+      "  connection, payment and error counters every %d seconds and on exit.\n"
       "  --sign-cmd runs a signer that holds the key so this process never does;\n"
       "  it is fed the payment PSBT on stdin and returns the signed PSBT. The\n"
       "  signed transaction is still re-verified here, so the signer is used,\n"
       "  not trusted. `bob --sign` is a signer that speaks that contract.\n"
       "  --replicate-cmd is run (CMD <state-file>) after each payment and close\n"
       "  is saved and before it is acked, so a payment reaches a second place\n"
-      "  before Bob answers for it; a non-zero exit fails the ack to a retry.\n");
+      "  before Bob answers for it; a non-zero exit fails the ack to a retry.\n",
+      PC_METRICS_SECONDS);
 }
 
 /* Everything one connection knows. */
@@ -169,6 +210,7 @@ static int send_reject(int fd, const char *why)
                 sizeof(out.addr) - 1, why);
     snprintf(out.psbt_hex, sizeof(out.psbt_hex), "01");
     fprintf(stderr, "reject: %s\n", why);
+    MX(rejects, 1);
     return pc_wire_send(fd, &out);
 }
 
@@ -894,6 +936,7 @@ static int handle_open(int fd, session *s, const pc_envelope *in,
     out.vout = s->ch.funding_vout;
     out.to_bob_koinu = capacity;
     snprintf(out.psbt_hex, sizeof(out.psbt_hex), "01");
+    MX(opens, 1);
     return pc_wire_send(fd, &out);
 }
 
@@ -957,7 +1000,10 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
     pc_result r;
     if (sign_cmd) {
         char *signed_psbt = run_signer(sign_cmd, in->psbt_hex);
-        if (!signed_psbt) return send_reject(fd, "signer did not sign"), 0;
+        if (!signed_psbt) {
+            MX(signer_errors, 1);
+            return send_reject(fd, "signer did not sign"), 0;
+        }
         r = pc_payment_assemble(&s->ch, signed_psbt, &raw);
         free(signed_psbt);
     } else {
@@ -974,6 +1020,12 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
         return send_reject(fd, pc_strerror(r)), 0;
     }
 
+    /* A payment carries the running total, not the increment, and a resumed
+       channel starts this session part-paid. Take the delta off the ratchet
+       before it advances, or a resume counts everything the outpoint ever paid
+       a second time. */
+    uint64_t was = s->ch.paid_to_bob_koinu;
+
     r = pc_payment_accept(&s->ch, in->psbt_hex, in->to_bob_koinu);
     if (r != PC_OK) { free(raw); return send_reject(fd, "does not advance the channel"), 0; }
 
@@ -988,8 +1040,14 @@ static int handle_payment(int fd, session *s, const pc_envelope *in,
        the ack, so a disk that dies between here and the sweep is not a loss. */
     if (pc_state_save(&s->st, &s->ch, s->best) != PC_OK)
         return send_reject(fd, "cannot record payment"), 0;
-    if (replicate_cmd && !replicate(replicate_cmd, s->st.path))
+    if (replicate_cmd && !replicate(replicate_cmd, s->st.path)) {
+        MX(replica_errors, 1);
         return send_reject(fd, "cannot replicate payment"), 0;
+    }
+    /* Counted here, after the payment is durable and before the ack, so the
+       number a merchant reconciles against is money Bob has answered for. */
+    MX(payments, 1);
+    MX(received_koinu, s->ch.paid_to_bob_koinu - was);
     /* "held" is not "confirmed": Bob cannot see the chain, so this is money only
        once the funding output is buried. Do not ship against this line alone. */
     printf("paid     %" PRIu64 " koinu held (%zu byte tx), "
@@ -1079,9 +1137,11 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
                 break;
             }
             if (replicate_cmd && !replicate(replicate_cmd, s.st.path)) {
+                MX(replica_errors, 1);
                 alive = send_reject(fd, "cannot replicate the close");
                 break;
             }
+            MX(closes, 1);
             memset(&out, 0, sizeof(out));
             out.type = PC_MSG_CLOSE;
             snprintf(out.ref, sizeof(out.ref), "%s", s.ch.funding_txid);
@@ -1118,6 +1178,49 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
         free(s.best);
     }
     pc_state_close(&s.st);
+}
+
+/* A metrics snapshot for a scraper (Prometheus textfile collector reads this
+   shape), written atomically so a poll never sees a half-file, and by the
+   parent only. Best effort, for the same reason the sweep's is: a monitor that
+   finds it stale learns as much as one that finds it missing.
+
+   The counters a merchant pages on are the two error totals and the gap between
+   payments and rejects. live_connections against MAX_CONNS is what says whether
+   the refusals are a busy shop or an exhausted one. */
+static void write_serve_metrics(const char *path, int live)
+{
+    char tmp[600];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) return;
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f,
+        "pc_serve_up 1\n"
+        "pc_serve_live_connections %d\n"
+        "pc_serve_max_connections %d\n"
+        "pc_serve_connections_total %" PRIu64 "\n"
+        "pc_serve_refused_connections_total %" PRIu64 "\n"
+        "pc_serve_refused_per_ip_total %" PRIu64 "\n"
+        "pc_serve_opens_total %" PRIu64 "\n"
+        "pc_serve_payments_total %" PRIu64 "\n"
+        "pc_serve_received_koinu_total %" PRIu64 "\n"
+        "pc_serve_closes_total %" PRIu64 "\n"
+        "pc_serve_rejects_total %" PRIu64 "\n"
+        "pc_serve_signer_errors_total %" PRIu64 "\n"
+        "pc_serve_replica_errors_total %" PRIu64 "\n",
+        live, MAX_CONNS,
+        mx_get(&g_mx->connections),
+        mx_get(&g_mx->refused_conns),
+        mx_get(&g_mx->refused_per_ip),
+        mx_get(&g_mx->opens),
+        mx_get(&g_mx->payments),
+        mx_get(&g_mx->received_koinu),
+        mx_get(&g_mx->closes),
+        mx_get(&g_mx->rejects),
+        mx_get(&g_mx->signer_errors),
+        mx_get(&g_mx->replica_errors));
+    if (fclose(f) == 0) rename(tmp, path);
+    else unlink(tmp);
 }
 
 /* Set by SIGTERM/SIGINT so a --watch loop finishes its sleep and exits between
@@ -1357,6 +1460,26 @@ int main(int argc, char **argv)
     int lfd = pc_wire_listen(host, port);
     if (lfd < 0) { fprintf(stderr, "bob: cannot listen on %s:%d\n", host, port); goto done; }
 
+    /* Shared before the first fork, so every child bumps the same counters.
+       MAP_ANONYMOUS|MAP_SHARED and nothing on disk: the file is written from
+       these, it is not the counters themselves. A mapping that cannot be made
+       costs the metrics, not the service. */
+    if (metrics_file) {
+        void *m = mmap(NULL, sizeof(pc_metrics), PROT_READ | PROT_WRITE,
+                       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        if (m == MAP_FAILED) {
+            fprintf(stderr, "bob: no shared page for metrics, serving without them\n");
+            metrics_file = NULL;
+        } else {
+            g_mx = m;
+            memset(g_mx, 0, sizeof(*g_mx));
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = on_metrics_tick;
+            sigaction(SIGALRM, &sa, NULL);   /* no SA_RESTART: accept() must return */
+        }
+    }
+
     printf("paid to  %s\n", bob_addr);
     printf("listening on %s:%d\n\n", host, port);
     fflush(stdout);
@@ -1365,23 +1488,28 @@ int main(int argc, char **argv)
     int live = 0;
     do {
         uint32_t peer_ip = 0;
+        if (metrics_file) alarm(PC_METRICS_SECONDS);
         int fd = pc_wire_accept(lfd, &peer_ip);
-        if (fd < 0) continue;
 
         /* Reap finished children and reclaim their slots, then enforce the
            caps. Reaping here (not via SIG_IGN) is what keeps the counts honest,
-           so the caps track connections that are actually live. */
+           so the caps track connections that are actually live. Above the
+           fd check, so an idle Bob still reclaims and still reports. */
         if (!once) {
             pid_t gone;
             while ((gone = waitpid(-1, NULL, WNOHANG)) > 0)
                 for (int k = 0; k < live; k++)
                     if (kids[k].pid == gone) { kids[k] = kids[--live]; break; }
         }
+        if (metrics_file) write_serve_metrics(metrics_file, live);
+
+        if (fd < 0) continue;
 
         /* Global cap first: an unbounded fork-per-connection is its own denial
            of service. Then the per-source cap, so one address cannot take every
            slot. Both refuse rather than fork past the limit. */
         if (live >= MAX_CONNS) {
+            MX(refused_conns, 1);
             send_reject(fd, "too many connections");
             close(fd);
             continue;
@@ -1390,6 +1518,7 @@ int main(int argc, char **argv)
             int from_ip = 0;
             for (int k = 0; k < live; k++) if (kids[k].ip == peer_ip) from_ip++;
             if (from_ip >= max_per_ip) {
+                MX(refused_per_ip, 1);
                 send_reject(fd, "too many from one address");
                 close(fd);
                 continue;
@@ -1400,6 +1529,7 @@ int main(int argc, char **argv)
         if (pid < 0) { close(fd); continue; }
         if (pid == 0) {
             close(lfd);
+            alarm(0);              /* the parent's refresh timer is not the child's */
             limit_child();
             serve_connection(fd, wif, chain, bob_pub, bob_addr,
                              height, slack, state_dir, height_file,
@@ -1412,9 +1542,14 @@ int main(int argc, char **argv)
         kids[live].pid = pid;
         kids[live].ip  = peer_ip;
         live++;
+        MX(connections, 1);
         close(fd);                 /* the child owns it now */
-        if (once) { waitpid(pid, NULL, 0); break; }
+        if (once) { waitpid(pid, NULL, 0); live--; break; }
     } while (1);
+
+    /* --once forks one child and leaves the loop, so without a last write the
+       counters that child bumped would never reach the file at all. */
+    if (metrics_file) write_serve_metrics(metrics_file, live);
 
     close(lfd);
     rc = 0;
