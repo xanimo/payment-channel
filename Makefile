@@ -8,9 +8,10 @@
 #   make -C depends/koinu
 #   make check
 #
-# v0.2.1 is the pinned tag; it carries the scriptSig-length fix a P2SH multisig
-# spend needs. Whatever KOINU points at must contain libkw.a,
-# depends/secp256k1/.libs/libsecp256k1.a, and the crypto/ net/ wallet/ headers.
+# The pinned tag is in version.mk, and must be v0.2.1 or later, which is where
+# the scriptSig-length fix a P2SH multisig spend needs landed. Whatever KOINU
+# points at must contain libkw.a, depends/secp256k1/.libs/libsecp256k1.a, and
+# the crypto/ net/ wallet/ headers.
 
 # PC_VERSION and KOINU_TAG, the one place either is written. A command-line
 # KOINU_TAG= still overrides it, and .github/actions/build-koinu sources the
