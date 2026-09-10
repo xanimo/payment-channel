@@ -509,6 +509,14 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     if (ch->capacity_koinu - total < pc_min_fee(blen, soft_dust)) {
         rc = PC_ERR_FEE; goto out;
     }
+    /* and not so much that a node refuses to relay it at all. Bob's promise is
+       that this would be accepted and mined by a default node, and one paying
+       over DEFAULT_TRANSACTION_MAXFEE is rejected as absurdly-high-fee before
+       it reaches a miner, so accepting it would break that promise in the
+       direction the floor check covers at the other end. */
+    if (ch->capacity_koinu - total > PC_MAX_FEE_KOINU) {
+        rc = PC_ERR_FEE_HIGH; goto out;
+    }
 
     rc = verify_sigs(ch, buf, blen, sig_start, sig_end, ss, sslen);
 out:

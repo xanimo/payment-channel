@@ -98,6 +98,7 @@ typedef enum {
     PC_ERR_CAPACITY,     /* its outputs spend more than the channel holds     */
     PC_ERR_DUST,         /* an output is under the hard dust limit            */
     PC_ERR_FEE,          /* what is left over is below the miner's floor      */
+    PC_ERR_FEE_HIGH,     /* and what is left over is above what a node takes  */
     PC_ERR_FINAL,        /* a non-zero locktime or a non-final input          */
     PC_ERR_VERSION,      /* the transaction version is outside 1..2            */
     PC_ERR_NONSTANDARD,  /* an output script is not a type a node will relay   */
@@ -301,6 +302,20 @@ _Static_assert(PC_MAX_OUTPUTS <= UINT64_MAX / PC_MAX_MONEY_KOINU,
  * a full soft limit to the fee the transaction has to pay. */
 #define PC_HARD_DUST_KOINU  100000ULL   /* DEFAULT_HARD_DUST_LIMIT */
 #define PC_SOFT_DUST_KOINU 1000000ULL   /* DEFAULT_DUST_LIMIT      */
+
+/* DEFAULT_TRANSACTION_MAXFEE, which is RECOMMENDED_MIN_TX_FEE * 10000 in
+ * validation.h. A node refuses a transaction paying more than this with
+ * "absurdly-high-fee", and sendrawtransaction applies it by default: the second
+ * argument, allowhighfees, is what turns it off. So a fee over this is not
+ * merely unwise, it is a transaction the normal broadcast path will not take,
+ * which is the same class of mistake as a fee under the miner's floor and the
+ * other end of the same check.
+ *
+ * The cap is absolute rather than proportional because Core's is. It refuses a
+ * huge fee on a small payment, which is the case worth refusing, but it has
+ * nothing to say about a merely bad ratio: a 50 DOGE fee to move 1 DOGE is
+ * still under it and a real node would still relay it. */
+#define PC_MAX_FEE_KOINU 10000000000ULL /* DEFAULT_TRANSACTION_MAXFEE, 100 DOGE */
 
 /* What a transaction of (txbytes) carrying (soft_dust_outputs) outputs under the
  * soft limit has to pay before a default-configured miner will include it. This

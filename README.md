@@ -218,6 +218,17 @@ the fee she settles on is printed on stderr. it sizes the refund below the same
 way, where paying the current network rate is what a time-critical unilateral
 close wants.
 
+there is a ceiling as well as a floor, and it is dogecoin core's:
+`DEFAULT_TRANSACTION_MAXFEE`, which is 100 doge. a node rejects anything paying
+more than that as `absurdly-high-fee`, and `sendrawtransaction` applies it
+unless told `allowhighfees`, so a fee over it is not merely wasteful but a
+transaction the normal broadcast path refuses. alice will not build one and bob
+will not countersign one, which is the same check the floor makes at the other
+end. `--max-fee` moves alice's ceiling for someone who means it; bob holds to
+the default on his own, so raising it only carries a refund she broadcasts
+herself. the cap is absolute rather than proportional because core's is, so it
+refuses 500 doge to move 1 doge and has nothing to say about 50.
+
 if bob stops answering, alice takes the money back through the timelocked
 branch. it needs no peer, which is the situation it is for, and the transaction
 it prints is worthless to anyone until the locktime passes.

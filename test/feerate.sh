@@ -77,5 +77,42 @@ else
     say "--feerate with --feerate-cmd" "not refused"; fail=1
 fi
 
+echo "fee ceiling:"
+
+# the fee a run refuses with, or its stderr, whichever it produced
+try_fee() {
+    ./alice --wif "@$WORK/awif" --peer-pubkey "$BPUB" --locktime 700 --regtest \
+        --funding-tx "@$WORK/fund.hex" --refund "$@" 2>&1
+}
+
+# DEFAULT_TRANSACTION_MAXFEE is 100 DOGE, so a flat 500 is refused before the
+# transaction is built at all.
+try_fee --fee 500 | grep -q "over the 100.00000000 a node will relay" &&
+    say "--fee over the cap is refused" yes ||
+    { say "--fee 500" "$(try_fee --fee 500 | head -1)"; fail=1; }
+
+# 1250 DOGE/kB over 400 bytes prices at exactly 500 DOGE. A backend answering
+# in the wrong units is the case this exists for: the number is not the
+# operator's, and nothing else would have caught it.
+try_fee --feerate 1250 | grep -q "over the 100.00000000 a node will relay" &&
+    say "a wild --feerate is refused not paid" yes ||
+    { say "--feerate 1250" "$(try_fee --feerate 1250 | head -1)"; fail=1; }
+
+try_fee --feerate-cmd 'printf "1250.0\n"' | grep -q "a node will relay" &&
+    say "and the same through --feerate-cmd" yes ||
+    { say "--feerate-cmd 1250" "$(try_fee --feerate-cmd 'printf "1250.0\n"' | head -1)"; fail=1; }
+
+# right at the cap is allowed: the check is > not >=
+try_fee --fee 100 | grep -q "a node will relay" &&
+    { say "--fee exactly at the cap" "refused, should pass"; fail=1; } ||
+    say "a fee exactly at the cap is allowed" yes
+
+# --max-fee is the allowhighfees equivalent. It stops being the fee that is
+# refused; this channel only holds 100 so the run still fails later, which is a
+# different message and not this check's business.
+try_fee --fee 500 --max-fee 600 | grep -q "a node will relay" &&
+    { say "--max-fee did not raise the ceiling" no; fail=1; } ||
+    say "--max-fee raises the ceiling" yes
+
 [ "$fail" = 0 ] || { echo "feerate FAILED" >&2; exit 1; }
 echo "feerate ok"
