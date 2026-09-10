@@ -37,11 +37,27 @@ reading of the script.
 ## building
 
 the crypto, transactions, psbt and base58 come from koinu, which is a released
-static library. point `KOINU` at a koinu checkout built at tag v0.2.1 or later,
-where its own `make` produces `libkw.a` and the bundled secp256k1.
+static library and a submodule pinned at v0.2.1.
 
-    make KOINU=/path/to/koinu
-    make KOINU=/path/to/koinu check
+    git submodule update --init --recursive depends/koinu
+    make -C depends/koinu
+    make check
+
+koinu is private, so that fetch needs access to it; a plain `git clone` of this
+repo does not attempt it and everything else still builds once `KOINU` points
+somewhere. ci does not use the submodule at all, it clones koinu with a deploy
+key into the job's own workspace and passes `KOINU` explicitly. both pin the
+same tag, which is the whole point of the pin.
+
+the build refuses a koinu that is not at the pinned tag, because whatever
+`KOINU` points at is what gets linked and nothing in the output says which
+revision that was. a sibling checkout mid-feature builds a different program
+than ci does and the failure surfaces as anything at all: this was found as a
+link error against an archive someone had rebuilt with sanitizers. set
+`KOINU_ANY=1` to build against another revision on purpose, which is what
+developing both trees together wants.
+
+    make KOINU=../koinu KOINU_ANY=1 check
 
 this used to build against an unreleased libdogecoin fork and needed nine
 patches to do it. those are archived in depends/patches and are no longer part
