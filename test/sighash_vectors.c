@@ -1,4 +1,4 @@
-/* pc's SIGHASH_ALL digest against Dogecoin Core's consensus test data.
+/* pc's SIGHASH_ALL digest against signatures it did not produce.
  *
  * src/txcheck.c computes the legacy sighash itself, and koinu computes it
  * independently, and Bob checks his own signature against pc's digest so the
@@ -6,15 +6,19 @@
  * both implementations are ours, so an error in how we read the rules is in
  * both of them and neither one contradicts the other.
  *
- * This is the outside opinion. Every vector is a transaction Dogecoin Core's
- * own test suite asserts is valid, so a miner's script interpreter accepted its
- * signature, so that signature verifies against the digest consensus actually
- * uses and nothing else. pc recomputes the digest and checks the signature
- * against it: a digest that differs from consensus in any way fails to verify,
- * and cannot pass by coincidence.
+ * These are the outside opinion. Every vector carries a signature somebody else
+ * already validated against the digest consensus really uses, so recomputing
+ * that digest and checking the signature against it is a test no wrong answer
+ * passes by coincidence.
  *
- * The vectors are derived by test/mkvectors.py and checked in, so this needs no
- * python and no network. See that file for how they are selected. */
+ * Two sources, from test/mkvectors.py and test/mkvectors_chain.py:
+ *
+ *   sighash_vectors        transactions Dogecoin Core's own tx_valid.json
+ *                          asserts are valid. Few, and deliberately strange.
+ *   sighash_vectors_chain  confirmed mainnet P2PKH spends. Many, and utterly
+ *                          ordinary, which is the other half of the coverage.
+ *
+ * Both are checked in, so this needs no python, no node and no network. */
 
 #include "channel.h"
 #include "hex.h"
@@ -25,8 +29,16 @@
 
 #define LINE_MAX_LEN 16384
 #define MAX_ITEMS    16
+#define SHOW_FAILURES 5
 
-static const char *DEFAULT_PATH = "test/data/sighash_vectors";
+/* Two sources, because they fail differently. Core's tx_valid.json is a handful
+   of odd script shapes someone wrote deliberately; the chain file is bulk
+   ordinary P2PKH that the network actually validated. A digest bug that somehow
+   survived one is unlikely to survive both. */
+static const char *DEFAULT_PATHS[] = {
+    "test/data/sighash_vectors",
+    "test/data/sighash_vectors_chain",
+};
 
 /* Split (s) on commas in place, filling (out) with the pieces. */
 static size_t split_csv(char *s, char **out, size_t cap)
@@ -47,21 +59,16 @@ static int hex_bytes(const char *hex, unsigned char *out, size_t cap, size_t *le
     return 1;
 }
 
-int main(int argc, char **argv)
+/* One vector file. Adds its counts to (*total_out) and (*ok_out) and returns
+   non-zero only if the file could not be read at all; a vector that fails to
+   verify is reported through the counts, so every file is still walked. */
+static int run_file(const char *path, int *total_out, int *ok_out)
 {
-    const char *path = argc > 1 ? argv[1] : DEFAULT_PATH;
     FILE *f = fopen(path, "r");
     if (!f) {
         fprintf(stderr, "sighash-vectors: cannot open %s\n", path);
         return 1;
     }
-    if (!kw_ec_start()) {
-        fprintf(stderr, "sighash-vectors: no ec context\n");
-        fclose(f);
-        return 1;
-    }
-
-    printf("pc's digest against dogecoin core's tx_valid.json:\n");
 
     char line[LINE_MAX_LEN];
     int total = 0, ok = 0;
@@ -115,23 +122,53 @@ int main(int argc, char **argv)
             }
         }
 
+        /* Only failures are printed, and only the first few. A hundred and
+           fifty lines of "verified" is not a result anyone reads, and a
+           hundred and fifty failures are all one bug: the count below says how
+           many were not shown, so the cap never reads as a clean run. */
         if (verified) {
             ok++;
-            printf("  %-3d verified against consensus\n", total);
-        } else {
+        } else if (total - ok <= SHOW_FAILURES) {
             char hh[65];
             pc_bin_to_hex(hash, 32, hh);
-            printf("  %-3d NO SIGNATURE VERIFIES digest=%s\n", total, hh);
+            printf("  %s:%d NO SIGNATURE VERIFIES digest=%s\n", path, total, hh);
         }
     }
-
-    kw_ec_stop();
     fclose(f);
+
+    if (total - ok > SHOW_FAILURES)
+        printf("  ... and %d more failures not shown\n",
+               total - ok - SHOW_FAILURES);
 
     if (total == 0) {
         fprintf(stderr, "sighash-vectors: no vectors in %s\n", path);
         return 1;
     }
-    printf("%d/%d core vectors verify against pc's digest\n", ok, total);
+    printf("  %-42s %d/%d\n", path, ok, total);
+    *total_out += total;
+    *ok_out += ok;
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (!kw_ec_start()) {
+        fprintf(stderr, "sighash-vectors: no ec context\n");
+        return 1;
+    }
+    printf("pc's digest against signatures it did not produce:\n");
+
+    int total = 0, ok = 0, unreadable = 0;
+    if (argc > 1) {
+        for (int i = 1; i < argc; i++)
+            unreadable |= run_file(argv[i], &total, &ok);
+    } else {
+        for (size_t i = 0; i < sizeof(DEFAULT_PATHS) / sizeof(*DEFAULT_PATHS); i++)
+            unreadable |= run_file(DEFAULT_PATHS[i], &total, &ok);
+    }
+
+    kw_ec_stop();
+    if (unreadable || total == 0) return 1;
+    printf("%d/%d external vectors verify against pc's digest\n", ok, total);
     return ok == total ? 0 : 1;
 }

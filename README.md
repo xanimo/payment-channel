@@ -302,6 +302,15 @@ change output would leave bob's newest state worthless and send him back to an
 older one, and an output under the soft limit adds a full soft limit to the fee
 the transaction owes.
 
+the digest is checked against 156 signatures pc did not produce, in
+`test/sighash_vectors`: six transactions dogecoin core's own `tx_valid.json`
+asserts are valid, and 150 confirmed mainnet p2pkh spends read straight out of
+`blk*.dat`. the second set is the useful one, since the whole network already
+validated those signatures against the digest consensus really uses, so a
+digest that differs anywhere fails to verify and cannot pass by coincidence.
+flipping one byte of the preimage takes it to 0/156. both files are checked in,
+so the test needs no node and no network.
+
 the sighash those signatures are checked against is computed in src/txcheck.c
 too. koinu's `kw_tx_signature` computes the same digest and pc signs through it,
 so this is a second, independent implementation of a consensus-critical digest.
