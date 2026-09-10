@@ -305,25 +305,22 @@ static int run_backend(const char *cmd, const char *const *extra, size_t nextra,
         dup2(in[0], STDIN_FILENO);
         close(fds[1]); close(in[0]);
 
-        /* The command is split on spaces because the backend it exists for
-           needs its own arguments: kw outpoint requires --node, so a single
-           path could never invoke it and the documented form did not run. It
-           is still not a shell. The split is over the operator's own argument
-           and the two values appended after it are a validated address and a
-           validated outpoint, so nothing off the wire reaches argv unchecked. */
+        /* Quotes and backslash are honoured so a backend path may contain a
+           space; see pc_split_argv. It is still not a shell. The split is over
+           the operator's own argument, and the values appended after it are a
+           validated address and a validated outpoint, so nothing off the wire
+           reaches argv unchecked. */
         char *argv[PC_CONFIRM_MAX_ARGV];
-        size_t argc = 0;
         char split[512];
         /* Truncation would silently drop the tail of the last token, turning
            --node host:22556 into --node host:2. Fail the exec instead. */
         if (snprintf(split, sizeof(split), "%s", cmd) >= (int)sizeof(split)) _exit(127);
-        for (char *tok = strtok(split, " \t");
-             tok && argc + nextra + 1 < PC_CONFIRM_MAX_ARGV;
-             tok = strtok(NULL, " \t"))
-            argv[argc++] = tok;
-        if (argc == 0) _exit(127);
-        for (size_t i = 0; i < nextra; i++) argv[argc++] = (char *)extra[i];
-        argv[argc] = NULL;
+        if (nextra + 1 >= PC_CONFIRM_MAX_ARGV) _exit(127);   /* no room to append */
+        int argc = pc_split_argv(split, argv, PC_CONFIRM_MAX_ARGV - nextra - 1);
+        if (argc <= 0) _exit(127);
+        size_t ac = (size_t)argc;
+        for (size_t i = 0; i < nextra; i++) argv[ac++] = (char *)extra[i];
+        argv[ac] = NULL;
         execvp(argv[0], argv);
         _exit(127);
     }

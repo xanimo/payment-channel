@@ -8,6 +8,7 @@
  * real node, which is what proves the transaction is actually accepted. */
 
 #include "channel.h"
+#include "common.h"
 #include "hex.h"
 #include "refund.h"
 #include "state.h"
@@ -260,6 +261,59 @@ int main(void)
         nulled[4] = '\0';
         CHECK(!pc_hex_to_bin(nulled, o, 4),
               "hex: a short hex string is refused, not half-converted");
+    }
+
+    /* pc_split_argv builds the argv for --confirm-cmd and friends. It is not a
+       shell, but it has to honour quoting, because a backend needs its own
+       arguments and so cannot be a bare path, and without quoting a path with
+       a space in it could not be given at all. */
+    {
+        char b[256];
+        char *av[8];
+
+        strcpy(b, "kw outpoint --node host:22556");
+        CHECK(pc_split_argv(b, av, 8) == 4 && !strcmp(av[0], "kw")
+              && !strcmp(av[3], "host:22556"), "argv: a plain command splits");
+
+        strcpy(b, "'/opt/my tools/kw' outpoint");
+        CHECK(pc_split_argv(b, av, 8) == 2
+              && !strcmp(av[0], "/opt/my tools/kw")
+              && !strcmp(av[1], "outpoint"), "argv: single quotes hold a space");
+
+        strcpy(b, "\"/opt/my tools/kw\" outpoint");
+        CHECK(pc_split_argv(b, av, 8) == 2
+              && !strcmp(av[0], "/opt/my tools/kw"), "argv: double quotes too");
+
+        strcpy(b, "/opt/my\\ tools/kw outpoint");
+        CHECK(pc_split_argv(b, av, 8) == 2
+              && !strcmp(av[0], "/opt/my tools/kw"), "argv: a backslash escapes");
+
+        /* the quote is a delimiter, not part of the word */
+        strcpy(b, "a'b c'd e");
+        CHECK(pc_split_argv(b, av, 8) == 2 && !strcmp(av[0], "ab cd")
+              && !strcmp(av[1], "e"), "argv: quotes join within a word");
+
+        strcpy(b, "   spaced   out   ");
+        CHECK(pc_split_argv(b, av, 8) == 2 && !strcmp(av[0], "spaced")
+              && !strcmp(av[1], "out"), "argv: surrounding space is skipped");
+
+        strcpy(b, "");
+        CHECK(pc_split_argv(b, av, 8) == 0, "argv: an empty command is no tokens");
+
+        strcpy(b, "kw 'unterminated");
+        CHECK(pc_split_argv(b, av, 8) == -1, "argv: an open quote is refused");
+
+        strcpy(b, "kw \"unterminated");
+        CHECK(pc_split_argv(b, av, 8) == -1, "argv: an open double quote too");
+
+        strcpy(b, "kw trailing\\");
+        CHECK(pc_split_argv(b, av, 8) == -1, "argv: a trailing backslash is refused");
+
+        /* the bound is what stops argv overrunning the caller's array */
+        strcpy(b, "a b c d e");
+        CHECK(pc_split_argv(b, av, 4) == -1, "argv: more tokens than max is refused");
+        strcpy(b, "a b c d");
+        CHECK(pc_split_argv(b, av, 4) == 4, "argv: exactly max is allowed");
     }
 
     /* The minimal-push rule in pc_refund_walk(). The canonical script is 116
