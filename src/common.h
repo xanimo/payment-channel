@@ -101,6 +101,59 @@ static inline int pc_split_outpoint(const char *s, char txid[65], int *vout)
     return 1;
 }
 
+/* Split a backend command into argv, in place.
+ *
+ * The backends take their own arguments (kw outpoint needs --node), so this
+ * cannot be a bare path, and splitting on spaces alone means a path containing
+ * one cannot be given at all. Quotes and backslash fix that and nothing else:
+ * there is no expansion, no globbing, no operators and no shell, and the result
+ * goes straight to execvp.
+ *
+ * Returns the count, or -1 for an unterminated quote, a trailing backslash, or
+ * more than (max) tokens. (buf) is modified and (argv) points into it.
+ */
+static inline int pc_split_argv(char *buf, char **argv, size_t max)
+{
+    size_t argc = 0;
+    char *r = buf, *w = buf;
+
+    while (*r) {
+        while (*r == ' ' || *r == '\t') r++;
+        if (!*r) break;
+        if (argc >= max) return -1;
+        argv[argc++] = w;
+
+        while (*r && *r != ' ' && *r != '\t') {
+            if (*r == '\\') {
+                if (!*++r) return -1;            /* nothing to escape */
+                *w++ = *r++;
+            } else if (*r == '\'') {             /* literal, as a shell's */
+                r++;
+                while (*r != '\'') { if (!*r) return -1; *w++ = *r++; }
+                r++;
+            } else if (*r == '"') {
+                r++;
+                while (*r != '"') {
+                    if (!*r) return -1;
+                    if (*r == '\\' && r[1]) r++;
+                    *w++ = *r++;
+                }
+                r++;
+            } else {
+                *w++ = *r++;
+            }
+        }
+        /* Step past the delimiter before terminating the token. Quoting only
+           ever removes characters, so w <= r, and writing the NUL first would
+           clobber the very byte r is standing on when they are equal. */
+        int done = (*r == '\0');
+        if (!done) r++;
+        *w++ = '\0';
+        if (done) break;
+    }
+    return (int)argc;
+}
+
 /* A hex argument, or @path to read it from a file. */
 static inline char *pc_read_hex_arg(const char *arg)
 {

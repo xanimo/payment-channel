@@ -199,5 +199,40 @@ grep -q "^fheight 900" "$WORK/state2"/*.channel 2>/dev/null \
     && say "and records where the funding was found" "yes" \
     || { say "and records where the funding was found" "$(grep -h '^fheight' "$WORK/state2"/*.channel 2>/dev/null)"; fail=1; }
 
+# A backend path with a space in it. Splitting on whitespace alone made this
+# unreachable: the operator could not name the program at all, and it failed
+# closed as "cannot confirm" with nothing pointing at the path. Quotes and a
+# backslash both have to carry it through to execvp.
+SPACED="$WORK/dir with space"
+mkdir -p "$SPACED" "$WORK/state3" "$WORK/state4"
+cp "$WORK/confirm" "$SPACED/confirm"
+answer unspent 100
+
+spaced_open() {
+    ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$2" --min-slack 100 --once \
+          --height-file "$WORK/height" --state "$WORK/$3" \
+          --confirm-cmd "$1" --min-depth 6 --price 5.0 \
+          > "$WORK/bob-$3.log" 2>&1 &
+    local p=$!
+    for _ in $(seq 1 100); do
+        grep -q listening "$WORK/bob-$3.log" 2>/dev/null && break
+        sleep 0.1
+    done
+    ./alice --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$LOCKTIME" \
+            --funding-tx "@$WORK/funding.hex" --connect "127.0.0.1:$2" \
+            --max 100.0 > "$WORK/alice-$3.log" 2>&1 || true
+    wait "$p" 2>/dev/null || true
+}
+
+spaced_open "'$SPACED/confirm' --node stub" "$((PORT+7))" state3
+grep -q "funding  confirmed" "$WORK/bob-state3.log" \
+    && say "a quoted backend path with a space runs" "yes" \
+    || { say "a quoted backend path with a space runs" "$(tail -1 "$WORK/bob-state3.log")"; fail=1; }
+
+spaced_open "$WORK/dir\\ with\\ space/confirm --node stub" "$((PORT+8))" state4
+grep -q "funding  confirmed" "$WORK/bob-state4.log" \
+    && say "and a backslash-escaped one" "yes" \
+    || { say "and a backslash-escaped one" "$(tail -1 "$WORK/bob-state4.log")"; fail=1; }
+
 [ "$fail" = 0 ] || { echo "confirm FAILED" >&2; exit 1; }
 echo "confirm ok"

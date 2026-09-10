@@ -106,7 +106,7 @@ own number.
 than against alice. without it she never has to have broadcast the transaction
 she hands him, and a double spend, an earlier close or her own refund all end
 the same way: bob ships against something that can never confirm. the command is
-split on spaces and run with alice's outpoint appended, `CMD --watch ADDR
+split into argv and run with alice's outpoint appended, `CMD --watch ADDR
 --outpoint TXID:VOUT`, which is koinu's `kw outpoint` and needs its own `--node`
 in front,
 and has to exit 0 for an unspent confirmed output while printing its depth and
@@ -148,7 +148,13 @@ than claiming acceptance, since p2p has no positive acknowledgement.
     --broadcast-cmd "kw send --node NODE"
 
 both are run with execvp and no shell, since the txid on that line came off the
-wire, and the confirmation has three seconds to answer.
+wire, and the confirmation has three seconds to answer. the split honours single
+quotes, double quotes and backslash, so a backend somewhere with a space in the
+path can still be named; nothing else about a shell is there, no expansion and
+no operators. an unterminated quote or a trailing backslash fails the exec
+rather than guessing.
+
+    --confirm-cmd "'/opt/my tools/kw' outpoint --node NODE"
 
 a session that ends without a close leaves the payment in its state file and
 nothing broadcasts it, so if alice pays and walks away the locktime arrives and
