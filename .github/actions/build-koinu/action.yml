@@ -6,8 +6,8 @@ name: build koinu
 description: clone and build koinu at the pinned tag into ./koinu
 inputs:
   tag:
-    description: koinu release tag to build
-    required: true
+    description: koinu release tag to build; defaults to KOINU_TAG in version.mk
+    required: false
   deploy-key:
     description: read-only SSH deploy key, used only if the public clone fails
     required: false
@@ -19,6 +19,15 @@ runs:
         KOINU_TAG: ${{ inputs.tag }}
         KOINU_DEPLOY_KEY: ${{ inputs.deploy-key }}
       run: |
+        # version.mk is the single source of the pin. It is KEY=value so it
+        # sources here and `include`s in the Makefile, rather than the tag
+        # living in the workflow as a second copy that drifts.
+        if [ -z "${KOINU_TAG:-}" ]; then
+            . ./version.mk
+            echo "koinu tag $KOINU_TAG, from version.mk"
+        else
+            echo "koinu tag $KOINU_TAG, from the action input"
+        fi
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends autoconf automake libtool
         if GIT_TERMINAL_PROMPT=0 git clone https://github.com/xanimo/koinu koinu 2>/dev/null; then

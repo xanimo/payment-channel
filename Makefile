@@ -17,8 +17,10 @@
 # the submodule: koinu is private, so it clones with a deploy key into its own
 # workspace and passes KOINU explicitly. Both pin the same tag, which is the
 # point. Set KOINU to a checkout of your own to develop the two trees together.
-KOINU     ?= depends/koinu
-KOINU_TAG ?= v0.2.1
+# PC_VERSION and KOINU_TAG. A command-line KOINU_TAG= still overrides it.
+include version.mk
+
+KOINU ?= depends/koinu
 
 CC       ?= cc
 CFLAGS   ?= -std=gnu99 -O2 -g -Wall -Wextra -Wno-unused-parameter
@@ -28,6 +30,9 @@ CFLAGS   ?= -std=gnu99 -O2 -g -Wall -Wextra -Wno-unused-parameter
 # Overridden rather than appended so it survives a CFLAGS= on the command line.
 override CFLAGS += -Werror=implicit-function-declaration
 CPPFLAGS += -Iinclude -Isrc -I$(KOINU)/crypto -I$(KOINU)/net -I$(KOINU)/wallet
+# --version reports both, so a binary in the wild says which koinu it was built
+# against rather than only what it calls itself.
+CPPFLAGS += -DPC_VERSION=\"$(PC_VERSION)\" -DPC_KOINU_TAG=\"$(KOINU_TAG)\"
 LDLIBS   += $(KOINU)/libkw.a $(KOINU)/depends/secp256k1/.libs/libsecp256k1.a -lm
 
 CORE_SRC = src/channel.c src/envelope.c src/state.c src/txcheck.c src/wire.c
