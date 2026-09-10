@@ -98,6 +98,36 @@ static uint64_t read_feerate_kpkb(const char *literal, const char *cmd)
     return kpkb;
 }
 
+/* Between the miner's floor and DEFAULT_TRANSACTION_MAXFEE there is a wide band
+   where a fee is legal, relayable, and still absurd for the channel paying it:
+   a backend answering in the wrong units can price 20 DOGE on a 100 DOGE
+   channel, which is five thousand times the floor and nothing refuses it.
+   "fee 20.00000000 DOGE" on its own does not tell a reader that.
+
+   This reports rather than refuses, and the difference is deliberate. The one
+   transaction most likely to trip it is the refund, which is time-critical: if
+   the locktime is close and fees have risen, it has to confirm or the balance
+   is lost, and a nearly drained channel is exactly where the share looks worst.
+   Refusing there would cost the balance to save the fee. */
+#define PC_FEE_SHARE_WARN_PCT 10
+
+static void warn_fee_share(uint64_t fee, uint64_t capacity)
+{
+    /* A hundredth of the capacity, so the percent is a division rather than a
+       multiplication: fee * 100 overflows for a large channel, and a capacity
+       under 100 koinu is under the dust limit and has no percent worth
+       reporting anyway. */
+    if (capacity < 100) return;
+    uint64_t hundredth = capacity / 100;
+    if (fee < hundredth * PC_FEE_SHARE_WARN_PCT) return;
+
+    char f[32], c[32];
+    pc_koinu_to_doge(fee, f, sizeof(f));
+    pc_koinu_to_doge(capacity, c, sizeof(c));
+    fprintf(stderr, "alice: fee %s DOGE is %llu%% of this %s DOGE channel\n",
+            f, (unsigned long long)(fee / hundredth), c);
+}
+
 int main(int argc, char **argv)
 {
     const char *wif_arg = NULL, *peer = NULL, *ftx_arg = NULL;
@@ -251,6 +281,7 @@ int main(int argc, char **argv)
         }
         r = pc_channel_set_funding(&ch, rtxid, rvout, rcap);
         if (r != PC_OK) { fprintf(stderr, "alice: funding: %s\n", pc_strerror(r)); goto done; }
+        warn_fee_share(fee, ch.capacity_koinu);
 
         char *refund = NULL;
         r = pc_refund_create(&ch, wif, alice_addr, fee, &refund);
@@ -339,6 +370,7 @@ int main(int argc, char **argv)
     }
     r = pc_channel_set_funding(&ch, txid, vout, capacity);
     if (r != PC_OK) { fprintf(stderr, "alice: funding: %s\n", pc_strerror(r)); goto done; }
+    warn_fee_share(fee, ch.capacity_koinu);
 
     char cap_s[32];
     pc_koinu_to_doge(capacity, cap_s, sizeof(cap_s));

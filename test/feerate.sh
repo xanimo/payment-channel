@@ -114,5 +114,34 @@ try_fee --fee 500 --max-fee 600 | grep -q "a node will relay" &&
     { say "--max-fee did not raise the ceiling" no; fail=1; } ||
     say "--max-fee raises the ceiling" yes
 
+echo "fee share warning:"
+
+# The band the cap does not cover. This channel holds 100 DOGE, so a backend
+# answering 50 DOGE/kB prices 20 DOGE over 400 bytes: legal, relayable, under
+# the 100 cap, and a fifth of the channel. Reported, never refused.
+out=$(try_fee --feerate 50)
+printf '%s' "$out" | grep -q "is 20% of this 100.00000000 DOGE channel" &&
+    say "a fee that is a fifth of the channel is reported" yes ||
+    { say "--feerate 50 share" "$(printf '%s' "$out" | grep 'alice:' | head -1)"; fail=1; }
+
+# reporting is not refusing: the refund still gets built
+printf '%s' "$out" | grep -q "refund transaction, spendable from block" &&
+    say "and the refund is still built, not blocked" yes ||
+    { say "refund after warning" "not built"; fail=1; }
+
+# an ordinary fee says nothing at all
+try_fee --fee 1.0 | grep -q "of this" &&
+    { say "an ordinary fee warns" "it should not"; fail=1; } ||
+    say "an ordinary fee is silent" yes
+
+# the threshold is 10%, so just under it stays quiet
+try_fee --fee 9.0 | grep -q "of this" &&
+    { say "9% warned" "threshold is wrong"; fail=1; } ||
+    say "just under the threshold is silent" yes
+
+try_fee --fee 10.0 | grep -q "is 10% of this" &&
+    say "and exactly at it reports" yes ||
+    { say "10% did not warn" "$(try_fee --fee 10.0 | grep 'alice:' | head -1)"; fail=1; }
+
 [ "$fail" = 0 ] || { echo "feerate FAILED" >&2; exit 1; }
 echo "feerate ok"
