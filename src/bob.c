@@ -158,6 +158,7 @@ static void usage(void)
       "           [--sweep-margin N] [--confirm-cmd CMD] [--warn-margin N]\n"
       "           [--watch SEC] [--alert-cmd CMD]\n"
       "       bob --wif WIF|@FILE|- --pubkey\n"
+      "       bob --version\n"
       "       bob --sign --wif WIF|@FILE|-   (signer: PSBT on stdin, signed out)\n"
       "\n"
       "  --wif @FILE reads the key from a file (mode 0600) and - from stdin;\n"
@@ -1273,6 +1274,12 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--testnet"))   chain = PC_CHAIN_TEST;
         else if (!strcmp(a, "--regtest"))   chain = PC_CHAIN_REGTEST;
         else if (!strcmp(a, "--pubkey"))    want_pubkey = 1;
+        /* answered here rather than through the usual flow, so it works without
+           a key and cannot be made to fail by any other argument */
+        else if (!strcmp(a, "--version")) {
+            printf("bob %s (koinu %s)\n", PC_VERSION, PC_KOINU_TAG);
+            return 0;
+        }
         else if (!strcmp(a, "--once"))      once = 1;
         else if (!strcmp(a, "--price")) {
             const char *v = NEXT();

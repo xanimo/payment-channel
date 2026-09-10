@@ -56,6 +56,7 @@ static void usage(void)
       "             [--max-fee DOGE] [--close] [--connect [HOST:]PORT]\n"
       "             [--testnet|--regtest]\n"
       "       alice --wif WIF|@FILE|- --pubkey\n"
+      "       alice --version\n"
       "\n"
       "  --wif @FILE reads the key from a file (mode 0600), - from stdin; a\n"
       "  bare key is left in argv where ps can read it, so prefer @FILE.\n"
@@ -154,6 +155,12 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--testnet"))     chain = PC_CHAIN_TEST;
         else if (!strcmp(a, "--regtest"))     chain = PC_CHAIN_REGTEST;
         else if (!strcmp(a, "--pubkey"))      want_pubkey = 1;
+        /* answered here rather than through the usual flow, so it works without
+           a key and cannot be made to fail by any other argument */
+        else if (!strcmp(a, "--version")) {
+            printf("alice %s (koinu %s)\n", PC_VERSION, PC_KOINU_TAG);
+            return 0;
+        }
         else if (!strcmp(a, "--address"))     want_address = 1;
         else if (!strcmp(a, "--close"))       want_close = 1;
         else if (!strcmp(a, "--refund"))      want_refund = 1;
