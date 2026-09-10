@@ -27,7 +27,7 @@ CORE_SRC = src/channel.c src/envelope.c src/state.c src/txcheck.c src/wire.c
 CORE_OBJ = $(CORE_SRC:.c=.o)
 
 BINS = alice bob
-TESTS = test_channel test/mkfunding test/adversary test/attack
+TESTS = test_channel test/mkfunding test/adversary test/attack test/sighash_vectors
 
 all: $(BINS)
 
@@ -47,6 +47,9 @@ test/adversary: test/adversary.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test/mkfunding: test/mkfunding.o $(CORE_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+test/sighash_vectors: test/sighash_vectors.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 test/bench: test/bench.o $(CORE_OBJ)
@@ -74,6 +77,7 @@ fuzz/fuzz_%: fuzz/fuzz_%.c $(CORE_SRC)
 check: $(TESTS) $(BINS)
 	./test_channel
 	./test/attack
+	./test/sighash_vectors
 	./test/loopback.sh
 	./test/slowpeer.sh
 	./test/resume.sh

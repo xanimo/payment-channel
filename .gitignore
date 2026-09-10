@@ -18,3 +18,5 @@ crash-*
 leak-*
 timeout-*
 oom-*
+test/sighash_vectors
+test/__pycache__/
