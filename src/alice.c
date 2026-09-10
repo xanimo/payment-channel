@@ -53,7 +53,8 @@ static void usage(void)
       "usage: alice --wif WIF|@FILE|- --peer-pubkey HEX --locktime N --address\n"
       "       alice --wif WIF|@FILE|- --locktime N --funding-tx HEX|@FILE\n"
       "             [--peer-pubkey HEX] [--fee DOGE|--feerate DOGE/kB] [--max DOGE]\n"
-      "             [--close] [--connect [HOST:]PORT] [--testnet|--regtest]\n"
+      "             [--max-fee DOGE] [--close] [--connect [HOST:]PORT]\n"
+      "             [--testnet|--regtest]\n"
       "       alice --wif WIF|@FILE|- --pubkey\n"
       "\n"
       "  --wif @FILE reads the key from a file (mode 0600), - from stdin; a\n"
@@ -64,7 +65,9 @@ static void usage(void)
       "  --refund builds Alice's unilateral close, valid once --locktime\n"
       "  passes. It needs no peer, which is the situation it is for.\n"
       "  --feerate DOGE/kB sizes the fee from a live rate instead of --fee;\n"
-      "  --feerate-cmd runs a command (dogecoin-cli estimatefee) for it.\n");
+      "  --feerate-cmd runs a command (dogecoin-cli estimatefee) for it.\n"
+      "  Either way the fee is refused over DEFAULT_TRANSACTION_MAXFEE, which\n"
+      "  a node rejects as absurdly-high-fee. --max-fee moves that ceiling.\n");
 }
 
 /* A live feerate in DOGE/kB, from a literal or a command's stdout, returned as
@@ -99,7 +102,7 @@ int main(int argc, char **argv)
 {
     const char *wif_arg = NULL, *peer = NULL, *ftx_arg = NULL;
     const char *connect_to = NULL, *fee_s = "1.0", *max_s = NULL;
-    const char *feerate_s = NULL, *feerate_cmd = NULL;
+    const char *feerate_s = NULL, *feerate_cmd = NULL, *max_fee_s = NULL;
     int fee_set = 0;
     uint32_t locktime = 0;
     pc_chain chain = PC_CHAIN_MAIN;
@@ -114,6 +117,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--fee"))         { fee_s = NEXT(); fee_set = 1; }
         else if (!strcmp(a, "--feerate"))     feerate_s = NEXT();
         else if (!strcmp(a, "--feerate-cmd")) feerate_cmd = NEXT();
+        else if (!strcmp(a, "--max-fee"))     max_fee_s = NEXT();
         else if (!strcmp(a, "--max"))         max_s = NEXT();
         else if (!strcmp(a, "--connect"))     connect_to = NEXT();
         else if (!strcmp(a, "--locktime"))    { const char *v = NEXT(); locktime = v ? (uint32_t)strtoul(v, NULL, 10) : 0; }
@@ -181,7 +185,10 @@ int main(int argc, char **argv)
     }
     if (!ftx_arg) { usage(); goto done; }
 
-    uint64_t fee = 0, maximum = UINT64_MAX;
+    uint64_t fee = 0, maximum = UINT64_MAX, max_fee = PC_MAX_FEE_KOINU;
+    if (max_fee_s && pc_doge_to_koinu(max_fee_s, &max_fee) != PC_OK) {
+        fprintf(stderr, "alice: --max-fee is not an amount\n"); goto done;
+    }
     if (pc_doge_to_koinu(fee_s, &fee) != PC_OK) {
         fprintf(stderr, "alice: --fee is not an amount\n"); goto done;
     }
@@ -205,6 +212,24 @@ int main(int argc, char **argv)
         char d[32];
         pc_koinu_to_doge(fee, d, sizeof(d));
         fprintf(stderr, "alice: fee %s DOGE\n", d);
+    }
+
+    /* The other end of the floor check below, and above the refund branch
+       because the refund is the one Alice broadcasts herself: a fee nobody
+       else is going to look at first. Over DEFAULT_TRANSACTION_MAXFEE a node
+       answers absurdly-high-fee and will not relay it, so this refuses rather
+       than quietly clamping. A fee that size is a typo or a backend answering
+       in the wrong units, and paying a hundredth of what was asked for is not
+       obviously better than paying all of it. --max-fee is the allowhighfees
+       equivalent for an operator who means it; Bob holds to the default on his
+       own, so raising it here only carries a refund. */
+    if (fee > max_fee) {
+        char got[32], cap[32];
+        pc_koinu_to_doge(fee, got, sizeof(got));
+        pc_koinu_to_doge(max_fee, cap, sizeof(cap));
+        fprintf(stderr, "alice: fee of %s is over the %s a node will relay, "
+                        "raise --max-fee if that is meant\n", got, cap);
+        goto done;
     }
 
     /* The refund needs no peer on the other end, which is the whole point of
@@ -259,6 +284,7 @@ int main(int argc, char **argv)
             goto done;
         }
     }
+
     funding_tx = pc_read_hex_arg(ftx_arg);
     if (!funding_tx) { fprintf(stderr, "alice: cannot read --funding-tx\n"); goto done; }
 

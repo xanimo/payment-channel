@@ -62,6 +62,7 @@ const char *pc_strerror(pc_result r)
     case PC_ERR_CAPACITY: return "spends more than the channel holds";
     case PC_ERR_DUST:    return "an output is under the dust limit";
     case PC_ERR_FEE:     return "leaves too little fee to be mined";
+    case PC_ERR_FEE_HIGH: return "fee is higher than a node accepts";
     case PC_ERR_FINAL:   return "not final and cannot be mined yet";
     case PC_ERR_VERSION: return "version is not a standard one";
     case PC_ERR_NONSTANDARD: return "an output script is not standard";

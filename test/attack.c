@@ -322,6 +322,35 @@ int main(void)
         free(raw);
     }
 
+    /* The fee is what the outputs do not spend, so underspending is how one is
+       set. Bob pays none of it and is paid what he asked either way, which is
+       why nothing else here catches it: over DEFAULT_TRANSACTION_MAXFEE a node
+       answers absurdly-high-fee and the transaction Bob is holding cannot be
+       broadcast. The channel above holds exactly the cap, so this needs a
+       richer one to leave more than 100 DOGE unspent. */
+    {
+        pc_channel rich;
+        if (pc_channel_init(&rich, apub, bpub, 300000, PC_CHAIN_MAIN) == PC_OK &&
+            pc_channel_set_funding(&rich,
+                "b4455e7b7b7acb51fb6feba7a2702c42a5100f61f61abafa31851ed6ae076074",
+                0, 30000000000ULL) == PC_OK) {
+            out_t burn[2];
+            p2pkh(&burn[0], bh + 1, TO_BOB);
+            p2pkh(&burn[1], ah + 1, 8000000000ULL);   /* leaves 200 DOGE of fee */
+            raw = forge(&rich, awif, bwif, 1, 0xffffffffu, 0, burn, 2);
+            expect_refused(&rich, raw, TO_BOB, "a fee no node would relay");
+            free(raw);
+
+            /* and the boundary is a limit, not a wall one koinu inside it */
+            out_t at_cap[2];
+            p2pkh(&at_cap[0], bh + 1, TO_BOB);
+            p2pkh(&at_cap[1], ah + 1, 18000000000ULL); /* leaves exactly 100 */
+            raw = forge(&rich, awif, bwif, 1, 0xffffffffu, 0, at_cap, 2);
+            expect_accepted(&rich, raw, TO_BOB, "a fee exactly at the cap");
+            free(raw);
+        }
+    }
+
     /* The per-output bound is relative to the capacity, and the capacity comes
        from the funding transaction Alice supplied. If she can set it above what
        money exists, the bound stops bounding and the wrap comes back. */
