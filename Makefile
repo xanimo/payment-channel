@@ -12,14 +12,16 @@
 # spend needs. Whatever KOINU points at must contain libkw.a,
 # depends/secp256k1/.libs/libsecp256k1.a, and the crypto/ net/ wallet/ headers.
 
+# PC_VERSION and KOINU_TAG, the one place either is written. A command-line
+# KOINU_TAG= still overrides it, and .github/actions/build-koinu sources the
+# same file so CI cannot drift from this.
+include version.mk
+
 # koinu is a submodule pinned at KOINU_TAG, so a local build is the same one CI
 # runs rather than whatever a sibling checkout happens to be on. CI does not use
 # the submodule: koinu is private, so it clones with a deploy key into its own
 # workspace and passes KOINU explicitly. Both pin the same tag, which is the
 # point. Set KOINU to a checkout of your own to develop the two trees together.
-# PC_VERSION and KOINU_TAG. A command-line KOINU_TAG= still overrides it.
-include version.mk
-
 KOINU ?= depends/koinu
 
 CC       ?= cc
@@ -134,6 +136,7 @@ check: koinu-version $(TESTS) $(BINS)
 	./test/keyguard.sh
 	./test/signer.sh
 	./test/replicate.sh
+	./test/failover.sh
 	./test/feerate.sh
 	./test/metrics.sh
 
