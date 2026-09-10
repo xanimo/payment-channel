@@ -229,6 +229,14 @@ the default on his own, so raising it only carries a refund she broadcasts
 herself. the cap is absolute rather than proportional because core's is, so it
 refuses 500 doge to move 1 doge and has nothing to say about 50.
 
+between the floor and that cap is a wide band where a fee is legal, relayable
+and still absurd for the channel paying it, so alice reports the fee as a share
+of the channel once it passes a tenth of it. she reports and does not refuse,
+because the transaction most likely to trip it is the refund, which has to
+confirm before its locktime or the balance is lost, and a nearly drained
+channel is where the share looks worst. refusing there would spend the balance
+to save the fee.
+
 if bob stops answering, alice takes the money back through the timelocked
 branch. it needs no peer, which is the situation it is for, and the transaction
 it prints is worthless to anyone until the locktime passes.
