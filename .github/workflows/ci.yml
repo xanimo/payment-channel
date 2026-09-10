@@ -14,8 +14,8 @@ on:
 permissions:
   contents: read
 
-env:
-  # pc pins a koinu release, not a moving main.
+# The koinu pin is not here: it lives in version.mk, which the build-koinu
+# action sources. One copy of the tag, so it cannot drift from the Makefile's.
 
 jobs:
   # test_channel, test/attack, the shell scenarios (loopback, sweep, keyguard,
