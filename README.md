@@ -350,6 +350,13 @@ transaction back.
 
     --replicate-cmd "cp -t /mnt/mirror"   # or rsync, an object-store put, ...
 
+losing the primary is doc/RUNBOOK.md. there is no restore step: the sweep
+rebuilds each channel from the file alone, so a replica directory is already a
+working primary and `bob --sweep --state /replica` is the whole failover.
+`test/failover.sh` destroys a primary holding a payment and recovers the money
+from the replica, so the runbook describes something that passes rather than
+something that should work.
+
 do not put the listen port on the open internet. the wire protocol is plaintext
 and unauthenticated, so anyone on the path reads every amount, address and txid,
 and an active man in the middle can substitute the announced pubkey during the
