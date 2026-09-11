@@ -310,8 +310,11 @@ the transaction owes.
 
 the digest is checked against 156 signatures pc did not produce, in
 `test/sighash_vectors`: six transactions dogecoin core's own `tx_valid.json`
-asserts are valid, and 150 confirmed mainnet p2pkh spends read straight out of
-`blk*.dat`. the second set is the useful one, since the whole network already
+asserts are valid, and 150 confirmed mainnet spends read straight out of
+`blk*.dat`. 100 of those are p2pkh and 50 are p2sh, which is the shape the
+channel itself uses, so the redeem-script script code pc computes over is
+covered by the chain and not only by pc's own tests. every signature a vector
+carries has to verify, so a 2-of-2 is two answers rather than one. the second set is the useful one, since the whole network already
 validated those signatures against the digest consensus really uses, so a
 digest that differs anywhere fails to verify and cannot pass by coincidence.
 flipping one byte of the preimage takes it to 0/156. both files are checked in,

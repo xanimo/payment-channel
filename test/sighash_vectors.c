@@ -15,8 +15,11 @@
  *
  *   sighash_vectors        transactions Dogecoin Core's own tx_valid.json
  *                          asserts are valid. Few, and deliberately strange.
- *   sighash_vectors_chain  confirmed mainnet P2PKH spends. Many, and utterly
- *                          ordinary, which is the other half of the coverage.
+ *   sighash_vectors_chain  confirmed mainnet spends, in both shapes pc takes a
+ *                          digest over: P2PKH, where the script code is the
+ *                          scriptPubKey, and P2SH, where it is the redeem
+ *                          script the scriptSig pushes last. The second is the
+ *                          shape pc's own 2-of-2 channel uses.
  *
  * Both are checked in, so this needs no python, no node and no network. */
 
@@ -33,8 +36,8 @@
 
 /* Two sources, because they fail differently. Core's tx_valid.json is a handful
    of odd script shapes someone wrote deliberately; the chain file is bulk
-   ordinary P2PKH that the network actually validated. A digest bug that somehow
-   survived one is unlikely to survive both. */
+   ordinary spending that the network actually validated. A digest bug that
+   somehow survived one is unlikely to survive both. */
 static const char *DEFAULT_PATHS[] = {
     "test/data/sighash_vectors",
     "test/data/sighash_vectors_chain",
@@ -106,21 +109,25 @@ static int run_file(const char *path, int *total_out, int *ok_out)
         snprintf(sigs_copy, sizeof(sigs_copy), "%s", sigs_s);
         size_t ns = split_csv(sigs_copy, sigs, MAX_ITEMS);
 
-        /* Which key signed is not recorded in the data, so any pair verifying
-           is the assertion. A wrong digest satisfies none of them. */
-        int verified = 0;
-        for (size_t i = 0; i < nk && !verified; i++) {
-            unsigned char raw[65], pub[33];
-            size_t rlen = 0;
-            if (!hex_bytes(keys[i], raw, sizeof(raw), &rlen)) continue;
-            if (!kw_ec_pubkey_parse(raw, rlen, pub)) continue;
-            for (size_t j = 0; j < ns && !verified; j++) {
-                unsigned char sig[80];
-                size_t slen = 0;
-                if (!hex_bytes(sigs[j], sig, sizeof(sig), &slen)) continue;
-                if (kw_ec_verify(pub, hash, sig, slen)) verified = 1;
+        /* Which key signed which is not recorded, so the assertion is that
+           EVERY signature verifies against some key in the script. A 2-of-2
+           carries two, and "one of them verified" would pass on half a digest;
+           requiring all of them is what makes a multisig vector worth more
+           than a single-signature one. A wrong digest satisfies none. */
+        size_t matched = 0;
+        for (size_t j = 0; j < ns; j++) {
+            unsigned char sig[80];
+            size_t slen = 0;
+            if (!hex_bytes(sigs[j], sig, sizeof(sig), &slen)) continue;
+            for (size_t i = 0; i < nk; i++) {
+                unsigned char raw[65], pub[33];
+                size_t rlen = 0;
+                if (!hex_bytes(keys[i], raw, sizeof(raw), &rlen)) continue;
+                if (!kw_ec_pubkey_parse(raw, rlen, pub)) continue;
+                if (kw_ec_verify(pub, hash, sig, slen)) { matched++; break; }
             }
         }
+        int verified = (ns > 0 && matched == ns);
 
         /* Only failures are printed, and only the first few. A hundred and
            fifty lines of "verified" is not a result anyone reads, and a
