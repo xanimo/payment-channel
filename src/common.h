@@ -40,9 +40,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 
 #define PC_DEFAULT_PORT 9876
+
+/* Bound on a backend command's own arguments, before the two appended. */
+#define PC_BACKEND_MAX_ARGV 32
 
 /* Wipe key material through a volatile pointer so the clear is not optimized
    away. */
@@ -153,6 +161,114 @@ static inline int pc_split_argv(char *buf, char **argv, size_t max)
     }
     return (int)argc;
 }
+
+/* Run (cmd), split into argv by pc_split_argv, with (extra) appended and (feed)
+   written to its stdin, and killed after (seconds).
+ *
+ * Every backend goes through this: the confirmation, the broadcast, the signer,
+ * the replica and Alice's feerate. They differ in their arguments and their
+ * budget and in nothing else. One runner is the point rather than a
+ * convenience: a second one grows its own idea of how a command splits, and
+ * then a path that works for one backend does not work for another.
+ *
+ * Never a shell. No expansion, no globbing, no operators, and a command that
+ * does not fit the buffer fails the exec rather than running a truncated one.
+ * Returns 0 if it could not be run or did not answer in time. */
+static inline int pc_run_backend(const char *cmd, const char *const *extra, size_t nextra,
+                       const char *feed, unsigned seconds,
+                       char *out, size_t cap, int *status)
+{
+    int fds[2], in[2];
+    if (pipe(fds) != 0) return 0;
+    if (pipe(in) != 0) { close(fds[0]); close(fds[1]); return 0; }
+
+    pid_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); close(in[0]); close(in[1]); return 0; }
+    if (pid == 0) {
+        /* Its own process group, so the timeout below can kill what the
+           backend started as well as the backend. A wrapper script that execs
+           nothing and waits on a child would otherwise survive being killed,
+           keep the inherited stderr open, and outlive the caller. */
+        setpgid(0, 0);
+        close(fds[0]); close(in[1]);
+        dup2(fds[1], STDOUT_FILENO);
+        dup2(in[0], STDIN_FILENO);
+        close(fds[1]); close(in[0]);
+
+        /* Quotes and backslash are honoured so a backend path may contain a
+           space; see pc_split_argv. It is still not a shell. The split is over
+           the operator's own argument, and the values appended after it are a
+           validated address and a validated outpoint, so nothing off the wire
+           reaches argv unchecked. */
+        char *argv[PC_BACKEND_MAX_ARGV];
+        char split[512];
+        /* Truncation would silently drop the tail of the last token, turning
+           --node host:22556 into --node host:2. Fail the exec instead. */
+        if (snprintf(split, sizeof(split), "%s", cmd) >= (int)sizeof(split)) _exit(127);
+        if (nextra + 1 >= PC_BACKEND_MAX_ARGV) _exit(127);   /* no room to append */
+        int argc = pc_split_argv(split, argv, PC_BACKEND_MAX_ARGV - nextra - 1);
+        if (argc <= 0) _exit(127);
+        size_t ac = (size_t)argc;
+        for (size_t i = 0; i < nextra; i++) argv[ac++] = (char *)extra[i];
+        argv[ac] = NULL;
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(fds[1]); close(in[0]);
+
+    if (feed) {
+        size_t left = strlen(feed);
+        while (left) {
+            ssize_t w = write(in[1], feed, left);
+            if (w <= 0) { if (w < 0 && errno == EINTR) continue; break; }
+            feed += w; left -= (size_t)w;
+        }
+    }
+    close(in[1]);
+
+    size_t n = 0;
+    time_t deadline = time(NULL) + seconds;
+    int timed_out = 0;
+    for (;;) {
+        struct pollfd pfd = { fds[0], POLLIN, 0 };
+        time_t left = deadline - time(NULL);
+        if (left <= 0) { timed_out = 1; break; }
+        int pr = poll(&pfd, 1, (int)(left * 1000));
+        if (pr <= 0) { if (pr == 0) timed_out = 1; break; }
+        if (n + 1 >= cap) break;
+        ssize_t r = read(fds[0], out + n, cap - 1 - n);
+        if (r < 0) { if (errno == EINTR) continue; break; }
+        if (r == 0) break;
+        n += (size_t)r;
+    }
+    out[n] = '\0';
+    close(fds[0]);
+
+    int st = 0;
+    if (!timed_out) {
+        /* The read loop also ends on EOF, and a backend can close stdout while
+           it keeps running. Bound the reap by the same deadline so that cannot
+           hang the caller past its budget. */
+        for (;;) {
+            pid_t w = waitpid(pid, &st, WNOHANG);
+            if (w == pid) break;
+            if (w < 0 && errno != EINTR) { timed_out = 1; break; }
+            if (time(NULL) >= deadline) { timed_out = 1; break; }
+            poll(NULL, 0, 20);          /* 20ms, nothing to wait on but the clock */
+        }
+    }
+    if (timed_out) {
+        /* The group first, then the leader in case setpgid lost the race with
+           the exec. Killing only the leader leaves its children running. */
+        kill(-pid, SIGKILL);
+        kill(pid, SIGKILL);
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { }
+        return 0;
+    }
+    *status = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    return 1;
+}
+
 
 /* A hex argument, or @path to read it from a file. */
 static inline char *pc_read_hex_arg(const char *arg)

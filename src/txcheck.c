@@ -105,9 +105,18 @@ static void rd_script(rdr *r, const unsigned char **out, size_t *outlen)
 #define PC_RELAY_KOINU_PER_KB   100000ULL   /* DEFAULT_MIN_RELAY_TX_FEE   */
 #define PC_BLOCK_KOINU_PER_KB  1000000ULL   /* DEFAULT_BLOCK_MIN_TX_FEE   */
 
-/* CFeeRate::GetFee(), which is proportional rather than per started kB */
+/* CFeeRate::GetFee(), which is proportional rather than per started kB.
+ *
+ * The multiply is bounded first. pc_doge_to_koinu accepts anything up to
+ * PC_MAX_MONEY_KOINU, so a rate off a backend can be large enough that
+ * per_kb * bytes wraps, and the interesting wraps land near zero rather than
+ * near the top: the guard below would turn one into 1 koinu, max() against the
+ * policy floor would turn that into an ordinary-looking fee, and the ceiling
+ * that exists to refuse exactly this would never fire because the number came
+ * out small. Saturating sends it the other way, into the refusal. */
 static uint64_t fee_at(uint64_t per_kb, size_t bytes)
 {
+    if (bytes && per_kb > UINT64_MAX / (uint64_t)bytes) return UINT64_MAX;
     uint64_t f = per_kb * (uint64_t)bytes / 1000;
     return (f == 0 && bytes) ? 1 : f;
 }

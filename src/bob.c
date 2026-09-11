@@ -286,96 +286,6 @@ static int read_height_file(const char *path, unsigned max_age,
 #define PC_CONFIRM_SECONDS 3
 #define PC_CONFIRM_MAX_ARGV 32
 
-/* Run (cmd), split into argv, with (extra) appended and (feed) written to its
-   stdin. Shared by the confirmation and the broadcast because they differ only
-   in their arguments and their budget. */
-static int run_backend(const char *cmd, const char *const *extra, size_t nextra,
-                       const char *feed, unsigned seconds,
-                       char *out, size_t cap, int *status)
-{
-    int fds[2], in[2];
-    if (pipe(fds) != 0) return 0;
-    if (pipe(in) != 0) { close(fds[0]); close(fds[1]); return 0; }
-
-    pid_t pid = fork();
-    if (pid < 0) { close(fds[0]); close(fds[1]); close(in[0]); close(in[1]); return 0; }
-    if (pid == 0) {
-        close(fds[0]); close(in[1]);
-        dup2(fds[1], STDOUT_FILENO);
-        dup2(in[0], STDIN_FILENO);
-        close(fds[1]); close(in[0]);
-
-        /* Quotes and backslash are honoured so a backend path may contain a
-           space; see pc_split_argv. It is still not a shell. The split is over
-           the operator's own argument, and the values appended after it are a
-           validated address and a validated outpoint, so nothing off the wire
-           reaches argv unchecked. */
-        char *argv[PC_CONFIRM_MAX_ARGV];
-        char split[512];
-        /* Truncation would silently drop the tail of the last token, turning
-           --node host:22556 into --node host:2. Fail the exec instead. */
-        if (snprintf(split, sizeof(split), "%s", cmd) >= (int)sizeof(split)) _exit(127);
-        if (nextra + 1 >= PC_CONFIRM_MAX_ARGV) _exit(127);   /* no room to append */
-        int argc = pc_split_argv(split, argv, PC_CONFIRM_MAX_ARGV - nextra - 1);
-        if (argc <= 0) _exit(127);
-        size_t ac = (size_t)argc;
-        for (size_t i = 0; i < nextra; i++) argv[ac++] = (char *)extra[i];
-        argv[ac] = NULL;
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    close(fds[1]); close(in[0]);
-
-    if (feed) {
-        size_t left = strlen(feed);
-        while (left) {
-            ssize_t w = write(in[1], feed, left);
-            if (w <= 0) { if (w < 0 && errno == EINTR) continue; break; }
-            feed += w; left -= (size_t)w;
-        }
-    }
-    close(in[1]);
-
-    size_t n = 0;
-    time_t deadline = time(NULL) + seconds;
-    int timed_out = 0;
-    for (;;) {
-        struct pollfd pfd = { fds[0], POLLIN, 0 };
-        time_t left = deadline - time(NULL);
-        if (left <= 0) { timed_out = 1; break; }
-        int pr = poll(&pfd, 1, (int)(left * 1000));
-        if (pr <= 0) { if (pr == 0) timed_out = 1; break; }
-        if (n + 1 >= cap) break;
-        ssize_t r = read(fds[0], out + n, cap - 1 - n);
-        if (r < 0) { if (errno == EINTR) continue; break; }
-        if (r == 0) break;
-        n += (size_t)r;
-    }
-    out[n] = '\0';
-    close(fds[0]);
-
-    int st = 0;
-    if (!timed_out) {
-        /* The read loop also ends on EOF, and a backend can close stdout while
-           it keeps running. Bound the reap by the same deadline so that cannot
-           hang the caller past its budget. */
-        for (;;) {
-            pid_t w = waitpid(pid, &st, WNOHANG);
-            if (w == pid) break;
-            if (w < 0 && errno != EINTR) { timed_out = 1; break; }
-            if (time(NULL) >= deadline) { timed_out = 1; break; }
-            poll(NULL, 0, 20);          /* 20ms, nothing to wait on but the clock */
-        }
-    }
-    if (timed_out) {
-        kill(pid, SIGKILL);
-        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { }
-        return 0;
-    }
-    *status = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
-    return 1;
-}
-
 /* "depth 12" or "value 100000000 koinu" out of that one line */
 static int confirm_field(const char *s, const char *key, unsigned long long *out)
 {
@@ -422,7 +332,7 @@ static int run_confirm(const char *cmd, const char *addr, const char *outpoint,
        keeps a plain kw outpoint working. */
     const char *extra[6] = { "--watch", addr, "--outpoint", outpoint,
                              "--since", since };
-    return run_backend(cmd, extra, since ? 6 : 4, NULL, PC_CONFIRM_SECONDS,
+    return pc_run_backend(cmd, extra, since ? 6 : 4, NULL, PC_CONFIRM_SECONDS,
                        out, cap, status);
 }
 
@@ -445,7 +355,7 @@ static int broadcast(const char *cmd, const char *raw_tx_hex)
     const char *extra[2] = { "--tx", "-" };
     char out[512];
     int status = -1;
-    if (!run_backend(cmd, extra, 2, raw_tx_hex, PC_BROADCAST_SECONDS,
+    if (!pc_run_backend(cmd, extra, 2, raw_tx_hex, PC_BROADCAST_SECONDS,
                      out, sizeof(out), &status)) {
         printf("broadcast did not answer in %ds, broadcast it yourself\n",
                PC_BROADCAST_SECONDS);
@@ -468,7 +378,7 @@ static char *run_signer(const char *cmd, const char *psbt_hex)
     char *out = (char *)malloc(cap);
     if (!out) return NULL;
     int status = -1;
-    if (!run_backend(cmd, NULL, 0, psbt_hex, PC_CONFIRM_SECONDS,
+    if (!pc_run_backend(cmd, NULL, 0, psbt_hex, PC_CONFIRM_SECONDS,
                      out, cap, &status) || status != 0) { free(out); return NULL; }
     size_t n = strlen(out);
     while (n && (out[n - 1] == '\n' || out[n - 1] == '\r' ||
@@ -488,7 +398,7 @@ static int replicate(const char *cmd, const char *path)
     const char *extra[1] = { path };
     char out[256];
     int status = -1;
-    if (!run_backend(cmd, extra, 1, NULL, PC_CONFIRM_SECONDS,
+    if (!pc_run_backend(cmd, extra, 1, NULL, PC_CONFIRM_SECONDS,
                      out, sizeof(out), &status))
         return 0;
     return status == 0;
@@ -584,7 +494,7 @@ static void run_alert(const char *cmd, const char *msg)
     const char *extra[1] = { msg };
     char buf[256];
     int status = -1;
-    run_backend(cmd, extra, 1, NULL, PC_CONFIRM_SECONDS, buf, sizeof(buf), &status);
+    pc_run_backend(cmd, extra, 1, NULL, PC_CONFIRM_SECONDS, buf, sizeof(buf), &status);
 }
 
 /* One pass over the state directory, broadcasting what is about to expire.
