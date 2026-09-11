@@ -71,6 +71,12 @@ static void usage(void)
       "  a node rejects as absurdly-high-fee. --max-fee moves that ceiling.\n");
 }
 
+/* What a feerate backend gets before it is killed. Same budget as Bob's
+ * confirmation, and for the same reason: it is a question to a local node, and
+ * a fee that has not arrived is answered by the policy floor rather than by
+ * waiting. A refund cannot wait at all, since its locktime does not pause. */
+#define PC_FEERATE_SECONDS 3
+
 /* A live feerate in DOGE/kB, from a literal or a command's stdout, returned as
  * koinu per kB. dogecoin-cli estimatefee prints -1 when it has too little
  * history to estimate; that, an empty line, a non-zero exit or any unparseable
@@ -78,21 +84,29 @@ static void usage(void)
  * policy floor rather than block a close it needs to make. */
 static uint64_t read_feerate_kpkb(const char *literal, const char *cmd)
 {
-    char buf[64];
+    char buf[256];
     const char *s = literal;
     if (cmd) {
-        FILE *p = popen(cmd, "r");
-        if (!p) return 0;
-        char *line = fgets(buf, sizeof(buf), p);
-        int st = pclose(p);
-        if (!line || st != 0) return 0;
+        /* Through pc_run_backend like every other backend, so it is not a
+           shell and cannot hang. popen was both: it re-parsed a command that
+           pc_split_argv had already been taught to split, and fgets on a stuck
+           dogecoin-cli waited forever. The path that reaches here includes
+           --refund, which has a locktime to beat. */
+        int st = -1;
+        if (!pc_run_backend(cmd, NULL, 0, NULL, PC_FEERATE_SECONDS,
+                            buf, sizeof(buf), &st) || st != 0)
+            return 0;
         s = buf;
     }
-    /* the first whitespace-delimited token */
+    /* the first whitespace-delimited token, refused rather than truncated:
+       a cut amount is a different number, not a shorter one */
     char tok[48];
     size_t n = 0;
     while (*s && isspace((unsigned char)*s)) s++;
-    while (*s && !isspace((unsigned char)*s) && n + 1 < sizeof(tok)) tok[n++] = *s++;
+    while (*s && !isspace((unsigned char)*s)) {
+        if (n + 1 >= sizeof(tok)) return 0;
+        tok[n++] = *s++;
+    }
     tok[n] = '\0';
     uint64_t kpkb = 0;
     if (n == 0 || pc_doge_to_koinu(tok, &kpkb) != PC_OK || kpkb == 0) return 0;
