@@ -34,7 +34,7 @@ printf '%s' "$FUNDING_HEX" > "$WORK/funding.hex"
 echo "serving metrics:"
 
 mkdir -p "$WORK/state"
-./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once \
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --trust-peer --once \
       --height 1000 --min-slack 100 --state "$WORK/state" \
       --metrics-file "$WORK/metrics.prom" \
       --price 5.0 --price 7.5 --price 17.5 > "$WORK/bob.log" 2>&1 &
@@ -96,7 +96,7 @@ got=$(grep -c "^pc_serve_" "$WORK/metrics.prom")
 # A rejection is counted too. Bob refuses a locktime that does not clear
 # --min-slack, and Alice never gets as far as a payment.
 mkdir -p "$WORK/state2"
-./bob --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT+1))" --once \
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT+1))" --trust-peer --once \
       --height 1000 --min-slack 100 --state "$WORK/state2" \
       --metrics-file "$WORK/metrics.prom" \
       --price 5.0 > "$WORK/bob2.log" 2>&1 &

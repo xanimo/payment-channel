@@ -103,7 +103,10 @@ he refuses to run without it unless `--once` is given, which cannot outlive its
 own number.
 
 `--confirm-cmd` is the only thing that checks the funding against a chain rather
-than against alice. without it she never has to have broadcast the transaction
+than against alice, so bob refuses to serve without it unless `--trust-peer`
+says you have some other reason to believe her. it is the same refusal `--state`
+and `--height-file` make, for the same reason: forgetting it costs money and the
+program should not start. without it she never has to have broadcast the transaction
 she hands him, and a double spend, an earlier close or her own refund all end
 the same way: bob ships against something that can never confirm. the command is
 split into argv and run with alice's outpoint appended, `CMD --watch ADDR

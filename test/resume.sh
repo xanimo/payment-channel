@@ -35,7 +35,7 @@ read -r FUNDING_HEX _ _ < <(./test/mkfunding "$CHANNEL" "$ALICE_ADDR" 100.0)
 printf '%s' "$FUNDING_HEX" > "$WORK/funding.hex"
 
 start_bob() {
-    ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" \
+    ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --trust-peer \
           --min-slack 100 --height-file "$WORK/height" \
           --state "$WORK/state" \
           --price 5.0 >> "$WORK/bob.log" 2>&1 &
@@ -76,7 +76,7 @@ say() { printf "  %-52s %s\n" "$1" "$2"; }
 echo "one outpoint, many connections:"
 
 # a long-lived Bob with nowhere to keep the ratchet refuses to start at all
-if ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" \
+if ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --trust-peer \
          --height-file "$WORK/height" --price 5.0 >"$WORK/nostate.log" 2>&1; then
     say "refuses to run long-lived without --state" "NO, it started"; fail=1
 else

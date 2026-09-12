@@ -36,7 +36,7 @@ run_alice() {
 echo "a payment is durable in a second place before the ack:"
 
 # a replica that succeeds: the state file is mirrored and the payment is acked
-./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once --height 1000 \
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --trust-peer --once --height 1000 \
       --min-slack 100 --state "$WORK/state" --price 5.0 \
       --replicate-cmd "cp -t $WORK/mirror" > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!
@@ -59,7 +59,7 @@ fi
 
 # a replica that fails: the payment is refused, not acked against one disk
 rm -rf "$WORK/state2"; mkdir -p "$WORK/state2"
-./bob --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT+1))" --once --height 1000 \
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT+1))" --trust-peer --once --height 1000 \
       --min-slack 100 --state "$WORK/state2" --price 5.0 \
       --replicate-cmd "false" > "$WORK/bob2.log" 2>&1 &
 BOB_PID=$!

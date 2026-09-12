@@ -78,7 +78,10 @@ echo "outpoint $TXID:$VOUT"
 # each order costs, so the cumulative totals are 5, 12.5 and 30. He measures the
 # locktime against the height he is given, because he cannot see the chain.
 HEIGHT=$("${RPC[@]}" getblockcount)
-./bob $NET --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once \
+# --trust-peer: the funding here is one this script just broadcast and mined,
+# so there is nothing for a backend to tell Bob that the node has not already
+# been asked. The --confirm-cmd path is exercised further down against KW.
+./bob $NET --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once --trust-peer \
            --height "$HEIGHT" --min-slack 100 \
            --price 5.0 --price 7.5 --price 17.5 > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!
