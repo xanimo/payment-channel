@@ -234,5 +234,42 @@ grep -q "funding  confirmed" "$WORK/bob-state4.log" \
     && say "and a backslash-escaped one" "yes" \
     || { say "and a backslash-escaped one" "$(tail -1 "$WORK/bob-state4.log")"; fail=1; }
 
+# Serving with no backend at all is refused, the same shape as --state and
+# --height-file. Without one nothing consults a chain, so a funding Alice never
+# broadcast passes every check here, because every check here is arithmetic over
+# bytes she supplied.
+out=$(./bob --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT+9))" --min-slack 100 \
+            --height-file "$WORK/height" --state "$WORK/state" --price 5.0 2>&1 || true)
+printf '%s' "$out" | grep -q "confirm-cmd CMD is required" \
+    && say "serving with no chain check is refused" "yes" \
+    || { say "serving with no chain check is refused" "$(printf '%s' "$out" | head -1)"; fail=1; }
+
+printf '%s' "$out" | grep -q "trust-peer" \
+    && say "and it names the opt-out" "yes" \
+    || { say "and it names the opt-out" "no"; fail=1; }
+
+# A backend that reports a depth and no value used to have Alice's claimed
+# capacity accepted with nothing contradicting it. Capacity is the bound every
+# amount check downstream is measured against.
+cat > "$WORK/depthonly" <<'DO'
+#!/usr/bin/env bash
+echo "unspent height 900 depth 100"
+DO
+chmod +x "$WORK/depthonly"
+mkdir -p "$WORK/state9"
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$((PORT+10))" --min-slack 100 --once \
+      --height-file "$WORK/height" --state "$WORK/state9" \
+      --confirm-cmd "$WORK/depthonly" --min-depth 6 --price 5.0 \
+      > "$WORK/bob-depthonly.log" 2>&1 &
+DP=$!
+for _ in $(seq 1 100); do grep -q listening "$WORK/bob-depthonly.log" 2>/dev/null && break; sleep 0.1; done
+./alice --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$LOCKTIME" \
+        --funding-tx "@$WORK/funding.hex" --connect "127.0.0.1:$((PORT+10))" \
+        --max 100.0 > "$WORK/alice-depthonly.log" 2>&1 || true
+wait "$DP" 2>/dev/null || true
+grep -qi "no value" "$WORK/alice-depthonly.log" \
+    && say "a backend that gives no value is refused" "yes" \
+    || { say "a backend that gives no value is refused" "$(grep -i reject "$WORK/alice-depthonly.log" | head -1)"; fail=1; }
+
 [ "$fail" = 0 ] || { echo "confirm FAILED" >&2; exit 1; }
 echo "confirm ok"

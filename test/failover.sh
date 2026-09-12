@@ -42,7 +42,7 @@ printf '%s' "$FUNDING_HEX" > "$WORK/funding.hex"
 echo "recovering a payment from the replica after the primary is gone:"
 
 # Alice pays, Bob saves to primary and mirrors to replica before acking.
-./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once --height 1000 \
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --trust-peer --once --height 1000 \
       --min-slack 100 --state "$WORK/primary" --price 5.0 \
       --replicate-cmd "cp -t $WORK/replica" > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!

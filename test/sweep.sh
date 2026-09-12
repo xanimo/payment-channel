@@ -56,7 +56,7 @@ export CONFIRM_ANSWER="$WORK/answer" SENT_LOG="$WORK/sent"
 echo ok > "$CONFIRM_ANSWER"; : > "$SENT_LOG"
 
 # alice pays and disconnects. no --close, which is the whole point.
-./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --min-slack 100 \
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --trust-peer --min-slack 100 \
       --height-file "$WORK/height" --state "$WORK/state" \
       --price 5.0 > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!

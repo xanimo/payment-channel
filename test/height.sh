@@ -37,7 +37,7 @@ set_height() { printf '%s\n' "$1" > "$WORK/height"; }
 
 # slack 100 against locktime 300000: room below 299900, none at or above it
 set_height 200000
-./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --min-slack 100 \
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --trust-peer --min-slack 100 \
       --height-file "$WORK/height" --state "$WORK/state" \
       --price 5.0 > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!

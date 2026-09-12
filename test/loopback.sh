@@ -34,7 +34,7 @@ printf '%s' "$FUNDING_HEX" > "$WORK/funding.hex"
 echo "funding: $FUNDING_TXID:$FUNDING_VOUT"
 
 # Bob is told nothing about the channel: he learns it from the opening PSBT.
-./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once \
+./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --trust-peer --once \
       --height 1000 --min-slack 100 \
       --price 5.0 --price 7.5 --price 17.5 > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!
@@ -63,7 +63,7 @@ grep -q "closing transaction" "$WORK/alice.log" || {
 # reach them. test/adversary is that peer: it opens honestly, then does one
 # wrong thing and asserts the answer is a reject rather than a dead socket.
 for CASE in reopen payment-before-open; do
-    ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --once \
+    ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --trust-peer --once \
           --height 1000 --min-slack 100 \
           --price 5.0 > "$WORK/bob-$CASE.log" 2>&1 &
     ADV_BOB=$!

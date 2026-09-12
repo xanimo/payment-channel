@@ -30,7 +30,7 @@ trap 'rm -rf "$WORK"; [ -n "$BOB_PID" ] && kill "$BOB_PID" 2>/dev/null || true' 
 read -r BOB_WIF _ < <(./test/mkfunding --keys)
 
 start_bob() {
-    ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" \
+    ./bob --wif "$BOB_WIF" --listen "127.0.0.1:$PORT" --trust-peer \
           --min-slack 100 --height-file "$WORK/height" \
           --state "$WORK/state" \
           --price 5.0 > "$WORK/bob.log" 2>&1 &

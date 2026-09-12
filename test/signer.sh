@@ -34,7 +34,7 @@ echo "signing is delegated, the key is not in the network process:"
 
 # network bob: no --wif. the key is only in the signer the --sign-cmd names.
 ./bob --sign-cmd "$PWD/bob --sign --wif @$WORK/bobkey" --bob-pubkey "$BOB_PUB" \
-      --listen "127.0.0.1:$PORT" --once --height 1000 --min-slack 100 \
+      --listen "127.0.0.1:$PORT" --trust-peer --once --height 1000 --min-slack 100 \
       --price 5.0 --price 7.5 > "$WORK/bob.log" 2>&1 &
 BOB_PID=$!
 for _ in $(seq 1 100); do grep -q listening "$WORK/bob.log" 2>/dev/null && break; sleep 0.1; done

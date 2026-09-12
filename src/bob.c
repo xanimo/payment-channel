@@ -150,7 +150,8 @@ static void usage(void)
       "usage: bob --wif WIF|@FILE|- [--listen [HOST:]PORT] [--testnet|--regtest]\n"
       "           [--height N | --height-file PATH] [--height-max-age SEC]\n"
       "           [--min-slack N] [--state DIR] [--price DOGE ...]\n"
-      "           [--confirm-cmd CMD] [--min-depth N] [--broadcast-cmd CMD]\n"
+      "           [--confirm-cmd CMD | --trust-peer] [--min-depth N]\n"
+      "           [--broadcast-cmd CMD]\n"
       "           [--since-window N]\n"
       "       bob --sign-cmd CMD --bob-pubkey HEX [--listen [HOST:]PORT] ...\n"
       "           (as above but with the key held in the signer, not here)\n"
@@ -167,6 +168,9 @@ static void usage(void)
       "  --height is the current chain height; Bob cannot see the chain and\n"
       "  refuses a channel whose locktime is not --min-slack blocks above it.\n"
       "  --max-per-ip caps live connections per source address (0 disables).\n"
+      "  --confirm-cmd is what checks the funding against a chain; without it\n"
+      "  Alice need never have broadcast it. Required unless --trust-peer says\n"
+      "  you have some other reason to believe her.\n"
       "  --watch runs the sweep every SEC seconds as a service, not one pass.\n"
       "  --warn-margin N reports a channel N blocks from its locktime before it\n"
       "  is due, and --alert-cmd is run (CMD \"<reason>\") when one is approaching\n"
@@ -470,9 +474,18 @@ static int funding_is_confirmed(const char *cmd, const pc_channel *ch,
     }
     if (depth < min_depth) { *why = "funding is not buried deep enough"; return 2; }
 
-    /* The capacity came from the transaction Alice supplied. The chain is the
-       only thing that can say whether that transaction is the one that paid. */
-    if (confirm_field(buf, "value", &value) && value != ch->capacity_koinu) {
+    /* The capacity came from the transaction Alice supplied, and it is the
+       bound every amount downstream is measured against: what an output may
+       pay, what the outputs may total, and the whole fee band. The chain is the
+       only thing that can say whether that transaction is the one that paid, so
+       a backend that does not say is refused rather than believed. Reading it
+       as optional meant a backend printing only a depth handed Alice's claim
+       through with nothing contradicting it. */
+    if (!confirm_field(buf, "value", &value)) {
+        *why = "confirmation gave no value";
+        return -1;
+    }
+    if (value != ch->capacity_koinu) {
         *why = "funding is not worth what it says";
         return 2;
     }
@@ -1143,6 +1156,7 @@ int main(int argc, char **argv)
     int nprices = 0;
     uint32_t height = 0, slack = 100;
     const char *state_dir = NULL, *height_file = NULL, *confirm_cmd = NULL;
+    int trust_peer = 0;
     const char *broadcast_cmd = NULL;
     int sweep = 0, sign = 0;
     unsigned margin = 50, warn_margin = 0, watch = 0;
@@ -1162,6 +1176,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--state"))     { state_dir = NEXT(); }
         else if (!strcmp(a, "--height-file")) { height_file = NEXT(); }
         else if (!strcmp(a, "--confirm-cmd")) { confirm_cmd = NEXT(); }
+        else if (!strcmp(a, "--trust-peer"))  { trust_peer = 1; }
         else if (!strcmp(a, "--broadcast-cmd")) { broadcast_cmd = NEXT(); }
         else if (!strcmp(a, "--sign"))      { sign = 1; }
         else if (!strcmp(a, "--sign-cmd"))  { sign_cmd = NEXT(); }
@@ -1346,6 +1361,24 @@ int main(int argc, char **argv)
         fprintf(stderr, "bob: --height-file PATH is required without --once, or "
                         "min-slack is measured against a height that stops "
                         "being true\n");
+        goto done;
+    }
+
+    /* The same argument again, and the one that costs the most. Without a
+       backend nothing consults a chain, so Alice never has to have broadcast
+       the funding she hands over: a transaction she built and kept, one she
+       double spent, one an earlier close already spent, or one her own refund
+       swept all pass every check here, because every check here is arithmetic
+       over bytes she supplied. The signatures verify. Bob acks and ships.
+
+       --trust-peer is the opt-out, named for what it actually does rather than
+       for the flag it disables. The loopback and protocol tests want it, and so
+       does anyone who has some other way to know the funding is real. */
+    if (!confirm_cmd && !trust_peer) {
+        fprintf(stderr, "bob: --confirm-cmd CMD is required, or nothing checks "
+                        "the funding against a chain and an unbroadcast or "
+                        "already spent output pays for goods.\n"
+                        "     Pass --trust-peer to serve without it.\n");
         goto done;
     }
     if (height == 0 && !height_file) {
