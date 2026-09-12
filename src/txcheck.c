@@ -156,7 +156,14 @@ static size_t put_varint(unsigned char *out, uint64_t v)
 }
 
 /* Read one plain data push, refusing anything else. The scriptSig this channel
-   builds is pushes and OP_0 only, so an opcode here means it is not ours. */
+   builds is pushes and OP_0 only, so an opcode here means it is not ours.
+
+   The push has to be the shortest encoding of its length, which is
+   SCRIPT_VERIFY_MINIMALDATA and is in the standard flag set. Without that a
+   71-byte signature pushed through OP_PUSHDATA1 parses here and is non-standard
+   on the wire: accepted by Bob, refused by every node he offers it to. pc's own
+   assembly is already minimal, using PUSHDATA1 only for the 116-byte redeem
+   script, so this refuses nothing pc builds. */
 static int rd_push(const unsigned char *p, size_t len, size_t *off,
                    const unsigned char **out, size_t *outlen)
 {
@@ -166,11 +173,67 @@ static int rd_push(const unsigned char *p, size_t len, size_t *off,
     if (op >= 1 && op <= 75)  { n = op; *off += 1; }
     else if (op == 0x4c) {
         if (*off + 2 > len) return 0;
-        n = p[*off + 1]; *off += 2;
+        n = p[*off + 1];
+        if (n < 76) return 0;                     /* a direct push would do */
+        *off += 2;
     } else return 0;
     if (*off + n > len) return 0;
     *out = p + *off; *outlen = n; *off += n;
     return 1;
+}
+
+/* Half the secp256k1 group order, big-endian. A signature above it is the
+   other valid encoding of the same signature. */
+static const unsigned char SECP256K1_HALF_N[32] = {
+    0x7f,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0x5d,0x57,0x6e,0x73,0x57,0xa4,0x50,0x1d,0xdf,0xe9,0x2f,0x46,0x68,0x1b,0x20,0xa0
+};
+
+/* Whether a DER signature, without its trailing hashtype byte, is one a default
+   node would relay: strictly encoded per BIP66, and low-S per
+   SCRIPT_VERIFY_LOW_S. Both are in the standard flag set.
+ *
+ * A high-S signature verifies perfectly well. It is the same signature with S
+ * replaced by (n - S), which anyone can compute from a valid one without a key,
+ * and it is refused by a default node as non-standard. Bob acking one leaves
+ * him holding a newest state nothing will relay, which is the failure the fee
+ * floor comment describes: worse than not checking, because it looks fine.
+ *
+ * koinu's kw_ec_verify enforces both today, so this is belt and braces. It is
+ * here because the promise is pc's: "what Bob acks, a default node would accept
+ * and mine" should not quietly become a property of whichever library is
+ * linked. Refusing something valid is the safe direction, and this matches the
+ * filter that selected the 156 mainnet vectors, every one of which passes. */
+pc_result pc_sig_is_standard(const unsigned char *der, size_t dlen)
+{
+    if (dlen < 8 || dlen > 72)              return PC_ERR_PSBT;
+    if (der[0] != 0x30 || der[1] != dlen - 2) return PC_ERR_PSBT;
+    if (der[2] != 0x02)                     return PC_ERR_PSBT;
+
+    size_t lenr = der[3];
+    if (lenr == 0 || 6 + lenr > dlen)       return PC_ERR_PSBT;
+    if (der[4] & 0x80)                      return PC_ERR_PSBT;   /* negative */
+    if (lenr > 1 && der[4] == 0x00 && !(der[5] & 0x80)) return PC_ERR_PSBT;
+
+    size_t poss = 4 + lenr;
+    if (der[poss] != 0x02)                  return PC_ERR_PSBT;
+    size_t lens = der[poss + 1];
+    if (lens == 0 || poss + 2 + lens != dlen) return PC_ERR_PSBT;
+    const unsigned char *s = der + poss + 2;
+    if (s[0] & 0x80)                        return PC_ERR_PSBT;
+    if (lens > 1 && s[0] == 0x00 && !(s[1] & 0x80)) return PC_ERR_PSBT;
+
+    /* S right-aligned into 32 bytes, which the checks above make safe: it is
+       positive and carries no redundant leading zero, so it is at most 33 bytes
+       and a 33rd is the zero pad. */
+    unsigned char s32[32];
+    memset(s32, 0, sizeof(s32));
+    size_t n = lens, off = 0;
+    if (n == 33) { n = 32; off = 1; }
+    if (n > 32)                             return PC_ERR_PSBT;
+    memcpy(s32 + (32 - n), s + off, n);
+    if (memcmp(s32, SECP256K1_HALF_N, 32) > 0) return PC_ERR_PSBT;
+    return PC_OK;
 }
 
 /* The legacy SIGHASH_ALL digest for the one input, with (script_code) standing
@@ -266,6 +329,11 @@ static pc_result verify_sigs(const pc_channel *ch,
     unsigned char apub[33], bpub[33];
     if (!pc_hex_to_bin(ch->alice_pubkey_hex, apub, sizeof(apub))) return PC_ERR_KEY;
     if (!pc_hex_to_bin(ch->bob_pubkey_hex, bpub, sizeof(bpub))) return PC_ERR_KEY;
+
+    /* Standard before valid: a high-S or loosely encoded signature verifies,
+       and is refused by the network Bob has to hand this to. */
+    if (pc_sig_is_standard(sa, salen - 1) != PC_OK) return PC_ERR_PSBT;
+    if (pc_sig_is_standard(sb, sblen - 1) != PC_OK) return PC_ERR_PSBT;
 
     if (!kw_ec_verify(apub, hash, sa, salen - 1))
         return PC_ERR_PSBT;

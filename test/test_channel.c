@@ -263,6 +263,81 @@ int main(void)
               "hex: a short hex string is refused, not half-converted");
     }
 
+    /* pc_sig_is_standard: BIP66 encoding and low-S, both in the standard flag
+       set. A high-S signature verifies fine and no default node will relay it,
+       and anyone can make one from a valid signature without a key by replacing
+       S with (n - S), which is what this does. The sharp assertion is the last
+       one: the twin still verifies, so verification alone was never going to
+       catch it. */
+    {
+        static const unsigned char N[32] = {       /* the group order */
+            0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xfe,
+            0xba,0xae,0xdc,0xe6,0xaf,0x48,0xa0,0x3b,0xbf,0xd2,0x5e,0x8c,0xd0,0x36,0x41,0x41
+        };
+        char w[PRIVKEYWIFLEN], a[P2PKHLEN];
+        CHECK(generatePrivPubKeypair(w, a, false), "sig: a key to sign with");
+        uint8_t sk[32], pub[33];
+        int comp = 0; uint8_t vb = 0;
+        CHECK(kw_wif_decode(w, sk, &comp, &vb) && kw_ec_pubkey(sk, pub),
+              "sig: key decodes");
+
+        unsigned char msg[32];
+        for (int i = 0; i < 32; i++) msg[i] = (unsigned char)(i * 7 + 1);
+        unsigned char der[80];
+        size_t dlen = sizeof(der);
+        CHECK(kw_ec_sign(sk, msg, der, &dlen), "sig: a signature is produced");
+        { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
+
+        CHECK(pc_sig_is_standard(der, dlen) == PC_OK,
+              "sig: koinu's own signature is standard");
+
+        /* S := n - S, re-encoded minimally. koinu signs low-S, so this is high. */
+        size_t r_len = der[3], poss = 4 + r_len, lens = der[poss + 1];
+        unsigned char s32[32] = {0};
+        size_t cp = lens > 32 ? 32 : lens, skip = lens > 32 ? lens - 32 : 0;
+        memcpy(s32 + (32 - cp), der + poss + 2 + skip, cp);
+        unsigned char hs[32];
+        int borrow = 0;
+        for (int i = 31; i >= 0; i--) {
+            int d = (int)N[i] - (int)s32[i] - borrow;
+            borrow = d < 0; if (d < 0) d += 256;
+            hs[i] = (unsigned char)d;
+        }
+        size_t lead = 0;
+        while (lead < 31 && hs[lead] == 0) lead++;
+        int pad = (hs[lead] & 0x80) ? 1 : 0;
+        unsigned char hi[80];
+        size_t o = 0;
+        hi[o++] = 0x30;
+        hi[o++] = (unsigned char)(2 + r_len + 2 + (32 - lead) + pad);
+        hi[o++] = 0x02; hi[o++] = (unsigned char)r_len;
+        memcpy(hi + o, der + 4, r_len); o += r_len;
+        hi[o++] = 0x02; hi[o++] = (unsigned char)((32 - lead) + pad);
+        if (pad) hi[o++] = 0x00;
+        memcpy(hi + o, hs + lead, 32 - lead); o += 32 - lead;
+
+        CHECK(pc_sig_is_standard(hi, o) == PC_ERR_PSBT,
+              "sig: its high-S twin is refused");
+        /* koinu refuses it too, which is the belt-and-braces this documents:
+           both layers say no, and pc does not rely on the dependency to. */
+        CHECK(!kw_ec_verify(pub, msg, hi, o),
+              "sig: koinu refuses the twin as well");
+        CHECK(kw_ec_verify(pub, msg, der, dlen),
+              "sig: and accepts the original, so the twin is the only change");
+
+        /* malformed encodings, each one thing wrong */
+        unsigned char b[80];
+        memcpy(b, der, dlen); b[0] = 0x31;
+        CHECK(pc_sig_is_standard(b, dlen) == PC_ERR_PSBT, "sig: bad sequence tag");
+        memcpy(b, der, dlen); b[1] = (unsigned char)(dlen - 3);
+        CHECK(pc_sig_is_standard(b, dlen) == PC_ERR_PSBT, "sig: length disagrees");
+        memcpy(b, der, dlen); b[2] = 0x03;
+        CHECK(pc_sig_is_standard(b, dlen) == PC_ERR_PSBT, "sig: bad integer tag");
+        memcpy(b, der, dlen); b[3] = 0;
+        CHECK(pc_sig_is_standard(b, dlen) == PC_ERR_PSBT, "sig: zero-length R");
+        CHECK(pc_sig_is_standard(der, 7) == PC_ERR_PSBT, "sig: too short");
+    }
+
     /* pc_split_argv builds the argv for --confirm-cmd and friends. It is not a
        shell, but it has to honour quoting, because a backend needs its own
        arguments and so cannot be a bare path, and without quoting a path with
@@ -341,8 +416,17 @@ int main(void)
         n += 36;                                     /* prevout */
         size_t sslen_at = n++;                       /* scriptSig length */
         size_t ss_at = n;
-        tx[n++] = 0x09;                              /* a 9 byte push: sig */
-        for (int i = 0; i < 9; i++) tx[n++] = (i == 8) ? 0x01 : 0x30;
+        /* A 9-byte push: the shortest well-formed low-S DER signature there is,
+           30 06 02 01 01 02 01 01, plus the SIGHASH_ALL byte. It has to be
+           encoding-valid or pc_sig_is_standard refuses it and this stops
+           testing the script check, which is the only thing it is for. */
+        tx[n++] = 0x09;
+        {
+            static const unsigned char sig9[9] = {
+                0x30,0x06,0x02,0x01,0x01,0x02,0x01,0x01,0x01
+            };
+            memcpy(tx + n, sig9, sizeof(sig9)); n += sizeof(sig9);
+        }
         tx[n++] = 0x51;                              /* OP_1 */
         size_t push_at = n;
         tx[n++] = 0x08;                              /* minimal push of 8 bytes */

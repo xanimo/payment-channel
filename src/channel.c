@@ -760,12 +760,20 @@ pc_result pc_refund_walk(const unsigned char *buf, size_t fn, size_t sn,
                          const unsigned char hash[32])
 {
     if (!buf || !redeem || !apub || !hash) return PC_ERR_ARG;
-    if (fn < 42) return PC_ERR_SCRIPT;
 
-    size_t off = 4;                                /* version */
+    /* Each read carries its own bound. One arithmetic guard at the top can be
+       exactly right and still not survive editing: `fn < 42` covered the last
+       byte read below with nothing to spare, so a version or prevout that ever
+       changed size would have walked off it silently rather than failing here. */
+    size_t off = 0;
+    if (off + 4 > fn) return PC_ERR_SCRIPT;
+    off += 4;                                      /* version */
+    if (off + 1 > fn) return PC_ERR_SCRIPT;
     if (buf[off++] != 0x01) return PC_ERR_SCRIPT;  /* exactly one input */
+    if (off + 36 > fn) return PC_ERR_SCRIPT;
     off += 36;                                     /* prevout */
 
+    if (off + 1 > fn) return PC_ERR_SCRIPT;
     size_t got = buf[off++];
     if (got == 0xfd) {
         if (off + 2 > fn) return PC_ERR_SCRIPT;
@@ -800,6 +808,9 @@ pc_result pc_refund_walk(const unsigned char *buf, size_t fn, size_t sn,
     if (plen != rlen || memcmp(s + k, redeem, rlen) != 0) return PC_ERR_SCRIPT;
 
     if (slen < 2 || rsig[slen - 1] != 0x01) return PC_ERR_KEY;   /* SIGHASH_ALL */
+    /* The refund is Alice's own transaction, and it still has to be one the
+       network will relay when she needs it most. */
+    if (pc_sig_is_standard(rsig, slen - 1) != PC_OK) return PC_ERR_PSBT;
     if (!kw_ec_verify(apub, hash, rsig, slen - 1))
         return PC_ERR_KEY;
     return PC_OK;
