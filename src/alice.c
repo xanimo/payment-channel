@@ -525,6 +525,23 @@ int main(int argc, char **argv)
         if (pc_wire_recv(fd, &in) != 1 || in.type != PC_MSG_CLOSE) {
             fprintf(stderr, "alice: peer would not close\n"); goto done;
         }
+        /* Read it before handing it to anyone. Bob cannot forge one, since it
+           carries Alice's signature over a digest he cannot produce without
+           her, so nothing is lost by printing it unchecked. It is still the one
+           artifact she takes from him and puts in front of a user as an
+           instruction, and she holds everything needed to check it: the same
+           check Bob makes, which is that it spends this funding outpoint, pays
+           him exactly what was agreed, stays inside the capacity, carries two
+           signatures that verify, and is one a default node would mine. */
+        pc_result cr = pc_tx_verify_payment(&ch, in.psbt_hex, paid);
+        if (cr != PC_OK) {
+            fprintf(stderr, "alice: the closing transaction does not check out: "
+                            "%s\n", pc_strerror(cr));
+            fprintf(stderr, "alice: not printing it. the payments already sent "
+                            "stand, and the refund is still there at locktime "
+                            "%u\n", locktime);
+            goto done;
+        }
         printf("closing transaction, either side can broadcast it:\n%s\n", in.psbt_hex);
     }
 

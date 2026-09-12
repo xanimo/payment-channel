@@ -262,6 +262,14 @@ confirm before its locktime or the balance is lost, and a nearly drained
 channel is where the share looks worst. refusing there would spend the balance
 to save the fee.
 
+alice reads the closing transaction before she prints it, with the same check
+bob makes: it spends this funding outpoint, pays him exactly what was agreed,
+stays inside the capacity, carries two signatures that verify, and is one a
+default node would mine. bob cannot forge one, since it carries her signature
+over a digest he cannot produce without her key, so nothing is lost either way.
+it is still the one thing she takes from him and puts in front of someone as an
+instruction to broadcast, and she holds everything needed to check it.
+
 if bob stops answering, alice takes the money back through the timelocked
 branch. it needs no peer, which is the situation it is for, and the transaction
 it prints is worthless to anyone until the locktime passes.
