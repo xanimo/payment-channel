@@ -161,7 +161,11 @@ pc_result pc_state_open(pc_state *st, const char *dir, pc_channel *ch)
 
     off_t sz = lseek(fd, 0, SEEK_END);
     if (sz < 0 || sz > 1024 * 1024) { close(fd); pc_state_close(st); return PC_ERR_ARG; }
-    if (sz == 0) { close(fd); ch->paid_to_bob_koinu = 0; return PC_OK; }
+    /* Refused rather than read as a fresh channel, which is what adopt already
+       does with the same file. state_write goes through a temporary and a
+       rename, so it cannot leave a zero-length file here; one means something
+       outside truncated it, and fresh means a ratchet of zero. */
+    if (sz == 0) { close(fd); pc_state_close(st); return PC_ERR_ARG; }
 
     char *buf = (char *)malloc((size_t)sz + 1);
     if (!buf) { close(fd); pc_state_close(st); return PC_ERR_ARG; }

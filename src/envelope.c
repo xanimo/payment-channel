@@ -158,8 +158,13 @@ static int read_string(const char *p, char *dst, size_t cap, size_t *len_out)
 }
 
 /* A repeated key is two answers to one question and find_key() takes the first,
-   so the second would be ignored rather than noticed. No value can contain a
-   quote, so a quoted key only ever appears as a key. */
+   so the second would be ignored rather than noticed.
+
+   This matches the quoted key anywhere in the line, not only where a key may
+   appear, so a value equal to a key name would refuse the envelope as a
+   duplicate. No reachable input produces one: addresses are 34 characters and
+   every reject reason is several words. Refusing is the safe direction anyway,
+   which is why this is written down rather than fixed. */
 static int has_duplicate_key(const char *json)
 {
     static const char *KEYS[] = { "type", "ref", "vout", "more",

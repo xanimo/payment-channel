@@ -814,6 +814,22 @@ int main(void)
         CHECK(pc_tx_find_channel_output(&other, funding_hex, ftxid, &fvout, &fval)
                   == PC_ERR_AMOUNT, "another channel gets nothing");
 
+        /* Trailing bytes. The walker stopped after the outputs and never
+           required the parse to consume the transaction, so this used to be
+           accepted and recorded under the txid of the padded serialization
+           rather than of the transaction. The payment reader has always
+           required it. */
+        {
+            size_t fl = strlen(funding_hex);
+            char *padded = (char *)malloc(fl + 5);
+            memcpy(padded, funding_hex, fl);
+            memcpy(padded + fl, "dead", 4);
+            padded[fl + 4] = '\0';
+            CHECK(pc_tx_find_channel_output(&ch, padded, ftxid, &fvout, &fval)
+                      != PC_OK, "a funding tx with bytes appended is refused");
+            free(padded);
+        }
+
         /* the opening psbt, and bob accepting it */
         char *open_psbt = NULL;
         CHECK_OK(pc_channel_open_create(&ch, funding_hex, &open_psbt), "open built");

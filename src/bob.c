@@ -557,7 +557,13 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
         if (e->d_name[64] != '-') continue;
         memcpy(txid, e->d_name, 64); txid[64] = '\0';
         if (!pc_is_hex(txid, 64)) continue;
-        if (sscanf(e->d_name + 65, "%d.channel", &vout) != 1 || vout < 0) continue;
+        /* %n after the literal, because sscanf's return counts conversions and
+           says nothing about whether the tail matched: without it
+           <txid>-12xyz.channel reads as vout 12 and adopt then opens a path
+           that is not the file on disk. */
+        int consumed = 0;
+        if (sscanf(e->d_name + 65, "%d.channel%n", &vout, &consumed) != 1
+            || vout < 0 || e->d_name[65 + consumed] != '\0') continue;
 
         pc_state st;
         pc_channel ch;
@@ -1343,13 +1349,13 @@ int main(int argc, char **argv)
     if (!state_dir && !once) {
         fprintf(stderr, "bob: --state DIR is required without --once, or one "
                         "funding output pays for goods once per reconnection\n");
-        return 1;
+        goto done;
     }
     if (state_dir) {
         struct stat sb;
         if (stat(state_dir, &sb) != 0 || !S_ISDIR(sb.st_mode)) {
             fprintf(stderr, "bob: --state %s is not a directory\n", state_dir);
-            return 1;
+            goto done;
         }
     }
 
