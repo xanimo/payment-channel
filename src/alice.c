@@ -210,7 +210,9 @@ int main(int argc, char **argv)
     /* a peer that closes mid-write must not take the process with it */
     signal(SIGPIPE, SIG_IGN);
 
-    kw_ec_start();
+    /* Without it every kw_ec_* call returns 0, which fails closed but reads as
+       a parse error further in. Refuse here, where the reason is still legible. */
+    if (!kw_ec_start()) { fprintf(stderr, "alice: no curve context\n"); return 1; }
     int rc = 1, fd = -1;
     char *funding_tx = NULL;
 
