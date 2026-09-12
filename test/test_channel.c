@@ -354,6 +354,33 @@ int main(void)
                   "sig: and one koinu above it is not");
         }
 
+        /* A 33-byte S is only legal as a zero pad. Positive and
+           non-redundant still admits a leading 0x01..0x7f, which is a number
+           above 2^256 and not a scalar at all; dropping that byte as though it
+           were a pad compares the low 32 and calls it low. */
+        {
+            unsigned char w[80];
+            size_t o = 0;
+            w[o++] = 0x30; w[o++] = 0; w[o++] = 0x02; w[o++] = 0x01; w[o++] = 0x01;
+            w[o++] = 0x02; w[o++] = 33; w[o++] = 0x01;      /* not a pad */
+            for (int i = 0; i < 32; i++) w[o++] = 0x11;     /* a small low 32 */
+            w[1] = (unsigned char)(o - 2);
+            CHECK(pc_sig_is_standard(w, o) == PC_ERR_PSBT,
+                  "sig: a 33-byte S with a nonzero lead is refused");
+
+            /* And no 33-byte S is ever accepted, which is worth stating
+               because it is not obvious. A 0x00 lead is only non-redundant
+               when the next byte has its top bit set, and any 32-byte value
+               starting at 0x80 or above exceeds half-n, which starts 0x7f. So
+               the two rules meet: padded is redundant, or unpadded is high. */
+            w[7] = 0x00; w[8] = 0x11;
+            CHECK(pc_sig_is_standard(w, o) == PC_ERR_PSBT,
+                  "sig: a 0x00 lead before a small byte is redundant");
+            w[8] = 0x80;
+            CHECK(pc_sig_is_standard(w, o) == PC_ERR_PSBT,
+                  "sig: and before a large one it is high-S");
+        }
+
         /* malformed encodings, each one thing wrong */
         unsigned char b[80];
         memcpy(b, der, dlen); b[0] = 0x31;

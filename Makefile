@@ -42,7 +42,7 @@ CORE_SRC = src/channel.c src/envelope.c src/state.c src/txcheck.c src/wire.c
 CORE_OBJ = $(CORE_SRC:.c=.o)
 
 BINS = alice bob
-TESTS = test_channel test/mkfunding test/adversary test/attack test/sighash_vectors
+TESTS = test_channel test/mkfunding test/adversary test/attack test/sighash_vectors fuzz/sigrun
 
 all: koinu-version $(BINS)
 
@@ -93,6 +93,10 @@ test/mkfunding: test/mkfunding.o $(CORE_OBJ)
 test/sighash_vectors: test/sighash_vectors.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+# fuzz_sig's oracle without libFuzzer, so the seeds run in `make check` too
+fuzz/sigrun: fuzz/sigrun.o fuzz/fuzz_sig.o $(CORE_OBJ)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
 test/bench: test/bench.o $(CORE_OBJ)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -131,6 +135,7 @@ check: koinu-version $(TESTS) $(BINS)
 	./test_channel
 	./test/attack
 	./test/sighash_vectors
+	./fuzz/sigrun fuzz/corpus/sig/*
 	./test/loopback.sh
 	./test/slowpeer.sh
 	./test/resume.sh
