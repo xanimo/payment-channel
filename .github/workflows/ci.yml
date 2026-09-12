@@ -27,6 +27,16 @@ jobs:
       - uses: ./.github/actions/build-koinu
         with:
           deploy-key: ${{ secrets.KOINU_DEPLOY_KEY }}
+      # Which SHA-256 core the sighash vectors actually exercised. koinu picks
+      # a hardware one at run time where the CPU has the instruction, and this
+      # machine is the only record of whether that path was covered or whether
+      # 156/156 means the scalar core alone.
+      - run: |
+          if grep -qw sha_ni /proc/cpuinfo; then
+              echo "cpu has sha_ni: the vectors cover koinu's hardware sha256"
+          else
+              echo "cpu has no sha_ni: the vectors cover the scalar sha256 only"
+          fi
       - run: make KOINU="$GITHUB_WORKSPACE/koinu" -j"$(nproc)"
       - run: make KOINU="$GITHUB_WORKSPACE/koinu" check
       - run: SLOW=1 ./test/slowpeer.sh
