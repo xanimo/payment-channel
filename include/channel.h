@@ -322,6 +322,12 @@ _Static_assert(PC_MAX_OUTPUTS <= UINT64_MAX / PC_MAX_MONEY_KOINU,
  * is the higher of the relay floor plus its dust surcharge and the block floor,
  * because clearing only the first gets a transaction that propagates and is
  * never mined. */
+/* Whether a DER signature, without its trailing hashtype byte, is one a default
+ * node would relay: BIP66 strict encoding and low-S. Both are in the standard
+ * flag set, so a signature failing either verifies fine and is refused on the
+ * wire. PC_OK or PC_ERR_PSBT. */
+pc_result pc_sig_is_standard(const unsigned char *der, size_t dlen);
+
 uint64_t pc_min_fee(size_t txbytes, size_t soft_dust_outputs);
 
 /* The absolute fee a transaction of (txbytes) owes at (koinu_per_kb), the

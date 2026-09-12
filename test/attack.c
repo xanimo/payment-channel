@@ -112,6 +112,55 @@ static size_t ser(const pc_channel *ch, uint32_t version, uint32_t sequence,
     return n;
 }
 
+/* S := n - S on a DER signature, turning a valid low-S one into its equally
+   valid high-S twin. Needs no key: it is arithmetic on bytes Alice already
+   published, which is why a merchant cannot read "it verifies" as "a node will
+   take it". (der) holds the signature and its trailing hashtype byte. */
+static int raise_s(unsigned char *der, size_t *dlen)
+{
+    static const unsigned char N[32] = {
+        0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xfe,
+        0xba,0xae,0xdc,0xe6,0xaf,0x48,0xa0,0x3b,0xbf,0xd2,0x5e,0x8c,0xd0,0x36,0x41,0x41
+    };
+    if (*dlen < 9 || der[0] != 0x30) return 0;
+    unsigned char hashtype = der[*dlen - 1];
+    size_t rlen = der[3], poss = 4 + rlen, lens = der[poss + 1];
+
+    unsigned char s32[32] = {0};
+    size_t cp = lens > 32 ? 32 : lens, skip = lens > 32 ? lens - 32 : 0;
+    memcpy(s32 + (32 - cp), der + poss + 2 + skip, cp);
+    unsigned char hs[32];
+    int borrow = 0;
+    for (int i = 31; i >= 0; i--) {
+        int v = (int)N[i] - (int)s32[i] - borrow;
+        borrow = v < 0; if (v < 0) v += 256;
+        hs[i] = (unsigned char)v;
+    }
+    size_t lead = 0;
+    while (lead < 31 && hs[lead] == 0) lead++;
+    int pad = (hs[lead] & 0x80) ? 1 : 0;
+    size_t newlens = (32 - lead) + (size_t)pad;
+
+    unsigned char out[80];
+    size_t o = 0;
+    out[o++] = 0x30;
+    out[o++] = (unsigned char)(2 + rlen + 2 + newlens);
+    out[o++] = 0x02; out[o++] = (unsigned char)rlen;
+    memcpy(out + o, der + 4, rlen); o += rlen;
+    out[o++] = 0x02; out[o++] = (unsigned char)newlens;
+    if (pad) out[o++] = 0x00;
+    memcpy(out + o, hs + lead, 32 - lead); o += 32 - lead;
+    out[o++] = hashtype;
+    memcpy(der, out, o);
+    *dlen = o;
+    return 1;
+}
+
+/* Raise S on Alice's signature inside forge(), before the scriptSig is
+   assembled, so every length downstream is computed by the code that already
+   gets them right rather than patched afterwards. */
+static int g_high_s = 0;
+
 /* signs whatever it is given, which is the point */
 static char *forge(const pc_channel *ch, const char *awif, const char *bwif,
                    uint32_t version, uint32_t sequence, uint32_t locktime,
@@ -145,6 +194,7 @@ static char *forge(const pc_channel *ch, const char *awif, const char *bwif,
         { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
         if (!ok) return NULL;
         sig[k][sl[k]++] = 0x01;
+        if (k == 0 && g_high_s && !raise_s(sig[k], &sl[k])) return NULL;
     }
 
     unsigned char ss[1024];
@@ -318,6 +368,23 @@ int main(void)
         dust[1] = o[1]; dust[1].value = 1000;
         raw = forge(&ch, awif, bwif, 1, 0xffffffffu, 0, dust, 2);
         expect_refused(&ch, raw, TO_BOB, "a change output below the dust limit");
+        free(raw);
+    }
+
+    /* The same transaction with Alice's signature replaced by its high-S twin.
+       It still verifies: same r, and s and n-s are both valid. A default node
+       refuses it as non-standard, so Bob acking it leaves him holding a newest
+       state nothing will relay, which is the fee-floor failure in another
+       costume. Built from her own published bytes, so no key is involved.
+
+       raise_s only rewrites when the re-encoded S is the same length, which
+       keeps every offset and the digest itself untouched; when it is not, the
+       case is skipped rather than testing something else by accident. */
+    {
+        g_high_s = 1;
+        raw = forge(&ch, awif, bwif, 1, 0xffffffffu, 0, o, 2);
+        g_high_s = 0;
+        expect_refused(&ch, raw, TO_BOB, "a high-S signature");
         free(raw);
     }
 
