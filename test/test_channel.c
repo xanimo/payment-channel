@@ -325,6 +325,35 @@ int main(void)
         CHECK(kw_ec_verify(pub, msg, der, dlen),
               "sig: and accepts the original, so the twin is the only change");
 
+        /* The boundary. n/2 is the largest S that is still low, so it has to
+           be accepted and one above it refused: the comparison is > and not
+           >=, and nothing else in the suite would notice if that flipped. */
+        {
+            static const unsigned char HALF_N[32] = {
+                0x7f,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+                0x5d,0x57,0x6e,0x73,0x57,0xa4,0x50,0x1d,0xdf,0xe9,0x2f,0x46,0x68,0x1b,0x20,0xa0
+            };
+            /* n/2 starts 0x7f, so the top bit is clear and a leading zero
+               would be the unnecessary padding the rule above refuses. 32
+               bytes, no pad. */
+            unsigned char at[80], ov[80], plus[32];
+            size_t ao = 0, oo = 0;
+            at[ao++] = 0x30; at[ao++] = 0; at[ao++] = 0x02; at[ao++] = 0x01;
+            at[ao++] = 0x01; at[ao++] = 0x02; at[ao++] = 32;
+            memcpy(at + ao, HALF_N, 32); ao += 32;
+            at[1] = (unsigned char)(ao - 2);
+            CHECK(pc_sig_is_standard(at, ao) == PC_OK,
+                  "sig: S exactly at n/2 is still low");
+
+            memcpy(plus, HALF_N, 32); plus[31]++;
+            ov[oo++] = 0x30; ov[oo++] = 0; ov[oo++] = 0x02; ov[oo++] = 0x01;
+            ov[oo++] = 0x01; ov[oo++] = 0x02; ov[oo++] = 32;
+            memcpy(ov + oo, plus, 32); oo += 32;
+            ov[1] = (unsigned char)(oo - 2);
+            CHECK(pc_sig_is_standard(ov, oo) == PC_ERR_PSBT,
+                  "sig: and one koinu above it is not");
+        }
+
         /* malformed encodings, each one thing wrong */
         unsigned char b[80];
         memcpy(b, der, dlen); b[0] = 0x31;

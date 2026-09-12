@@ -101,7 +101,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang
       - run: make KOINU="$GITHUB_WORKSPACE/koinu" fuzz
       - run: |
-          for f in envelope txcheck opening refund payment; do
+          for f in envelope txcheck opening refund payment sig; do
               mkdir -p "work-$f"
               setarch -R "./fuzz/fuzz_$f" "work-$f" "fuzz/corpus/$f" \
                   -max_total_time=60 -print_final_stats=1
