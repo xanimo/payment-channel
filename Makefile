@@ -138,6 +138,7 @@ check: koinu-version $(TESTS) $(BINS)
 	./test/signer.sh
 	./test/replicate.sh
 	./test/failover.sh
+	./test/closecheck.sh
 	./test/feerate.sh
 	./test/metrics.sh
 
