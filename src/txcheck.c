@@ -223,14 +223,23 @@ pc_result pc_sig_is_standard(const unsigned char *der, size_t dlen)
     if (s[0] & 0x80)                        return PC_ERR_PSBT;
     if (lens > 1 && s[0] == 0x00 && !(s[1] & 0x80)) return PC_ERR_PSBT;
 
-    /* S right-aligned into 32 bytes, which the checks above make safe: it is
-       positive and carries no redundant leading zero, so it is at most 33 bytes
-       and a 33rd is the zero pad. */
+    /* S has to fit in 32 bytes before it can be compared against half the group
+       order, and the checks above do not establish that. They say S is positive
+       and carries no redundant leading zero, which still admits a 33-byte S
+       whose first byte is 0x01 through 0x7f: positive, not redundant, and
+       larger than any scalar. Dropping that byte as though it were a pad
+       compares the low 32 bytes of a number above 2^256 and calls it low.
+     *
+     * Core refuses these too, just not in IsValidSignatureEncoding: its strict
+     * DER pass lets them by and secp256k1_ecdsa_signature_parse_der fails on
+     * the overflow afterwards. pc has no second pass, so the magnitude decision
+     * belongs here rather than with whatever verifier runs next. */
+    if (lens > 33 || (lens == 33 && s[0] != 0x00)) return PC_ERR_PSBT;
+
     unsigned char s32[32];
     memset(s32, 0, sizeof(s32));
     size_t n = lens, off = 0;
-    if (n == 33) { n = 32; off = 1; }
-    if (n > 32)                             return PC_ERR_PSBT;
+    if (n == 33) { n = 32; off = 1; }       /* the pad, now known to be one */
     memcpy(s32 + (32 - n), s + off, n);
     if (memcmp(s32, SECP256K1_HALF_N, 32) > 0) return PC_ERR_PSBT;
     return PC_OK;

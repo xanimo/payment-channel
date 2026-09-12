@@ -59,7 +59,6 @@
 #include <sys/resource.h>
 #include <sys/types.h>
 #include <time.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #define MAX_ORDERS 64
@@ -288,7 +287,6 @@ static int read_height_file(const char *path, unsigned max_age,
    cold backend that needs to sync headers is warmed out of band, which is what
    an on-disk header cache is for. */
 #define PC_CONFIRM_SECONDS 3
-#define PC_CONFIRM_MAX_ARGV 32
 
 /* "depth 12" or "value 100000000 koinu" out of that one line */
 static int confirm_field(const char *s, const char *key, unsigned long long *out)

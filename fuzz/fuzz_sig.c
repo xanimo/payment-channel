@@ -26,10 +26,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
        predicate's own bound is part of what is under test. */
     pc_result r = pc_sig_is_standard(data, size);
 
-    /* The one invariant worth asserting: a signature this calls standard has to
-       have the shape it just claimed to check. Anything it accepts is handed
-       straight to a verifier, so an accept that does not satisfy these is the
-       bug, not a crash. */
+    /* What an accept has to satisfy. These are properties, not a second copy of
+       the implementation's branches: an oracle written from the function is a
+       regression test for whatever the function currently does, and agrees with
+       it about its bugs. This one missed a 33-byte S with a nonzero leading
+       byte because it asserted every rule the code checked and nothing about
+       the thing the code was deciding.
+     *
+     * The property that matters is the one the code exists to establish:
+     * anything accepted is handed to a verifier, so S must be a scalar that
+     * fits in 32 bytes and is at or below half the group order. Magnitude, not
+     * shape. */
     if (r == PC_OK) {
         if (size < 8 || size > 72) abort();
         if (data[0] != 0x30) abort();
@@ -43,6 +50,24 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         size_t lens = data[poss + 1];
         if (lens == 0 || poss + 2 + lens != size) abort();
         if (data[poss + 2] & 0x80) abort();
+
+        /* S is a number, and it has to be one that exists. 33 bytes is only
+           legal as a zero pad; anything wider is above 2^256 and is not a
+           scalar at all. */
+        if (lens > 33) abort();
+        if (lens == 33 && data[poss + 2] != 0x00) abort();
+
+        /* and at or below half the order, compared as the code should, not as
+           the code does */
+        static const unsigned char HALF_N[32] = {
+            0x7f,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+            0x5d,0x57,0x6e,0x73,0x57,0xa4,0x50,0x1d,0xdf,0xe9,0x2f,0x46,0x68,0x1b,0x20,0xa0
+        };
+        unsigned char s32[32];
+        memset(s32, 0, sizeof(s32));
+        size_t n = lens == 33 ? 32 : lens, off = lens == 33 ? 1 : 0;
+        memcpy(s32 + (32 - n), data + poss + 2 + off, n);
+        if (memcmp(s32, HALF_N, 32) > 0) abort();
     }
     return 0;
 }
