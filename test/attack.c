@@ -321,6 +321,20 @@ int main(void)
         free(raw);
     }
 
+    /* A payment paying Bob more than it claims. The ratchet stores the claim,
+       so this was accepted and then recorded as the smaller number, and the
+       next payment could replace it with a transaction paying less than this
+       one really did. Nothing invoiced was at risk, but what Bob reports
+       holding should be what he is holding. */
+    {
+        out_t more[2];
+        more[0] = o[0]; more[0].value = TO_BOB + 100000000ULL;
+        more[1] = o[1]; more[1].value = CHANGE - 100000000ULL;
+        raw = forge(&ch, awif, bwif, 1, 0xffffffffu, 0, more, 2);
+        expect_refused(&ch, raw, TO_BOB, "pays bob more than it claims");
+        free(raw);
+    }
+
     /* The fee is what the outputs do not spend, so underspending is how one is
        set. Bob pays none of it and is paid what he asked either way, which is
        why nothing else here catches it: over DEFAULT_TRANSACTION_MAXFEE a node

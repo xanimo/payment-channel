@@ -387,6 +387,15 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
                 rc = PC_OK;
             }
         }
+        /* The whole transaction, or none of it. The txid above is the hash of
+           every byte in the buffer, so a transaction with anything appended
+           parses here and is recorded under the hash of the padded
+           serialization rather than of the transaction. The payment reader has
+           made this check since it was written; two walkers over peer-supplied
+           bytes disagreeing about their limits is the case the comment above
+           already names. */
+        rd_u(&r, 4);                                  /* locktime */
+        if (r.bad || r.off != r.len) { rc = PC_ERR_PSBT; goto out; }
     }
 out:
     if (rc == PC_OK) {
@@ -513,7 +522,13 @@ pc_result pc_tx_verify_payment(const pc_channel *ch,
     /* The fee is capacity minus what the outputs spend, so an input that does
        not cover the outputs would be a transaction no node will relay. */
     if (total > ch->capacity_koinu) { rc = PC_ERR_CAPACITY; goto out; }
-    if (to_bob < claimed_to_bob_koinu) { rc = PC_ERR_AMOUNT; goto out; }
+    /* Equal, not at least. The ratchet stores the claim and Bob reports the
+       claim, so a payment quietly paying more was recorded as the smaller
+       number and the next one could replace it with a transaction paying less
+       than that one really did. Nothing Bob invoiced was ever at risk, since
+       the claim is what he checked against, but "paid N koinu held" should be
+       the transaction he is holding and costs nothing to require. */
+    if (to_bob != claimed_to_bob_koinu) { rc = PC_ERR_AMOUNT; goto out; }
     /* and what is left over has to be enough for a miner to take it */
     if (ch->capacity_koinu - total < pc_min_fee(blen, soft_dust)) {
         rc = PC_ERR_FEE; goto out;
