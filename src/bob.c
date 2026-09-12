@@ -1242,8 +1242,13 @@ int main(int argc, char **argv)
             return 2;
         }
         /* rebuilding a channel validates both pubkeys, which needs the curve
-           context, so this cannot run before it is up */
-        kw_ec_start();
+           context, so this cannot run before it is up. A context that failed to
+           come up makes every kw_ec_* call return 0, which is fail-closed but
+           surfaces as a parse error three layers down; say what it is. */
+        if (!kw_ec_start()) {
+            fprintf(stderr, "bob: no curve context\n");
+            return 1;
+        }
         int srv = 0;
         if (watch) {
             /* Supervised mode: one pass every --watch seconds until a signal,
@@ -1288,7 +1293,11 @@ int main(int argc, char **argv)
                          line[n - 1] == ' '  || line[n - 1] == '\t')) line[--n] = '\0';
         if (n <= 0) { free(line); pc_secret_free(skey);
                       fprintf(stderr, "bob: no psbt on stdin\n"); return 2; }
-        kw_ec_start();
+        if (!kw_ec_start()) {
+            free(line); pc_secret_free(skey);
+            fprintf(stderr, "bob: no curve context\n");
+            return 1;
+        }
         char *signed_psbt = NULL;
         pc_result sr = pc_payment_sign(line, skey, chain, &signed_psbt);
         kw_ec_stop();
@@ -1325,8 +1334,8 @@ int main(int argc, char **argv)
         if (!wif) { fprintf(stderr, "bob: cannot read --wif\n"); return 2; }
     }
 
-    kw_ec_start();
     int rc = 1;
+    if (!kw_ec_start()) { fprintf(stderr, "bob: no curve context\n"); goto done; }
 
     char bob_pub[PUBKEYHEXLEN], bob_addr[P2PKHLEN];
     if (sign_cmd) {
