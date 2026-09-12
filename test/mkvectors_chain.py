@@ -28,6 +28,13 @@ Files are walked newest first. P2SH is absent from early Dogecoin (14,545
 pre-AuxPoW blocks hold not one), so starting at the oldest would scan the whole
 chain to find the shape that matters most. Within a file the walk is forward,
 since a prevout is always in an earlier block than the spend that names it.
+
+This lives in the public tree on purpose. The vectors are evidence, and evidence
+nobody can audit is a claim: a reader has to be able to check that they were
+selected rather than fabricated, which means reading this. koinu keeps its own
+copy for its own suite, and the two drifting is harmless, because a generator
+that drifts still has to emit vectors that verify against signatures the network
+accepted years ago. It cannot degrade quietly, only loudly.
 """
 import hashlib
 import os
