@@ -51,9 +51,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (lens == 0 || poss + 2 + lens != size) abort();
         if (data[poss + 2] & 0x80) abort();
 
-        /* S is a number, and it has to be one that exists. 33 bytes is only
-           legal as a zero pad; anything wider is above 2^256 and is not a
-           scalar at all. */
+        /* R and S are both numbers, and both have to be ones that exist. 33
+           bytes is only legal as a zero pad; anything wider is above 2^256 and
+           is not a scalar at all. */
+        if (lenr > 33) abort();
+        if (lenr == 33 && data[4] != 0x00) abort();
         if (lens > 33) abort();
         if (lens == 33 && data[poss + 2] != 0x00) abort();
 

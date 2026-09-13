@@ -7,6 +7,16 @@
 # from outside the process, so it is verified by reading main, not here.
 set -eu
 
+# Root holds CAP_IPC_LOCK, which bypasses RLIMIT_MEMLOCK entirely, so mlock
+# succeeds under `ulimit -l 0` and the warning correctly does not fire. The
+# check below would read that as a missing warning. Containerised CI runs as
+# root by default, so skip rather than report a failure that is the environment.
+if [ "$(id -u)" = 0 ]; then
+    echo "key stays off swap:"
+    echo "  skipped: root bypasses RLIMIT_MEMLOCK (CAP_IPC_LOCK)"
+    exit 0
+fi
+
 cd "$(dirname "$0")/.."
 [ -x ./bob ] && [ -x ./test/mkfunding ] || { echo "build first: make check" >&2; exit 1; }
 

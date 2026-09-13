@@ -223,18 +223,21 @@ pc_result pc_sig_is_standard(const unsigned char *der, size_t dlen)
     if (s[0] & 0x80)                        return PC_ERR_PSBT;
     if (lens > 1 && s[0] == 0x00 && !(s[1] & 0x80)) return PC_ERR_PSBT;
 
-    /* S has to fit in 32 bytes before it can be compared against half the group
-       order, and the checks above do not establish that. They say S is positive
-       and carries no redundant leading zero, which still admits a 33-byte S
-       whose first byte is 0x01 through 0x7f: positive, not redundant, and
-       larger than any scalar. Dropping that byte as though it were a pad
-       compares the low 32 bytes of a number above 2^256 and calls it low.
+    /* Both halves have to be scalars. Positive and non-redundant still admits a
+       33-byte integer whose first byte is 0x01 through 0x7f, which is a number
+       above 2^256, and for S dropping that byte as though it were a pad
+       compares the low 32 and calls it low. R needs the same bound for a
+       plainer reason: this function's answer is whether a default node would
+       relay the signature, and one carrying a 40-byte R is not.
      *
-     * Core refuses these too, just not in IsValidSignatureEncoding: its strict
-     * DER pass lets them by and secp256k1_ecdsa_signature_parse_der fails on
-     * the overflow afterwards. pc has no second pass, so the magnitude decision
-     * belongs here rather than with whatever verifier runs next. */
-    if (lens > 33 || (lens == 33 && s[0] != 0x00)) return PC_ERR_PSBT;
+     * Core splits these differently, refusing them in
+     * secp256k1_ecdsa_signature_parse_der rather than in
+     * IsValidSignatureEncoding. kw_ec_verify runs that same parser immediately
+     * after this, so nothing reaches a verifier that would take it either way.
+     * Deciding it here is the same belt and braces as the low-S check above,
+     * and for the same stated reason: the promise is pc's. */
+    if (lenr > 33 || (lenr == 33 && der[4] != 0x00)) return PC_ERR_PSBT;
+    if (lens > 33 || (lens == 33 && s[0] != 0x00))   return PC_ERR_PSBT;
 
     unsigned char s32[32];
     memset(s32, 0, sizeof(s32));

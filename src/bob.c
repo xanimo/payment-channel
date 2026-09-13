@@ -1376,6 +1376,13 @@ int main(int argc, char **argv)
                         "being true\n");
         goto done;
     }
+    /* --once permits a static number because it cannot outlive one, but the
+       margin is still frozen at whatever was typed, and a --once that sits
+       waiting for a peer ages exactly like a long-lived one. Say it, since the
+       whole reason --height-file exists is that this erodes silently. */
+    if (!height_file && once)
+        fprintf(stderr, "bob: --height %u is fixed, so --min-slack is measured "
+                        "against it however long this waits\n", height);
 
     /* The same argument again, and the one that costs the most. Without a
        backend nothing consults a chain, so Alice never has to have broadcast
