@@ -21,3 +21,5 @@ oom-*
 test/sighash_vectors
 test/__pycache__/
 *.d
+fuzz/sigrun
+fuzz/mksigseed
