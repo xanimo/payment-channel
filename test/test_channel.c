@@ -381,6 +381,28 @@ int main(void)
                   "sig: and before a large one it is high-S");
         }
 
+        /* R gets the same bound, for the plainer reason: this answers whether
+           a node would relay the signature, and one with a 40-byte R is not
+           something a node will take. It had no bound while S did. */
+        {
+            unsigned char w[96];
+            size_t o = 0;
+            w[o++] = 0x30; w[o++] = 0; w[o++] = 0x02; w[o++] = 40;
+            for (int i = 0; i < 40; i++) w[o++] = 0x11;
+            w[o++] = 0x02; w[o++] = 0x01; w[o++] = 0x01;
+            w[1] = (unsigned char)(o - 2);
+            CHECK(pc_sig_is_standard(w, o) == PC_ERR_PSBT,
+                  "sig: a 40-byte R is refused");
+
+            o = 0;
+            w[o++] = 0x30; w[o++] = 0; w[o++] = 0x02; w[o++] = 33; w[o++] = 0x01;
+            for (int i = 0; i < 32; i++) w[o++] = 0x11;
+            w[o++] = 0x02; w[o++] = 0x01; w[o++] = 0x01;
+            w[1] = (unsigned char)(o - 2);
+            CHECK(pc_sig_is_standard(w, o) == PC_ERR_PSBT,
+                  "sig: and a 33-byte R with a nonzero lead");
+        }
+
         /* malformed encodings, each one thing wrong */
         unsigned char b[80];
         memcpy(b, der, dlen); b[0] = 0x31;
