@@ -387,6 +387,21 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
     if (!utx || utx->nin != 1 || utx->nout != 0) goto out;  /* nothing promised yet */
     if (p.in[0].nsigs != 0) goto out;
 
+    /* The input has to name the outpoint derived above. Nothing downstream
+       reads it, since every later check runs against ch->funding_txid, so a
+       peer naming some other outpoint here was inert. A field that looks
+       authoritative and is quietly discarded is one the next reader wires up,
+       and then the derivation stops being what decides. Compare it instead:
+       the psbt carries the prevout in internal order, ch->funding_txid is in
+       display order, so one of them has to be reversed. */
+    {
+        unsigned char want[32], got[32];
+        if (!pc_hex_to_bin(txid, want, sizeof(want))) goto out;
+        for (int k = 0; k < 32; k++) got[k] = want[31 - k];
+        if (memcmp(utx->vin[0].prevout, got, 32) != 0) goto out;
+        if (utx->vin[0].vout != (uint32_t)vout) goto out;
+    }
+
     /* The redeem script commits Bob's key and the locktime, so matching it
        against the one he computed is what makes the rest of this his channel. */
     if (p.in[0].redeemlen == 0 || p.in[0].redeemlen * 2 + 1 > PC_MAX_SCRIPT_HEX) goto out;
@@ -437,6 +452,19 @@ pc_result pc_payment_create(const pc_channel *ch,
         !kw_base58check_decode(alice_addr, apay, sizeof(apay), &al) || al != 21) {
         rc = PC_ERR_ARG; goto out;
     }
+    /* Both have to be P2PKH on this network, the same check pc_refund_create
+       makes and for the same reason: a P2SH or wrong-network address decodes to
+       21 bytes just as well, and wrapping a script hash in a P2PKH output makes
+       something nothing can spend.
+     *
+     * Bob's comes off the socket, which is the hostile one, and his own
+     * pc_tx_verify_payment would refuse the result since no output pays
+     * hash160(bob_pubkey), so Alice loses a round trip rather than money. That
+     * is the other party's process deciding, and she signs before it does.
+     * Alice's own is the operator's and lands on her change, where there is no
+     * counterparty to reject anything at all. */
+    const uint8_t want_p2pkh = pc_chainparams(ch->chain)->p2pkh;
+    if (bpay[0] != want_p2pkh || apay[0] != want_p2pkh) { rc = PC_ERR_ARG; goto out; }
 
     /* one input, Bob's payment, the remainder back to Alice. Bob is output 0 so
        pc_tx_verify_payment finds the payout where it expects; change is dropped

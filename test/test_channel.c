@@ -416,6 +416,52 @@ int main(void)
         CHECK(pc_sig_is_standard(der, 7) == PC_ERR_PSBT, "sig: too short");
     }
 
+    /* A payout address has to be P2PKH on this network. A P2SH or wrong-network
+       address decodes to 21 bytes just as well, and wrapping a script hash in a
+       P2PKH output makes something nothing can spend. pc_refund_create has
+       always checked this; pc_payment_create did not, and its Bob address comes
+       off the socket. */
+    {
+        char w[PRIVKEYWIFLEN], a[P2PKHLEN], w2[PRIVKEYWIFLEN], a2[P2PKHLEN];
+        CHECK(generatePrivPubKeypair(w, a, false), "addr: a key for the check");
+        CHECK(generatePrivPubKeypair(w2, a2, false), "addr: and a second");
+        char apub2[PUBKEYHEXLEN], bpub2[PUBKEYHEXLEN];
+        size_t nn = sizeof(apub2);
+        getPubkeyFromPrivkey(w, false, apub2, &nn);
+        nn = sizeof(bpub2);
+        getPubkeyFromPrivkey(w2, false, bpub2, &nn);
+
+        pc_channel c2;
+        CHECK_OK(pc_channel_init(&c2, apub2, bpub2, 300000, PC_CHAIN_MAIN),
+                 "addr: channel for the check");
+
+        /* the same 20 bytes under the P2SH version instead of P2PKH */
+        unsigned char dec[64];
+        size_t dl = 0;
+        CHECK(kw_base58check_decode(a2, dec, sizeof(dec), &dl) && dl == 21,
+              "addr: the honest address decodes");
+        unsigned char s2[21];
+        memcpy(s2, dec, 21);
+        s2[0] = KW_DOGE_MAINNET.p2sh;
+        char p2sh_addr[64];
+        CHECK(kw_base58check_encode(s2, 21, p2sh_addr, sizeof(p2sh_addr)) > 0,
+              "addr: a p2sh spelling of the same hash");
+
+        CHECK(pc_channel_set_funding(&c2,
+                "b4455e7b7b7acb51fb6feba7a2702c42a5100f61f61abafa31851ed6ae076074",
+                0, 10000000000ULL) == PC_OK, "addr: funding for the check");
+
+        char *psbt = NULL;
+        CHECK(pc_payment_create(&c2, "00", w, a, p2sh_addr,
+                                2000000000ULL, 100000000ULL, &psbt) == PC_ERR_ARG,
+              "addr: a p2sh payout address is refused");
+        free(psbt); psbt = NULL;
+        CHECK(pc_payment_create(&c2, "00", w, p2sh_addr, a2,
+                                2000000000ULL, 100000000ULL, &psbt) == PC_ERR_ARG,
+              "addr: and so is a p2sh change address");
+        free(psbt);
+    }
+
     /* pc_split_argv builds the argv for --confirm-cmd and friends. It is not a
        shell, but it has to honour quoting, because a backend needs its own
        arguments and so cannot be a bare path, and without quoting a path with
@@ -1011,6 +1057,43 @@ int main(void)
             CHECK(pc_channel_open_accept(&tight, open_psbt, funding_hex,
                                          299950, 100, &cap) == PC_ERR_STATE,
                   "locktime too near is refused");
+
+            /* The opening psbt's input has to name the outpoint Bob derived
+               from the funding transaction. Nothing downstream reads it, since
+               every later check runs against ch->funding_txid, so a peer
+               naming another outpoint here changed nothing. It is checked
+               because a field that looks authoritative and is discarded is the
+               one a later change starts trusting. */
+            {
+                unsigned char *pb = NULL;
+                size_t pbl = 0;
+                size_t hl = strlen(open_psbt);
+                pb = (unsigned char *)malloc(hl / 2 + 1);
+                CHECK(pb && pc_hex_to_bin(open_psbt, pb, hl / 2), "psbt decodes");
+                pbl = hl / 2;
+                /* flip a byte of the prevout inside the unsigned tx: it is the
+                   32 bytes after the 4 byte version and the 1 byte input count */
+                size_t at = 0, found = 0;
+                for (size_t k = 0; k + 37 < pbl; k++) {
+                    if (pb[k] == 0x01 && pb[k + 1] == 0x00 &&
+                        pb[k + 2] == 0x00 && pb[k + 3] == 0x00 && pb[k + 4] == 0x01) {
+                        at = k + 5; found = 1; break;      /* version 1, nin 1 */
+                    }
+                }
+                if (found) {
+                    pb[at] ^= 0xff;
+                    char *bad = (char *)malloc(pbl * 2 + 1);
+                    pc_bin_to_hex(pb, pbl, bad);
+                    pc_channel other;
+                    CHECK_OK(pc_channel_init(&other, alice_pub, bob_pub, 300000, 0),
+                             "a fresh channel to accept into");
+                    CHECK(pc_channel_open_accept(&other, bad, funding_hex,
+                                                 1000, 100, NULL) != PC_OK,
+                          "an opening psbt naming another outpoint is refused");
+                    free(bad);
+                }
+                free(pb);
+            }
             CHECK_OK(pc_channel_init(&tight, alice_pub, bob_pub, 300000, 0), "reinit");
             CHECK(pc_channel_open_accept(&tight, open_psbt, funding_hex,
                                          299899, 100, &cap) == PC_OK,

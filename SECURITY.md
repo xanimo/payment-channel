@@ -40,6 +40,23 @@ bob cannot see a chain. `--confirm-cmd` is what checks the funding against one,
 and `--trust-peer` turns that off deliberately. a bob running with
 `--trust-peer` against an untrusted alice is doing what it says on the flag.
 
+**and `--confirm-cmd` is only as good as the backend behind it.** bob gets one
+line back, a depth and a value, and he checks both and refuses either missing.
+he cannot check that the block those came out of is a block, because he never
+sees it. a backend that reports an output which is not in the chain makes bob
+open a channel against nothing, invoice, verify every payment correctly, ack,
+and ship goods for a funding output that does not exist. at the sweep there is
+nothing to broadcast, and the merchant has lost the goods outright.
+
+so the backend must verify that the transactions it scans hash to the merkle
+root of the header it trusts, and that the header is on the chain with the most
+work. an spv client that parses a block body a peer handed it without that
+check is not a chain check, it is a peer check wearing one. if you run
+`--confirm-cmd` against something you did not write, that is the question to
+ask it first. this is stated here because it is the assumption pc cannot
+verify and cannot defend against, not because any particular backend is known
+to be wrong.
+
 `--sign-cmd` hands a signer any input 0 it is given, which makes it an oracle
 for the key. it is used and not trusted, since what comes back is re-verified,
 but it has to be reachable only by its own bob.
