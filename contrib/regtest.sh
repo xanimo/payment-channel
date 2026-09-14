@@ -33,6 +33,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# set -e exits on any unguarded failure, and most of the RPC calls below are
+# unguarded because a node that cannot answer is not a case worth a message of
+# its own. The cost is that the script stops mid-section printing nothing, which
+# reads as a hang in pc rather than as a wallet with no funds or a node that
+# went away. Name the line instead.
+on_err() {
+    local rc=$? line=$1
+    echo "" >&2
+    echo "regtest: stopped at line $line, exit $rc" >&2
+    sed -n "${line}p" "$0" | sed 's/^[[:space:]]*/  /' >&2
+    echo "  this is the script or the environment, not necessarily pc." >&2
+    echo "  a node that lost its peer, a wallet out of funds and a missing" >&2
+    echo "  binary all land here." >&2
+    exit "$rc"
+}
+trap 'on_err $LINENO' ERR
+
 # regtest shares testnet's p2sh prefix but not its p2pkh one (0x6f against
 # 0x71), so --testnet here would print addresses this node does not recognise
 # even though the scripts are identical
