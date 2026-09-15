@@ -122,7 +122,8 @@ grep -q "funding  $TXID:$VOUT " "$WORK/alice.log" || {
     echo "FAIL: alice derived a different funding output" >&2
     cat "$WORK/bob.log" >&2; exit 1; }
 
-CLOSING=$(grep -A1 "closing transaction" "$WORK/alice.log" | tail -1)
+# same reason as B_SENT below: no match must reach the guard, not the trap
+CLOSING=$(grep -A1 "closing transaction" "$WORK/alice.log" | tail -1 || true)
 [ -n "$CLOSING" ] || { echo "no closing transaction" >&2; cat "$WORK/bob.log" >&2; exit 1; }
 
 # the whole point: does a node accept it
@@ -201,7 +202,7 @@ echo "refund   returned $R_PAID DOGE to alice, expected 99"
 if [ -n "${KW:-}" ]; then
     [ -x "$KW" ] || { echo "KW=$KW is not executable" >&2; exit 1; }
     KWARGS="$KW --regtest outpoint --node 127.0.0.1 --port ${P2P:-18444} --spv --headers $WORK/hdrs"
-    KWSEND="$KW --regtest send --node 127.0.0.1 --port ${P2P:-18444}"
+    KWSEND="$KW --regtest send --node 127.0.0.1 --port ${P2P:-18444} --yes"
 
     confirm_bob() {
         rm -rf "$WORK/cstate"; mkdir -p "$WORK/cstate"
@@ -276,7 +277,10 @@ if [ -n "${KW:-}" ]; then
         grep -q "broadcast:" "$WORK/bbob.log" 2>/dev/null && break; sleep 0.5
     done
     kill "$BBOB" 2>/dev/null || true; wait "$BBOB" 2>/dev/null || true
-    B_SENT=$(grep -oE "broadcast: [0-9a-f]{64}" "$WORK/bbob.log" | awk '{print $2}')
+    # `|| true` because grep exits 1 on no match, which under set -e killed the
+    # script here and made the guard on the next line unreachable: the one case
+    # it exists to report was the one case it could not report.
+    B_SENT=$(grep -oE "broadcast: [0-9a-f]{64}" "$WORK/bbob.log" | awk '{print $2}' || true)
     [ -n "$B_SENT" ] || { echo "FAIL: bob did not broadcast the close" >&2
                           tail -3 "$WORK/bbob.log" >&2; exit 1; }
     "${RPC[@]}" generate 1 >/dev/null

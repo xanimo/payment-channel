@@ -37,7 +37,7 @@ reading of the script.
 ## building
 
 the crypto, transactions, psbt and base58 come from koinu, which is a released
-static library and a submodule pinned at v0.2.3.
+static library and a submodule pinned at v0.2.4.
 
     git submodule update --init --recursive depends/koinu
     make -C depends/koinu
@@ -145,10 +145,11 @@ someone to relay, which is the window alice's refund is racing and the one place
 a funding output can be spent out from under a transaction bob is still holding.
 it runs after alice has been answered, so it is not inside her read budget, and
 it re-checks the funding first and says so loudly if it has gone. the contract
-is koinu's `kw send`, which takes the hex on stdin and reports no reject rather
+is koinu's `kw send`, which needs `--yes` because it refuses a non-interactive
+broadcast without it, takes the hex on stdin and reports no reject rather
 than claiming acceptance, since p2p has no positive acknowledgement.
 
-    --broadcast-cmd "kw send --node NODE"
+    --broadcast-cmd "kw send --node NODE --yes"
 
 both are run with execvp and no shell, since the txid on that line came off the
 wire, and the confirmation has three seconds to answer. the split honours single
@@ -178,7 +179,7 @@ funding is undetermined or the height feed goes stale, and every pass prints a
 holding that the chain has not yet made final, for a monitor to scrape:
 
     $ bob --sweep --state channels --height-file height.txt --watch 60 \
-          --broadcast-cmd "kw send --node NODE" \
+          --broadcast-cmd "kw send --node NODE --yes" \
           --confirm-cmd "kw outpoint --node NODE" \
           --sweep-margin 50 --warn-margin 200 --alert-cmd "notify-ops"
 
