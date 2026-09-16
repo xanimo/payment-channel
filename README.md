@@ -126,11 +126,15 @@ claimed.
 that confirmation has three seconds, which is deliberately under what alice will
 wait, so on mainnet it wants `--daemon` and a running `kwd` rather than a `kw`
 that syncs for itself. a `kw outpoint` loads the header cache before it speaks to
-a peer, about 900ms against mainnet's 6.4M headers and growing with the chain,
-and then a warm answer measures 2.1s with one `--node` and 3.2s against seed
-peers. that is at or over the budget on a fast machine with a warm cache and
-nothing going wrong. kwd pays the load once at startup and holds the chain
-resident, which is what it is for.
+a peer, and that load is linear in the chain and paid again on every single
+call. measured on mainnet at 6.4M headers it has been a second of it, then a few
+hundred milliseconds once koinu made the path faster, with the warm answer on
+top landing in the low seconds against one `--node` and higher against seed
+peers. the figures move and the shape does not: the budget is fixed, the load is
+not, and the margin is small enough on a fast machine with a warm cache that
+anything going wrong spends it. kwd pays that load once at startup and holds the
+chain resident, which is what it is for. measure your own rather than trusting
+either number here.
 
     --confirm-cmd "kw outpoint --headers hdrs --node NODE"
 
