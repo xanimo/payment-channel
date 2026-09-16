@@ -142,6 +142,16 @@ is the shape without a daemon and it suits regtest or a short chain. without
 `--headers` at all there is no cache to resume from and no path for the parallel
 fill, so every call syncs from genesis: not slow once, slow always.
 
+at the pinned v0.2.5 that fallback also cannot start from nothing. a `kw
+outpoint` given an empty header store drops every peer it asks and returns
+having synced no chain, so the first call against a fresh cache fails rather
+than being slow, and it keeps failing. it fails closed, so bob refuses the open
+instead of accepting one he has not checked, and `--daemon` does not have the
+problem because kwd syncs at startup and an empty store there is a daemon that
+does not come up rather than an open that does not confirm. the fix is on
+koinu's main and in no release, so until there is a tag above v0.2.5 that form
+wants a header cache something else has already filled.
+
 `--since-window N` appends `--since HEIGHT` to that command so a height bounded
 backend only scans from there to the tip rather than the whole chain, which is
 what makes a warm `kwd` answer a recent funding output in milliseconds instead
