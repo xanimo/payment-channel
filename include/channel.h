@@ -94,7 +94,7 @@ typedef enum {
     PC_ERR_SCRIPT,       /* the redeem script would not build or hash         */
     PC_ERR_PSBT,         /* a PSBT would not parse, sign, or finalize         */
     PC_ERR_STATE,        /* the channel is not in a state that allows this    */
-    PC_ERR_AMOUNT,       /* it pays Bob less than it claims to                */
+    PC_ERR_AMOUNT,       /* it does not pay Bob what it claims to             */
     PC_ERR_CAPACITY,     /* its outputs spend more than the channel holds     */
     PC_ERR_DUST,         /* an output is under the hard dust limit            */
     PC_ERR_FEE,          /* what is left over is below the miner's floor      */
@@ -109,7 +109,7 @@ typedef enum {
 
 /* Four of these are nothing to do with the amount Bob is paid, and a merchant
  * refusing a customer over a fee a fraction of a koinu short, while saying the
- * payment pays less than it claims, is its own kind of broken. They are
+ * payment does not pay what it claims, is its own kind of broken. They are
  * separate so the reject can say which. */
 
 const char *pc_strerror(pc_result r);
@@ -172,7 +172,15 @@ pc_result pc_channel_set_funding(pc_channel *ch,
 
 /* Produce a PSBT spending the funding outpoint, paying (to_bob) to Bob's
  * address and the remainder back to Alice, signed with Alice's key. The
- * result is hex, caller frees with dogecoin_free(). */
+ * result is hex, caller frees with free().
+ *
+ * Both addresses must be P2PKH on this channel's chain, the same requirement
+ * pc_refund_create() makes. A P2SH or wrong-network address decodes to a
+ * 21-byte payload just as well, and wrapping a script hash in a P2PKH output
+ * makes something nothing can spend. Bob's comes off the socket and his own
+ * pc_tx_verify_payment() would refuse the result, so that one costs Alice a
+ * round trip; Alice's own lands on her change, where there is no counterparty
+ * to reject anything. */
 pc_result pc_payment_create(const pc_channel *ch,
                             const char *funding_tx_hex,
                             const char *alice_wif,
@@ -197,7 +205,7 @@ pc_result pc_payment_accept(pc_channel *ch,
  *   OP_0 <alice sig> <bob sig> OP_0 <redeem script>
  *
  * The trailing OP_0 selects the ELSE branch. Returns the broadcastable
- * transaction as hex; caller frees with dogecoin_free(). */
+ * transaction as hex; caller frees with free(). */
 pc_result pc_payment_countersign(const pc_channel *ch,
                                  const char *psbt_hex,
                                  const char *bob_wif,
@@ -207,7 +215,7 @@ pc_result pc_payment_countersign(const pc_channel *ch,
  * run where the key lives; pc_payment_assemble finishes the signer's output with
  * no key at all, so a network Bob holds none. The finished transaction is still
  * checked by pc_tx_verify_payment, so a wrong or hostile signer cannot make Bob
- * ship. Both return hex freed with dogecoin_free(). */
+ * ship. Both return hex freed with free(). */
 pc_result pc_payment_sign(const char *psbt_hex,
                           const char *bob_wif,
                           pc_chain chain,
@@ -234,7 +242,7 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
 
 /* Alice: the opening PSBT. One input spending the funding output, no outputs
  * and no signatures, carrying the redeem script and the transaction that
- * created the input. Result is hex, caller frees with dogecoin_free(). */
+ * created the input. Result is hex, caller frees with free(). */
 pc_result pc_channel_open_create(const pc_channel *ch, const char *funding_tx_hex,
                                  char **psbt_hex_out);
 
@@ -245,17 +253,19 @@ pc_result pc_channel_open_create(const pc_channel *ch, const char *funding_tx_he
  * expires while Bob is holding a payment is one Alice can refund out from under
  * him. On success the channel is funded and (capacity_out) is what it is worth.
  *
- * The funding transaction travels beside the PSBT rather than inside it because
- * no published accessor reports a PSBT input's previous transaction, or its
- * outpoint at all. So this does not, and cannot, check that the PSBT spends the
- * output it derived: the PSBT is checked only for the redeem script and for
- * carrying no signatures and no outputs yet.
+ * The funding transaction travels beside the PSBT rather than inside it, since
+ * a PSBT does not carry the transaction its input spends. The input's outpoint
+ * it does carry, through kw_psbt_unsigned_tx, and this compares it against the
+ * outpoint derived from (funding_tx_hex) and refuses a mismatch.
  *
- * What binds the channel to that outpoint is the payment rather than the
- * opening. pc_tx_verify_payment() requires the assembled transaction to spend
- * (funding_txid, funding_vout) exactly, so an opening that named a different
- * outpoint buys Alice nothing: she still has to produce a payment spending the
- * one Bob recorded. */
+ * That check is defence in depth rather than load-bearing, and it is worth
+ * knowing which. What binds the channel to the outpoint is the payment:
+ * pc_tx_verify_payment() requires the assembled transaction to spend
+ * (funding_txid, funding_vout) exactly, so an opening naming a different
+ * outpoint bought Alice nothing even before this was checked. It is checked
+ * because a field that looks authoritative and is read by nothing is one a
+ * later change starts trusting, and then the derivation stops being what
+ * decides. */
 pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
                                  const char *funding_tx_hex,
                                  uint32_t chain_height, uint32_t min_slack,
@@ -264,7 +274,7 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
 /* ── Bob: verify what he is actually being paid ──────────────── */
 
 /* Check the transaction Bob assembled before he treats it as money: exactly
- * one input, spending this channel's funding outpoint, paying at least
+ * one input, spending this channel's funding outpoint, paying exactly
  * (claimed_to_bob_koinu) to the key in the redeem script, and spending no more
  * than the capacity.
  *
@@ -361,7 +371,7 @@ pc_result pc_tx_sighash(const char *raw_tx_hex,
  * where OP_1 selects the refund branch. nLockTime is the channel's locktime and
  * the input is non-final, both of which CHECKLOCKTIMEVERIFY requires, so no
  * node will mine this until the locktime passes. Returns the transaction as
- * hex; caller frees with dogecoin_free().
+ * hex; caller frees with free().
  *
  * This is the only way Alice gets her money back, so it is the one branch worth
  * broadcasting on regtest before trusting it. */

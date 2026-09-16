@@ -58,7 +58,7 @@ const char *pc_strerror(pc_result r)
        of it. */
     case PC_ERR_PSBT:    return "psbt would not parse or sign";
     case PC_ERR_STATE:   return "not in a state that allows this";
-    case PC_ERR_AMOUNT:  return "pays less than it claims to";
+    case PC_ERR_AMOUNT:  return "does not pay what it claims to";
     case PC_ERR_CAPACITY: return "spends more than the channel holds";
     case PC_ERR_DUST:    return "an output is under the dust limit";
     case PC_ERR_FEE:     return "leaves too little fee to be mined";

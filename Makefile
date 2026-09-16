@@ -8,10 +8,13 @@
 #   make -C depends/koinu
 #   make check
 #
-# The pinned tag is in version.mk, and must be v0.2.1 or later, which is where
-# the scriptSig-length fix a P2SH multisig spend needs landed. Whatever KOINU
-# points at must contain libkw.a, depends/secp256k1/.libs/libsecp256k1.a, and
-# the crypto/ net/ wallet/ headers.
+# The pinned tag is in version.mk. v0.2.5 is the floor and the reason is in
+# SECURITY.md: earlier releases either do not tie a block's transactions to its
+# header, which is what --confirm-cmd rests on, or cannot sync mainnet. v0.2.1
+# is only the floor for building at all, being where the scriptSig-length fix a
+# P2SH multisig spend needs landed, and building is not the bar that matters.
+# Whatever KOINU points at must contain libkw.a,
+# depends/secp256k1/.libs/libsecp256k1.a, and the crypto/ net/ wallet/ headers.
 
 # PC_VERSION and KOINU_TAG, the one place either is written. A command-line
 # KOINU_TAG= still overrides it, and .github/actions/build-koinu sources the
@@ -61,6 +64,12 @@ koinu-version:
 	    exit 1; \
 	fi; \
 	have=`git -C "$(KOINU)" describe --tags --always --dirty 2>/dev/null || echo unknown`; \
+	case "$(KOINU_TAG)" in \
+	  v0.2.[01234]|v0.1.*|v0.0.*) \
+	    echo "warning: koinu $(KOINU_TAG) is below the v0.2.5 security floor." >&2; \
+	    echo "         --confirm-cmd can be answered by a peer rather than the" >&2; \
+	    echo "         chain, or cannot reach one. see SECURITY.md." >&2;; \
+	esac; \
 	if [ "$$have" != "$(KOINU_TAG)" ]; then \
 	    if [ -n "$(KOINU_ANY)" ]; then \
 	        echo "warning: koinu at $$have, not the pinned $(KOINU_TAG)" >&2; \

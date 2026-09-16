@@ -29,7 +29,7 @@
  * A merchant who signs and stores a transaction without reading it is trusting
  * the payer to have built it honestly, which is the one thing a payment channel
  * is supposed to remove. So the transaction is parsed here: one input, the
- * funding outpoint, and an output to Bob for at least what was claimed. */
+ * funding outpoint, and an output to Bob for exactly what was claimed. */
 
 #include "channel.h"
 #include "hex.h"
