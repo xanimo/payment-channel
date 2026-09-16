@@ -7,8 +7,7 @@ mail **bluezr@dogecoin.com**. encrypt it if it is sensitive, to
 which is the key every commit in this repository is signed with. that is the
 whole fingerprint rather than the long key id, because a 64 bit id is short
 enough to collide on purpose and this is the one place that matters. fetch it
-from
-a keyserver or from `https://github.com/xanimo.gpg`, and check it against a
+from a keyserver or from `https://github.com/xanimo.gpg`, and check it against a
 clone rather than against this file:
 
     git log --show-signature -1
@@ -48,6 +47,15 @@ open a channel against nothing, invoice, verify every payment correctly, ack,
 and ship goods for a funding output that does not exist. at the sweep there is
 nothing to broadcast, and the merchant has lost the goods outright.
 
+so the backend must verify that the transactions it scans hash to the merkle
+root of the header it trusts, and that the header is on the chain with the most
+work. an spv client that parses a block body a peer handed it without that
+check is not a chain check, it is a peer check wearing one. if you run
+`--confirm-cmd` against something you did not write, that is the question to
+ask it first. this is stated here because it is the assumption pc cannot
+verify and cannot defend against, not because any particular backend is known
+to be wrong.
+
 ## a version floor, for the same reason
 
 **koinu v0.2.5 or later**, and the two reasons are different.
@@ -74,15 +82,6 @@ funding check that does not do what this file says it does, or one that does and
 cannot reach a chain to do it with. `alice --version` and `bob --version` print
 the koinu they were built against, which is the quickest way to tell.
 
-so the backend must verify that the transactions it scans hash to the merkle
-root of the header it trusts, and that the header is on the chain with the most
-work. an spv client that parses a block body a peer handed it without that
-check is not a chain check, it is a peer check wearing one. if you run
-`--confirm-cmd` against something you did not write, that is the question to
-ask it first. this is stated here because it is the assumption pc cannot
-verify and cannot defend against, not because any particular backend is known
-to be wrong.
-
 `--sign-cmd` hands a signer any input 0 it is given, which makes it an oracle
 for the key. it is used and not trusted, since what comes back is re-verified,
 but it has to be reachable only by its own bob.
@@ -96,5 +95,5 @@ chain's own signatures, and deployed nowhere.
 ## what a good report looks like
 
 the transaction or the bytes, and what you expected instead. `make check` is
-253 checks, 17 attacks and 156 external sighash vectors, so a case that gets
+264 checks, 17 attacks and 156 external sighash vectors, so a case that gets
 past all of it is worth writing down precisely.
