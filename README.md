@@ -37,7 +37,7 @@ reading of the script.
 ## building
 
 the crypto, transactions, psbt and base58 come from koinu, which is a released
-static library and a submodule pinned at v0.2.4.
+static library and a submodule pinned at v0.2.5.
 
     git submodule update --init --recursive depends/koinu
     make -C depends/koinu
