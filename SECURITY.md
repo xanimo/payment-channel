@@ -48,6 +48,32 @@ open a channel against nothing, invoice, verify every payment correctly, ack,
 and ship goods for a funding output that does not exist. at the sweep there is
 nothing to broadcast, and the merchant has lost the goods outright.
 
+## a version floor, for the same reason
+
+**koinu v0.2.5 or later**, and the two reasons are different.
+
+v0.2.3 and earlier do not verify that a block's transactions belong to the
+header they arrived behind, which is the check the paragraph above says a
+backend has to make. without it `--confirm-cmd` is answered by whichever peer
+served the block rather than by the chain, and that is the full-loss path: a
+funding output that was never mined, goods shipped, nothing to broadcast at the
+sweep. that is the one worth upgrading away from.
+
+v0.2.4 fixes it, and also checks the proof of work on the headers `kw outpoint`
+syncs, which v0.2.3 did not do on that call. it cannot sync mainnet: an auxpow
+parent coinbase carrying a witness hashes wrong, and enough recent mainnet
+headers have one that any command checking work stops a few dozen blocks above
+the newest anchor. so v0.2.4 is sound and unusable, which is a strange pair and
+worth saying rather than rounding to "upgrade".
+
+v0.2.5 is the first release that is both.
+
+this repository's history contains commits pinning v0.2.1 through v0.2.4.
+building pc at one of those and pointing it at the koinu it names gets you a
+funding check that does not do what this file says it does, or one that does and
+cannot reach a chain to do it with. `alice --version` and `bob --version` print
+the koinu they were built against, which is the quickest way to tell.
+
 so the backend must verify that the transactions it scans hash to the merkle
 root of the header it trusts, and that the header is on the chain with the most
 work. an spv client that parses a block body a peer handed it without that
