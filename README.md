@@ -43,11 +43,13 @@ static library and a submodule pinned at v0.2.5.
     make -C depends/koinu
     make check
 
-koinu is private, so that fetch needs access to it; a plain `git clone` of this
-repo does not attempt it and everything else still builds once `KOINU` points
-somewhere. ci does not use the submodule at all, it clones koinu with a deploy
-key into the job's own workspace and passes `KOINU` explicitly. both pin the
-same tag, which is the whole point of the pin.
+koinu is public, so that fetch needs nothing in particular; a plain `git clone`
+of this repo does not attempt it and everything else still builds once `KOINU`
+points somewhere. ci does not use the submodule at all, it clones koinu into the
+job's own workspace and passes `KOINU` explicitly. both pin the same tag, which
+is the whole point of the pin, and the gitlink this repo records is now a commit
+anyone can resolve against that remote rather than a hash you have to take on
+trust.
 
 the build refuses a koinu that is not at the pinned tag, because whatever
 `KOINU` points at is what gets linked and nothing in the output says which
@@ -111,15 +113,30 @@ she hands him, and a double spend, an earlier close or her own refund all end
 the same way: bob ships against something that can never confirm. the command is
 split into argv and run with alice's outpoint appended, `CMD --watch ADDR
 --outpoint TXID:VOUT`, which is koinu's `kw outpoint` and needs its own `--node`
-in front,
-and has to exit 0 for an unspent confirmed output while printing its depth and
-value. bob refuses anything shallower than `--min-depth`, defaulting to 6, and
-refuses an output whose on-chain value is not the capacity alice claimed.
+in front, and has to exit 0 for an unspent confirmed output while printing its
+depth and value. bob refuses anything shallower than `--min-depth`, defaulting
+to 6, and refuses an output whose on-chain value is not the capacity alice
+claimed.
 
     $ bob --wif $BOB_WIF --listen 127.0.0.1:9876 \
           --min-slack 100 --height-file height.txt --state channels \
-          --confirm-cmd "kw outpoint --headers hdrs --node NODE" --min-depth 6 \
+          --confirm-cmd "kw outpoint --daemon /run/kwd.sock" --min-depth 6 \
           --price 5.0
+
+that confirmation has three seconds, which is deliberately under what alice will
+wait, so on mainnet it wants `--daemon` and a running `kwd` rather than a `kw`
+that syncs for itself. a `kw outpoint` loads the header cache before it speaks to
+a peer, about 900ms against mainnet's 6.4M headers and growing with the chain,
+and then a warm answer measures 2.1s with one `--node` and 3.2s against seed
+peers. that is at or over the budget on a fast machine with a warm cache and
+nothing going wrong. kwd pays the load once at startup and holds the chain
+resident, which is what it is for.
+
+    --confirm-cmd "kw outpoint --headers hdrs --node NODE"
+
+is the shape without a daemon and it suits regtest or a short chain. without
+`--headers` at all there is no cache to resume from and no path for the parallel
+fill, so every call syncs from genesis: not slow once, slow always.
 
 `--since-window N` appends `--since HEIGHT` to that command so a height bounded
 backend only scans from there to the tip rather than the whole chain, which is
@@ -135,9 +152,9 @@ an unknown option.
 `contrib/regtest.sh` checks that path against a real chain when `KW` points at a
 built backend, covering an unconfirmed output, a buried one and one a close
 already spent. without `KW` it says it skipped rather than passing quietly. ci
-clones the backend publicly if it can and falls back to a read-only deploy key
-in `KOINU_DEPLOY_KEY` while that repository is private, so the day it is public
-nothing here changes. a stub is enough to check what bob does with an answer
+clones the backend publicly, with a read-only deploy key in `KOINU_DEPLOY_KEY`
+still wired as a fallback from when that repository was private. a stub is
+enough to check what bob does with an answer
 and useless for checking that the question is right.
 
 `--broadcast-cmd` hands the close to the chain instead of printing it for
@@ -180,7 +197,7 @@ holding that the chain has not yet made final, for a monitor to scrape:
 
     $ bob --sweep --state channels --height-file height.txt --watch 60 \
           --broadcast-cmd "kw send --node NODE --yes" \
-          --confirm-cmd "kw outpoint --node NODE" \
+          --confirm-cmd "kw outpoint --daemon /run/kwd.sock" \
           --sweep-margin 50 --warn-margin 200 --alert-cmd "notify-ops"
 
 the margin is a margin rather than a deadline. sweeping early costs a customer
@@ -192,9 +209,7 @@ may never relay a transaction and a mempool may drop it later. the sweep sends
 again on the next pass while the outpoint is still unspent and retires the
 channel only once the chain shows it spent, which is what confirmation looks
 like from outside. without a `--confirm-cmd` nothing can ever say more, so it
-retires on the send and says so. that is deliberately under the peer's
-read budget: a backend slower than that cannot produce a reject alice is still
-connected to read. warm the header cache out of band.
+retires on the send and says so.
 
 `--state` is where the channel lives between connections. bob serves each one in
 its own process, so without it the running total starts at zero every time and
@@ -373,7 +388,7 @@ that can reach it the signer is an oracle for the key.
     $ bob --sign-cmd "ssh signer bob --sign --wif @/etc/pc/bob.wif" \
           --bob-pubkey 02ab... --listen 127.0.0.1:9876 --state channels \
           --height-file height.txt --min-depth 6 \
-          --confirm-cmd "kw outpoint --node NODE --headers hdrs" \
+          --confirm-cmd "kw outpoint --daemon /run/kwd.sock" \
           --price 5.0
 
 a payment is one fsync to one local file, so a disk lost between the payment and

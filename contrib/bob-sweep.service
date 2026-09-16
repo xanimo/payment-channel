@@ -27,8 +27,8 @@ Group=bob
 ExecStart=/usr/local/bin/bob --sweep --watch 60 \
     --state /var/lib/payment-channel/channels \
     --height-file /var/lib/payment-channel/height.txt --height-max-age 600 \
-    --broadcast-cmd "kw send --node NODE" \
-    --confirm-cmd "kw outpoint --node NODE" \
+    --broadcast-cmd "kw send --node NODE --yes" \
+    --confirm-cmd "kw outpoint --daemon /run/kwd.sock" \
     --sweep-margin 50 --warn-margin 200 --alert-cmd "/usr/local/bin/notify-ops"
 # SIGTERM is handled: the loop finishes its sleep and exits between passes.
 Restart=on-failure

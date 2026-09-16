@@ -1,7 +1,7 @@
 # Clone and build koinu (libkw.a + secp256k1) at the pinned tag, in the job's
-# own workspace. koinu is private and pc is public, so it is never uploaded as
-# an artifact: a public run's artifacts are world-readable and would leak the
-# whole private tree. Each job that needs libkw runs this instead.
+# own workspace. It is never uploaded as an artifact, so each job that needs
+# libkw runs this and links the tag it names rather than whatever an earlier job
+# happened to upload.
 name: build koinu
 description: clone and build koinu at the pinned tag into ./koinu
 inputs:
@@ -9,7 +9,9 @@ inputs:
     description: koinu release tag to build; defaults to KOINU_TAG in version.mk
     required: false
   deploy-key:
-    description: read-only SSH deploy key, used only if the public clone fails
+    description: >-
+      read-only SSH deploy key, used only if the public clone fails. koinu is
+      public now, so this is a fallback for an outage rather than the path.
     required: false
 runs:
   using: composite

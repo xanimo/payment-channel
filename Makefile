@@ -23,9 +23,9 @@ include version.mk
 
 # koinu is a submodule pinned at KOINU_TAG, so a local build is the same one CI
 # runs rather than whatever a sibling checkout happens to be on. CI does not use
-# the submodule: koinu is private, so it clones with a deploy key into its own
-# workspace and passes KOINU explicitly. Both pin the same tag, which is the
-# point. Set KOINU to a checkout of your own to develop the two trees together.
+# the submodule: it clones koinu into its own workspace and passes KOINU
+# explicitly. Both pin the same tag, which is the point. Set KOINU to a checkout
+# of your own to develop the two trees together.
 KOINU ?= depends/koinu
 
 CC       ?= cc

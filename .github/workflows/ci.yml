@@ -1,9 +1,9 @@
 # Each scenario builds koinu (libkw) itself at the pinned release tag via the
 # build-koinu composite action, then runs: make check, contrib/regtest.sh
-# against a real node, and a fuzz smoke. koinu is private and pc is public, so
-# it is deliberately not passed as an artifact between jobs; a public run's
-# artifacts are world-readable and that would leak the whole private tree. pc no
-# longer depends on libdogecoin.
+# against a real node, and a fuzz smoke. koinu is built per job rather than
+# passed between them as an artifact, so each job links the tag it says it does
+# rather than whatever an earlier job uploaded. pc no longer depends on
+# libdogecoin.
 name: ci
 
 on:

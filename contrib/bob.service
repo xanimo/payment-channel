@@ -17,6 +17,13 @@
 Description=unidirectional payment channel merchant
 After=network-online.target
 Wants=network-online.target
+# --confirm-cmd asks a kwd over its socket, so kwd has to be up first. That unit
+# is koinu's and is not shipped here. Drop the --daemon for a --headers cache
+# instead and this ordering goes with it, but read the budget note in the README
+# first: a kw that syncs for itself does not answer inside bob's three seconds on
+# mainnet, warm cache or not.
+After=kwd.service
+Wants=kwd.service
 
 [Service]
 Type=simple
@@ -30,7 +37,7 @@ ExecStart=/usr/local/bin/bob --wif @/etc/payment-channel/bob.wif \
     --listen 127.0.0.1:9876 --min-slack 100 \
     --height-file /var/lib/payment-channel/height.txt \
     --state /var/lib/payment-channel/channels \
-    --confirm-cmd "/usr/local/bin/kw outpoint --node NODE --headers /var/lib/payment-channel/hdrs" \
+    --confirm-cmd "/usr/local/bin/kw outpoint --daemon /run/kwd.sock" \
     --broadcast-cmd "/usr/local/bin/kw send --node NODE --yes" \
     --min-depth 6 \
     --price 5.0 --price 7.5 --price 17.5
@@ -39,8 +46,10 @@ RestartSec=2
 
 # ProtectSystem=strict makes everything read-only, so the state directory has to
 # be named or every payment fails to record. The ratchet is the one thing bob
-# writes; the key and the height feed he only reads.
-ReadWritePaths=/var/lib/payment-channel/channels /var/lib/payment-channel/hdrs
+# writes; the key and the height feed he only reads. The header cache belongs to
+# kwd now, so it is not named here; put it back if --confirm-cmd goes back to a
+# kw that fills one itself.
+ReadWritePaths=/var/lib/payment-channel/channels
 ReadOnlyPaths=/etc/payment-channel/bob.wif /var/lib/payment-channel/height.txt
 
 # Sandbox: no privileges, no new ones, minimal view of the system.
