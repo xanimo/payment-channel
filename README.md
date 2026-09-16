@@ -380,6 +380,12 @@ transaction back.
 
     --replicate-cmd "cp -t /mnt/mirror"   # or rsync, an object-store put, ...
 
+`--metrics-file` works in both modes and they are not the same numbers: the
+sweep writes `pc_sweep_*`, a serving bob writes `pc_serve_*`, and each rewrites
+the whole file it is given. point them at one path and a scraper watches each
+set disappear and come back, which for a counter is a reset rather than two
+programs. give them a file each.
+
 losing the primary is doc/RUNBOOK.md. there is no restore step: the sweep
 rebuilds each channel from the file alone, so a replica directory is already a
 working primary and `bob --sweep --state /replica` is the whole failover.

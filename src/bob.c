@@ -178,6 +178,10 @@ static void usage(void)
       "  replica health; --metrics-file writes those as a scrapable snapshot.\n"
       "  --metrics-file also works while serving, where it snapshots the\n"
       "  connection, payment and error counters every %d seconds and on exit.\n"
+      "  Give the sweep and the serving Bob different files: each rewrites the\n"
+      "  whole one it is given, and they emit different series, so sharing a\n"
+      "  path makes each set vanish and return, which a scraper reads as a\n"
+      "  counter reset rather than as two programs.\n"
       "  --sign-cmd runs a signer that holds the key so this process never does;\n"
       "  it is fed the payment PSBT on stdin and returns the signed PSBT. The\n"
       "  signed transaction is still re-verified here, so the signer is used,\n"
@@ -623,8 +627,17 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                    there is nothing left to broadcast either way. */
                 printf("sweep    %s:%d %s\n", txid, vout,
                        already_sent ? "the close confirmed" : why);
-                pc_state_retire(&st, &ch, tx);
-                if (replicate_cmd && !replicate(replicate_cmd, st.path)) {
+                /* Checked, like the other write below it. A retire that fails
+                   leaves the channel on disk, so the next pass looks at it
+                   again and retires it again, which is self-healing and is why
+                   this was survivable unchecked. What it was not is visible: a
+                   persistent failure, a full disk being the ordinary one,
+                   reported "the close confirmed" and counted it every pass
+                   forever, and replicated a file that did not say so. */
+                if (pc_state_retire(&st, &ch, tx) != PC_OK)
+                    fprintf(stderr, "sweep    %s:%d confirmed but not recorded\n",
+                            txid, vout);
+                else if (replicate_cmd && !replicate(replicate_cmd, st.path)) {
                     fprintf(stderr, "sweep    %s:%d replica not updated\n", txid, vout);
                     replica_stale = 1;
                 }
