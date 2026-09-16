@@ -11,11 +11,26 @@
 # Point --confirm-cmd and --broadcast-cmd at your koinu backend, and --alert-cmd
 # at whatever pages an operator. Run --watch more often than --sweep-margin is
 # wide. See README "running it".
+#
+# kwd binds its socket 0600 and takes no group option, so it has to run as the
+# same User= as this unit. It also needs a peer serving bip158 filters and exits
+# at startup without one, which most mainnet nodes are not.
+#
+# A kwd that is down stops this unit doing its job. With --confirm-cmd set and
+# failing, every channel comes back undetermined and the pass leaves it for the
+# next one rather than broadcasting, because not knowing whether the funding is
+# still there is a reason to retry and never a reason to retire. So the deadline
+# safety net waits. That is the safe direction and it is not a quiet one:
+# undetermined is in every sweep-status line and --alert-cmd fires on it. Page
+# on it.
 
 [Unit]
 Description=payment channel sweep (deadline safety net)
 After=network-online.target
 Wants=network-online.target
+# kwd holds the chain this asks about. Not a hard dependency: see above.
+After=kwd.service
+Wants=kwd.service
 
 [Service]
 Type=simple

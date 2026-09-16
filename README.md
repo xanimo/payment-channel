@@ -136,6 +136,15 @@ anything going wrong spends it. kwd pays that load once at startup and holds the
 chain resident, which is what it is for. measure your own rather than trusting
 either number here.
 
+two things about kwd before you commit to it. it needs `--filters` and a peer
+that serves bip158 filters, which it syncs at startup and exits with "filter
+sync failed" if it cannot; most mainnet nodes do not serve filters, so the node
+you already run may not be one kwd can use, and the failure reads as kwd being
+broken rather than as a missing service. and it binds its socket 0600 with no
+group option, so bob must run as the user kwd runs as. `contrib/bob.service`
+says `User=bob`, which means kwd runs as bob too, or the confirm gets a permission
+denied on every open.
+
     --confirm-cmd "kw outpoint --headers hdrs --node NODE"
 
 is the shape without a daemon and it suits regtest or a short chain. without

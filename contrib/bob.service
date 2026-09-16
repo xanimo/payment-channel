@@ -22,6 +22,11 @@ Wants=network-online.target
 # instead and this ordering goes with it, but read the budget note in the README
 # first: a kw that syncs for itself does not answer inside bob's three seconds on
 # mainnet, warm cache or not.
+#
+# kwd binds that socket 0600 and takes no group option, so it has to run as the
+# same User= as this unit or every confirm gets a permission denied. It also
+# needs a peer serving bip158 filters and exits at startup without one, which
+# most mainnet nodes are not.
 After=kwd.service
 Wants=kwd.service
 
