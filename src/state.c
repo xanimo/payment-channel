@@ -261,14 +261,30 @@ static pc_result state_write(pc_state *st, const pc_channel *ch,
     if (rename(st->tmp, st->path) != 0) { unlink(st->tmp); return PC_ERR_STATE; }
 
     /* The rename is only durable once the directory entry is. Without this a
-       power loss can leave the directory pointing at the old name. */
+       power loss can leave the directory pointing at the old name.
+     *
+     * Checked, like the fsync above it. Every other step of this function
+     * reports its failure and this one did not, which made the last link of
+     * "durable before the ack" the only silent one. The caller acks on PC_OK,
+     * so an unreported failure here is Bob answering for a payment a crash can
+     * still take back, which is the direction this whole function exists to
+     * avoid.
+     *
+     * The rename has already happened when this fails, so the state on disk is
+     * ahead of what the caller is told. That is survivable and the right way
+     * round: Alice sees the payment refused, reconnects, and Bob resumes from
+     * the ratchet he recorded. The reverse, an ack for a write that may not
+     * survive, is not recoverable by anyone. */
     char dir[512];
     snprintf(dir, sizeof(dir), "%s", st->path);
     char *slash = strrchr(dir, '/');
     if (slash) {
         *slash = '\0';
         int dfd = open(dir, O_RDONLY | O_CLOEXEC);
-        if (dfd >= 0) { fsync(dfd); close(dfd); }
+        if (dfd < 0) return PC_ERR_STATE;
+        int dok = fsync(dfd) == 0;
+        if (close(dfd) != 0) dok = 0;
+        if (!dok) return PC_ERR_STATE;
     }
     return PC_OK;
 }

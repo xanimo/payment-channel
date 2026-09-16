@@ -32,12 +32,19 @@ trailing text around the object. a general json parser here would be a
 dependency and a larger attack surface for no gain.
 
 `addr` carries two different things: an address on an invoice and a reason on a
-reject. both are checked only for the alphabet a hand-rolled encoder needs,
-alphanumeric and space, because a reason has spaces in it and an address does
-not. that is deliberately weaker than address validation, and it is safe only
-because nothing trusts the field: bob derives his payee from the redeem script
-rather than from `addr`, so a malformed one can make alice fail locally and
-cannot misdirect a payment.
+reject. both are checked at the envelope for the alphabet a hand-rolled encoder
+needs, alphanumeric and space, because a reason has spaces in it and an address
+does not. that is deliberately weaker than address validation, and it is not the
+whole check: alice does trust `addr`, since `pc_payment_create` builds the output
+that pays bob from it, so she also base58check-decodes it and requires the p2pkh
+version byte for her chain before she signs anything.
+
+what makes a substituted address survivable is not that nobody reads it. it is
+that bob's own `pc_tx_verify_payment` refuses a transaction whose outputs do not
+pay `hash160(bob_pubkey)`, which he takes from the redeem script rather than
+from the wire. so pointing `addr` somewhere else costs alice a round trip and
+cannot misdirect a payment. the alphabet check is the first filter, the version
+check is the second, and the redeem script is the thing that decides.
 
 ## exchange
 
@@ -90,7 +97,7 @@ attaches the funding transaction and the redeem script, and signs her input.
 
 bob is signer, finalizer and extractor. he signs the same input, builds the
 scriptsig himself because `OP_IF` does not classify, installs it with
-`dogecoin_psbt_input_set_final_scriptsig`, and extracts.
+`kw_psbt_finalize`, and extracts.
 
 there is no combiner step. the psbt travels one way and each side signs it in
 turn, so there are never two copies to merge.

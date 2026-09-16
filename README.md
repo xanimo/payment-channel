@@ -206,9 +206,14 @@ temporary and renamed, so a crash mid-payment leaves the previous total rather
 than half of a new one.
 
     $ mkdir -p channels
-    $ bob --wif $BOB_WIF --listen 127.0.0.1:9876 \
+    $ bob --wif $BOB_WIF --listen 127.0.0.1:9876 --trust-peer --once \
           --height 5100000 --min-slack 100 --state channels \
           --price 5.0 --price 7.5 --price 17.5
+
+`--trust-peer` and `--once` are what make this a demo rather than a deployment:
+without a backend nothing checks the funding against a chain, and `--height` is
+a number that stops being true. the form to actually run is at the top of this
+section and in `contrib/bob.service`.
 
 alice prints the address, funds it, then pays what she is invoiced up to
 `--max`. wait for the funding to confirm before paying: without segwit the
@@ -295,8 +300,10 @@ no choice: `dogecoin_tx` was opaque and no psbt accessor reported an input's
 prevout or an output's value.
 
 a payment is money only if it spends the funding outpoint bob confirmed, pays
-bob at least what was claimed, spends no more than the capacity, and pays him
-strictly more than the previous one.
+bob exactly what was claimed, spends no more than the capacity, and pays him
+strictly more than the previous one. exactly rather than at least, so the
+ratchet records the transaction bob is holding rather than the smaller number
+it was described by.
 
 being addressed correctly is not the same as being spendable, so it also has to
 carry two signatures that verify, pay a large enough fee, carry no dust, and be
@@ -365,7 +372,9 @@ that can reach it the signer is an oracle for the key.
 
     $ bob --sign-cmd "ssh signer bob --sign --wif @/etc/pc/bob.wif" \
           --bob-pubkey 02ab... --listen 127.0.0.1:9876 --state channels \
-          --height-file height.txt --price 5.0
+          --height-file height.txt --min-depth 6 \
+          --confirm-cmd "kw outpoint --node NODE --headers hdrs" \
+          --price 5.0
 
 a payment is one fsync to one local file, so a disk lost between the payment and
 the sweep is the payment lost. `--replicate-cmd CMD` closes that: after each

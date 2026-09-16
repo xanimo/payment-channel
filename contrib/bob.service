@@ -22,15 +22,26 @@ Wants=network-online.target
 Type=simple
 User=bob
 Group=bob
-# --height must track the chain; wire it to your node rather than pinning it.
+# All three of --state, --height-file and --confirm-cmd are refusals at startup
+# rather than defaults, so a unit missing any of them restart-loops printing the
+# reason. --height is not enough: a fixed number is correct once, and this runs
+# for as long as it runs. Something that can see a chain writes height.txt.
 ExecStart=/usr/local/bin/bob --wif @/etc/payment-channel/bob.wif \
-    --listen 127.0.0.1:9876 --height 5100000 --min-slack 100 \
+    --listen 127.0.0.1:9876 --min-slack 100 \
+    --height-file /var/lib/payment-channel/height.txt \
+    --state /var/lib/payment-channel/channels \
+    --confirm-cmd "/usr/local/bin/kw outpoint --node NODE --headers /var/lib/payment-channel/hdrs" \
+    --broadcast-cmd "/usr/local/bin/kw send --node NODE --yes" \
+    --min-depth 6 \
     --price 5.0 --price 7.5 --price 17.5
 Restart=on-failure
 RestartSec=2
 
-# Only the key file is readable, and nothing is writable.
-ReadOnlyPaths=/etc/payment-channel/bob.wif
+# ProtectSystem=strict makes everything read-only, so the state directory has to
+# be named or every payment fails to record. The ratchet is the one thing bob
+# writes; the key and the height feed he only reads.
+ReadWritePaths=/var/lib/payment-channel/channels /var/lib/payment-channel/hdrs
+ReadOnlyPaths=/etc/payment-channel/bob.wif /var/lib/payment-channel/height.txt
 
 # Sandbox: no privileges, no new ones, minimal view of the system.
 NoNewPrivileges=true
@@ -46,14 +57,21 @@ RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-# bob forks a child per connection over an inet stream socket; nothing else.
-RestrictAddressFamilies=AF_INET
+# A child per connection over an inet stream socket, and each of those forks a
+# confirm backend. AF_UNIX because a backend reaching a local node over a socket,
+# or anything going through nscd, gets EAFNOSUPPORT rather than an error it can
+# report. This said AF_INET alone from when a backend was optional.
+RestrictAddressFamilies=AF_INET AF_UNIX
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 
 # cgroup bounds on the whole service, alongside the per-connection rlimits bob
-# sets on each child. MAX_CONNS children plus the parent is well under this.
-TasksMax=128
+# sets on each child. The arithmetic is MAX_CONNS of 64 children, plus the
+# parent, plus a confirm backend per child, and pc_run_backend puts each backend
+# in its own process group so a wrapper script with a child of its own counts
+# too. 128 was written for a bob that forked nothing and is one short of the
+# floor before the backends are counted at all.
+TasksMax=512
 MemoryMax=512M
 CPUQuota=200%
 

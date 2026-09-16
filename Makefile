@@ -64,11 +64,11 @@ koinu-version:
 	    exit 1; \
 	fi; \
 	have=`git -C "$(KOINU)" describe --tags --always --dirty 2>/dev/null || echo unknown`; \
-	case "$(KOINU_TAG)" in \
-	  v0.2.[01234]|v0.1.*|v0.0.*) \
-	    echo "warning: koinu $(KOINU_TAG) is below the v0.2.5 security floor." >&2; \
-	    echo "         --confirm-cmd can be answered by a peer rather than the" >&2; \
-	    echo "         chain, or cannot reach one. see SECURITY.md." >&2;; \
+	case "$$have" in \
+	  v0.2.5*|v0.2.[6-9]*|v0.[3-9]*|v[1-9]*) ;; \
+	  *) echo "warning: koinu $$have is below the v0.2.5 security floor." >&2; \
+	     echo "         --confirm-cmd can be answered by a peer rather than the" >&2; \
+	     echo "         chain, or cannot reach one. see SECURITY.md." >&2;; \
 	esac; \
 	if [ "$$have" != "$(KOINU_TAG)" ]; then \
 	    if [ -n "$(KOINU_ANY)" ]; then \
