@@ -147,9 +147,30 @@ denied on every open.
 
     --confirm-cmd "kw outpoint --headers hdrs --node NODE"
 
-is the shape without a daemon and it suits regtest or a short chain. without
-`--headers` at all there is no cache to resume from and no path for the parallel
-fill, so every call syncs from genesis: not slow once, slow always.
+is the form without a daemon and it suits regtest or a short chain, which is a
+narrower claim than it reads. on mainnet it does not fit inside a serving bob at
+all. bob caps each connection child at 512MB of address space and that rlimit is
+inherited through the fork and the exec, so it bounds the backend too, while a
+`kw` that loads a header store for itself wants 112 bytes a header, which is
+684MB at 6.4M. so this form does not fail slowly there, it fails on the first
+allocation, and it fails on every open.
+
+the trap is that it works when you test it. `limit_child` is the connection
+child's, and `bob --sweep` runs in the main process with no cap, so the same
+`--confirm-cmd` answers correctly by hand and under a sweep pass and refuses
+everything under a serving bob, on one machine against one cache. bob's own
+message is "confirmation backend failed"; `kw` says why on bob's stderr, which is
+the journal under the packaged unit.
+
+raising the cap would weaken the bound on all 64 children to suit a backend the
+recommended configuration does not run, and exempting the backend would exempt
+the signer with it, since both go through `pc_run_backend`. so the answer is that
+this form belongs outside a serving bob: on a short chain, under `bob --sweep`,
+or by hand. a serving bob on mainnet wants `--daemon`, where the resident chain
+is kwd's and sized by kwd's own unit.
+
+without `--headers` at all there is no cache to resume from and no path for the
+parallel fill, so every call syncs from genesis: not slow once, slow always.
 
 at the pinned v0.2.5 that fallback also cannot start from nothing. a `kw
 outpoint` given an empty header store drops every peer it asks and returns
@@ -162,15 +183,18 @@ koinu's main and in no release, so until there is a tag above v0.2.5 that form
 wants a header cache something else has already filled.
 
 `--since-window N` appends `--since HEIGHT` to that command so a height bounded
-backend only scans from there to the tip rather than the whole chain, which is
-what makes a warm `kwd` answer a recent funding output in milliseconds instead
-of seconds. a first open has no better guess than the current height minus `N`,
-so `N` has to cover how far back the funding might be and no further, since too
-recent a start gets "not in the scanned range" and is refused. once a channel
-confirms bob records the funding block in its state file and asks from there
-exactly, so the guess only ever costs the first question. it is off by default
-because `--since` needs a filter cache and a backend without one rejects it as
-an unknown option.
+backend only scans from there to the tip rather than the whole chain. a first
+open has no better guess than the current height minus `N`, so `N` has to cover
+how far back the funding might be and no further, since too recent a start gets
+"not in the scanned range" and is refused. once a channel confirms bob records
+the funding block in its state file and asks from there exactly, so the guess
+only ever costs the first question.
+
+it is off by default because not every backend takes it. `kw outpoint --since`
+without a daemon wants `--cf` and `--filters` together and refuses with "--since
+requires --cf and --filters" if it has neither, while `--daemon` hands it
+straight to kwd, which holds a filter cache because it cannot start without one.
+so the daemon path takes `--since` and a bare `kw outpoint --headers` does not.
 
 `contrib/regtest.sh` checks that path against a real chain when `KW` points at a
 built backend, covering an unconfirmed output, a buried one and one a close

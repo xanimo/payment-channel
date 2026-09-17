@@ -115,7 +115,16 @@ static void on_metrics_tick(int sig) { (void)sig; }
 
 /* Per-connection resource bounds, set in the child so one connection cannot
    run the box out of CPU or address space. Generous: an honest session uses
-   milliseconds of CPU and a few tens of MB, so only a runaway trips these. */
+   milliseconds of CPU and a few tens of MB, so only a runaway trips these.
+
+   Both are inherited across the fork and the exec that runs a backend, so they
+   bound the confirm and signer commands too, and that bound is real on mainnet:
+   a kw that loads a header store for itself wants 112 bytes a header, which is
+   684MB at 6.4M and over this cap. --daemon is what keeps the resident chain in
+   kwd's own process and its own unit, where it is sized by that unit rather than
+   by this. The sweep has no cap at all, since limit_child is the connection
+   child's and do_sweep is the main process, so the same --confirm-cmd can work
+   under bob --sweep and fail under a serving bob. README says so. */
 #define CHILD_CPU_SECONDS   30
 #define CHILD_AS_BYTES      (512UL * 1024 * 1024)
 

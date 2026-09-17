@@ -86,6 +86,14 @@ SystemCallArchitectures=native
 # too. 128 was written for a bob that forked nothing and is one short of the
 # floor before the backends are counted at all.
 TasksMax=512
+
+# Not the same bound as CHILD_AS_BYTES in bob.c, which happens to carry the same
+# number: that is 512MB of address space per child, this is resident memory
+# across the parent, all 64 children and every backend they fork. The figure
+# suits the --daemon shape above, where a backend is a socket request and holds
+# no chain. Point --confirm-cmd at a kw that loads a header store instead and
+# this is the wrong bound as well as the wrong rlimit; see the README on why
+# that form does not belong under a serving bob.
 MemoryMax=512M
 CPUQuota=200%
 
