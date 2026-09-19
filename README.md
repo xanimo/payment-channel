@@ -136,14 +136,33 @@ anything going wrong spends it. kwd pays that load once at startup and holds the
 chain resident, which is what it is for. measure your own rather than trusting
 either number here.
 
-two things about kwd before you commit to it. it needs `--filters` and a peer
-that serves bip158 filters, which it syncs at startup and exits with "filter
-sync failed" if it cannot; most mainnet nodes do not serve filters, so the node
-you already run may not be one kwd can use, and the failure reads as kwd being
-broken rather than as a missing service. and it binds its socket 0600 with no
-group option, so bob must run as the user kwd runs as. `contrib/bob.service`
-says `User=bob`, which means kwd runs as bob too, or the confirm gets a permission
-denied on every open.
+so `--daemon` is the mainnet path, and it has a prerequisite that is not optional
+and is not a footnote: a dogecoin node you run yourself, with
+
+    blockfilterindex=1
+    peerblockfilters=1
+
+kwd takes `--filters` and syncs a bip158 filter cache at startup, and exits
+without one. the public network does not serve them. probing every address
+dogecoin's dns seeds hand out, 47 answered the handshake and one advertised
+`NODE_COMPACT_FILTERS`, and that one was this network's own node, so no
+third-party peer in the set serves filters at all. the rest are `services 0x5`,
+network and bloom, mostly 1.14.9. so you cannot point kwd at a peer you found;
+there is nothing to find. `contrib/probe-filters.py` is that probe, so take the
+number yourself rather than believing this paragraph.
+
+`-blockfilterindex` is incompatible with pruning and the index costs disk on top
+of the chain. the filter cache is also kwd's, not bob's, so it is sized and
+written by kwd's unit.
+
+kwd binds its socket 0600 with no group or mode option, so bob has to run as the
+user kwd runs as. both shipped units say `User=bob`, which means kwd runs as bob
+too, or the confirm gets a permission denied on every open.
+
+without a node of your own the mainnet options are worse rather than different:
+a `kw outpoint` that syncs for itself is over bob's budget and over his
+address-space cap, both below, and `--spv` downloads whole blocks, which no
+per-open call can do. that is the constraint, not a preference.
 
     --confirm-cmd "kw outpoint --headers hdrs --node NODE"
 

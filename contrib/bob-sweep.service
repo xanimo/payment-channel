@@ -14,7 +14,9 @@
 #
 # kwd binds its socket 0600 and takes no group option, so it has to run as the
 # same User= as this unit. It also needs a peer serving bip158 filters and exits
-# at startup without one, which most mainnet nodes are not.
+# at startup without one, and no peer on dogecoin's dns seeds serves them, so
+# this presupposes a node you run yourself with blockfilterindex=1 and
+# peerblockfilters=1. See README "running it".
 #
 # A kwd that is down stops this unit doing its job. With --confirm-cmd set and
 # failing, every channel comes back undetermined and the pass leaves it for the

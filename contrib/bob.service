@@ -25,8 +25,11 @@ Wants=network-online.target
 #
 # kwd binds that socket 0600 and takes no group option, so it has to run as the
 # same User= as this unit or every confirm gets a permission denied. It also
-# needs a peer serving bip158 filters and exits at startup without one, which
-# most mainnet nodes are not.
+# needs a peer serving bip158 filters and exits at startup without one, and no
+# peer on dogecoin's dns seeds serves them: 47 answered a probe and the only one
+# advertising NODE_COMPACT_FILTERS was our own. So this unit presupposes a node
+# you run yourself with blockfilterindex=1 and peerblockfilters=1, which also
+# rules out pruning it. See README "running it".
 After=kwd.service
 Wants=kwd.service
 
