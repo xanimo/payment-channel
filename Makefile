@@ -59,8 +59,15 @@ all: koinu-version $(BINS)
 koinu-version:
 	@if [ ! -f "$(KOINU)/Makefile" ]; then \
 	    echo "koinu is not at $(KOINU)." >&2; \
+	    unusable=1; \
+	elif [ ! -f "$(KOINU)/libkw.a" ]; then \
+	    echo "koinu at $(KOINU) has no libkw.a: it is checked out but not built." >&2; \
+	    unusable=1; \
+	fi; \
+	if [ -n "$$unusable" ]; then \
 	    echo "  git submodule update --init --recursive depends/koinu" >&2; \
-	    echo "  or set KOINU to a koinu checkout at $(KOINU_TAG)" >&2; \
+	    echo "  make -C $(KOINU)" >&2; \
+	    echo "  or set KOINU to a built koinu checkout at $(KOINU_TAG)" >&2; \
 	    exit 1; \
 	fi; \
 	have=`git -C "$(KOINU)" describe --tags --always --dirty 2>/dev/null || echo unknown`; \
