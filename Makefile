@@ -8,6 +8,11 @@
 #   make -C depends/koinu
 #   make check
 #
+# Moving the pin wants a `make -C depends/koinu clean` in front of that build.
+# koinu has an object with no .d file naming the headers it reads, so a .c that
+# did not change between the two tags is not rebuilt and a struct that grew a
+# field links two layouts into one archive.
+#
 # The pinned tag is in version.mk. v0.2.5 is the floor and the reason is in
 # SECURITY.md: earlier releases either do not tie a block's transactions to its
 # header, which is what --confirm-cmd rests on, or cannot sync mainnet. v0.2.1

@@ -37,11 +37,17 @@ reading of the script.
 ## building
 
 the crypto, transactions, psbt and base58 come from koinu, which is a released
-static library and a submodule pinned at v0.2.5.
+static library and a submodule pinned at v0.3.0.
 
     git submodule update --init --recursive depends/koinu
     make -C depends/koinu
     make check
+
+a pin that moves wants `make -C depends/koinu clean` in front of that build. an
+object whose `.c` did not change between the two tags is not rebuilt, and koinu
+has at least one with no `.d` file to say which headers it reads, so a struct
+that grew a field links two layouts into one archive and `kw` reads the wrong
+offsets.
 
 koinu is public, so that fetch needs nothing in particular; a plain `git clone`
 of this repo does not attempt it and everything else still builds once `KOINU`
@@ -121,7 +127,7 @@ claimed.
     $ bob --wif $BOB_WIF --listen 127.0.0.1:9876 \
           --min-slack 100 --height-file height.txt --state channels \
           --confirm-cmd "kw outpoint --daemon /run/kwd.sock" --min-depth 6 \
-          --price 5.0
+          --since-window 400 --price 5.0
 
 that confirmation has three seconds, which is deliberately under what alice will
 wait, so on mainnet it wants `--daemon` and a running `kwd` rather than a `kw`
@@ -191,15 +197,13 @@ is kwd's and sized by kwd's own unit.
 without `--headers` at all there is no cache to resume from and no path for the
 parallel fill, so every call syncs from genesis: not slow once, slow always.
 
-at the pinned v0.2.5 that fallback also cannot start from nothing. a `kw
-outpoint` given an empty header store drops every peer it asks and returns
-having synced no chain, so the first call against a fresh cache fails rather
-than being slow, and it keeps failing. it fails closed, so bob refuses the open
-instead of accepting one he has not checked, and `--daemon` does not have the
-problem because kwd syncs at startup and an empty store there is a daemon that
-does not come up rather than an open that does not confirm. the fix is on
-koinu's main and in no release, so until there is a tag above v0.2.5 that form
-wants a header cache something else has already filled.
+at the pinned v0.3.0 that fallback does start from nothing, so the first call
+against a fresh cache is slow rather than refused. down at the v0.2.5 floor it
+cannot: a `kw outpoint` given an empty header store drops every peer it asks and
+returns having synced no chain, which fails closed, so bob refuses the open
+instead of accepting one he has not checked. `--daemon` never had the problem
+because kwd syncs at startup and an empty store there is a daemon that does not
+come up rather than an open that does not confirm.
 
 `--since-window N` appends `--since HEIGHT` to that command so a height bounded
 backend only scans from there to the tip rather than the whole chain. a first
@@ -209,11 +213,16 @@ how far back the funding might be and no further, since too recent a start gets
 the funding block in its state file and asks from there exactly, so the guess
 only ever costs the first question.
 
-it is off by default because not every backend takes it. `kw outpoint --since`
-without a daemon wants `--cf` and `--filters` together and refuses with "--since
-requires --cf and --filters" if it has neither, while `--daemon` hands it
-straight to kwd, which holds a filter cache because it cannot start without one.
-so the daemon path takes `--since` and a bare `kw outpoint --headers` does not.
+it is off by default because a backend that scans whatever cache it has needs no
+bound. a bare `kw outpoint --headers` takes `--since` either way at the pinned
+v0.3.0, with or without `--cf` and `--filters`, downloading the blocks in the
+range when no peer serves filters for it.
+
+the daemon path is the other way round and requires it. `kw outpoint --daemon`
+refuses with "--daemon needs --since HEIGHT" and exits 2 before it opens the
+socket, and bob reads any status that is not 0, 3 or 4 as "confirmation backend
+failed" and refuses the open. so a `--confirm-cmd` using `--daemon` wants
+`--since-window` set, and without it every open is refused.
 
 `contrib/regtest.sh` checks that path against a real chain when `KW` points at a
 built backend, covering an unconfirmed output, a buried one and one a close
@@ -263,7 +272,7 @@ holding that the chain has not yet made final, for a monitor to scrape:
 
     $ bob --sweep --state channels --height-file height.txt --watch 60 \
           --broadcast-cmd "kw send --node NODE --yes" \
-          --confirm-cmd "kw outpoint --daemon /run/kwd.sock" \
+          --confirm-cmd "kw outpoint --daemon /run/kwd.sock" --since-window 400 \
           --sweep-margin 50 --warn-margin 200 --alert-cmd "notify-ops"
 
 the margin is a margin rather than a deadline. sweeping early costs a customer
@@ -454,7 +463,7 @@ that can reach it the signer is an oracle for the key.
     $ bob --sign-cmd "ssh signer bob --sign --wif @/etc/pc/bob.wif" \
           --bob-pubkey 02ab... --listen 127.0.0.1:9876 --state channels \
           --height-file height.txt --min-depth 6 \
-          --confirm-cmd "kw outpoint --daemon /run/kwd.sock" \
+          --confirm-cmd "kw outpoint --daemon /run/kwd.sock" --since-window 400 \
           --price 5.0
 
 a payment is one fsync to one local file, so a disk lost between the payment and
