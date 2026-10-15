@@ -13,11 +13,12 @@
 # did not change between the two tags is not rebuilt and a struct that grew a
 # field links two layouts into one archive.
 #
-# The pinned tag is in version.mk. v0.2.5 is the floor and the reason is in
+# The pinned tag is in version.mk. v0.3.0 is the floor and the reason is in
 # SECURITY.md: earlier releases either do not tie a block's transactions to its
-# header, which is what --confirm-cmd rests on, or cannot sync mainnet. v0.2.1
-# is only the floor for building at all, being where the scriptSig-length fix a
-# P2SH multisig spend needs landed, and building is not the bar that matters.
+# header, cannot sync mainnet, or answer from a chain whose work kwd never
+# checked, and kwd is what --daemon runs. v0.2.1 is only the floor for building
+# at all, being where the scriptSig-length fix a P2SH multisig spend needs
+# landed, and building is not the bar that matters.
 # Whatever KOINU points at must contain libkw.a,
 # depends/secp256k1/.libs/libsecp256k1.a, and the crypto/ net/ wallet/ headers.
 
@@ -77,10 +78,11 @@ koinu-version:
 	fi; \
 	have=`git -C "$(KOINU)" describe --tags --always --dirty 2>/dev/null || echo unknown`; \
 	case "$$have" in \
-	  v0.2.5*|v0.2.[6-9]*|v0.[3-9]*|v[1-9]*) ;; \
-	  *) echo "warning: koinu $$have is below the v0.2.5 security floor." >&2; \
+	  v0.[3-9]*|v[1-9]*) ;; \
+	  *) echo "warning: koinu $$have is below the v0.3.0 security floor." >&2; \
 	     echo "         --confirm-cmd can be answered by a peer rather than the" >&2; \
-	     echo "         chain, or cannot reach one. see SECURITY.md." >&2;; \
+	     echo "         chain, cannot reach one, or comes from a kwd that never" >&2; \
+	     echo "         checked that chain's work. see SECURITY.md." >&2;; \
 	esac; \
 	if [ "$$have" != "$(KOINU_TAG)" ]; then \
 	    if [ -n "$(KOINU_ANY)" ]; then \

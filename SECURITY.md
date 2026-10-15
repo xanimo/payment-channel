@@ -41,6 +41,12 @@ bob open a channel against nothing, invoice, verify every payment correctly, ack
 and ship goods for a funding output that does not exist. at the sweep there is
 nothing to broadcast, and the merchant has lost the goods outright.
 
+the outpoint itself he does not take on trust. alice sends a funding transaction
+rather than an outpoint, and `pc_tx_find_channel_output` works out which output
+pays the channel, so the txid, the vout and the value are all facts about a
+transaction bob parsed. what the backend adds is the only part he cannot do: that
+the chain holds it, buried, unspent.
+
 so the backend must verify that the transactions it scans hash to the merkle
 root of the header it trusts, and that the header is on the chain with the most
 work. an spv client that parses a block body a peer handed it without that check
@@ -49,8 +55,8 @@ against something you did not write, that is the question to ask it first. this
 is stated here because it is the assumption pc cannot verify and cannot defend
 against, not because any particular backend is known to be wrong.
 
-for the same reason there is a version floor, which is koinu v0.2.5 or later,
-and the two reasons are different.
+for the same reason there is a version floor, which is koinu v0.3.0 or later,
+and the reasons are different ones.
 
 v0.2.3 and earlier do not verify that a block's transactions belong to the
 header they arrived behind, which is the check the paragraph above says a backend
@@ -66,9 +72,25 @@ headers have one that any command checking work stops a few dozen blocks above
 the newest anchor. so v0.2.4 is sound and unusable, which is a strange pair and
 worth saying rather than rounding to "upgrade".
 
-v0.2.5 is the first release that is both.
+v0.2.5 fixes both of those on `kw outpoint`, and leaves kwd answering from a
+chain whose work it never checked. that is the same gap one release earlier,
+moved to the other backend, and kwd is the one `--daemon` runs, which is the
+mainnet path here. a peer that serves kwd a worthless chain is a peer answering
+`--confirm-cmd` rather than the chain answering it. v0.3.0 checks the work of
+every header above the newest anchor, on the startup sync and on each request,
+and takes up to three `--node` and keeps the chain with the most work. koinu's
+test_kwd covers it; i did not reproduce it here.
 
-this repository's history contains commits pinning v0.2.1 through v0.2.4.
+so v0.2.5 is sound on the path this does not use and unchecked on the path it
+does, which is why the floor is above it.
+
+v0.3.0 also made `kw outpoint --since` and kwd compare the script they were asked
+to watch, which they previously did not: they reported an output on its txid and
+vout alone. that one does not reach pc, since bob derives the outpoint rather
+than being handed it, and `contrib/regtest.sh` asserts the comparison anyway
+because `--watch` is in the contract bob relies on.
+
+this repository's history contains commits pinning v0.2.1 through v0.2.5.
 building pc at one of those and pointing it at the koinu it names gets you a
 funding check that does not do what this file says it does, or one that does and
 cannot reach a chain to do it with. `alice --version` and `bob --version` print

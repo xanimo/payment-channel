@@ -292,8 +292,15 @@ static int read_height_file(const char *path, unsigned max_age,
  * is the thing wire.c has two timeouts to prevent.
  *
  * The contract is koinu's kw outpoint: argv of --watch ADDR --outpoint TXID:VOUT,
- * exit 0 when unspent and confirmed, 3 when not, printing "depth N" and
- * "value N koinu". Any other backend wraps to the same shape. */
+ * exit 0 when unspent and confirmed, 3 when not, 4 when it did not look back far
+ * enough, printing "depth N" and "value N koinu". Any other status is a backend
+ * that could not tell us, which includes the 2 a kwd exits when --since-window
+ * left it no since height. Any other backend wraps to the same shape.
+ *
+ * The outpoint is one pc_tx_find_channel_output() worked out of Alice's funding
+ * transaction, not one she named, so what is asked here is only whether the
+ * chain holds it. --watch makes the backend check the script it pays as well,
+ * which is a second opinion on the same fact. */
 /* Shorter than the peer's per-read budget on purpose. A backend that takes
    longer than PC_WIRE_IO_SEC cannot produce a reject Alice is still there to
    read: she times out first and gets a dropped socket instead of a reason. A

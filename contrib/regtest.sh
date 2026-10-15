@@ -251,6 +251,30 @@ if [ -n "${KW:-}" ]; then
         || { echo "FAIL: a spent funding output was accepted" >&2; exit 1; }
     echo "confirm  spent funding refused"
 
+    # --watch is in the contract, so the backend has to compare the script and
+    # not just the txid and vout. bob derives the outpoint from alice's funding
+    # transaction rather than being handed it, so this is a second opinion on a
+    # fact he already has, and it is the half of the contract a stub cannot
+    # check. --since is the path koinu got this wrong on before v0.3.0: the full
+    # scan goes through the utxo set and always compared the script, while the
+    # bounded range did not.
+    O_SINCE=$("${RPC[@]}" getblockcount)
+    O_ADDR=$("${RPC[@]}" getnewaddress)
+    O_TXID=$("${RPC[@]}" sendtoaddress "$O_ADDR" "$CAPACITY")
+    "${RPC[@]}" generate 6 >/dev/null
+    o_seen=0 o_leaked=0
+    for v in 0 1; do
+        $KWARGS --since "$O_SINCE" --watch "$O_ADDR" --outpoint "$O_TXID:$v" \
+            2>/dev/null | grep -q unspent && o_seen=1
+        $KWARGS --since "$O_SINCE" --watch "$C_CHANNEL" --outpoint "$O_TXID:$v" \
+            2>/dev/null | grep -q unspent && o_leaked=1
+    done
+    [ "$o_seen" = 1 ] \
+        || { echo "FAIL: the backend did not report an output it was asked to watch" >&2; exit 1; }
+    [ "$o_leaked" = 0 ] \
+        || { echo "FAIL: an output paying someone else was reported for the channel" >&2; exit 1; }
+    echo "confirm  an outpoint paying someone else is not the funding"
+
     # and bob hands the close to the chain himself rather than printing it for
     # someone to relay, which is the window alice's refund is racing
     B_LOCKTIME=$(( $("${RPC[@]}" getblockcount) + 500 ))

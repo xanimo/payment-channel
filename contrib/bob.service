@@ -41,11 +41,16 @@ Group=bob
 # rather than defaults, so a unit missing any of them restart-loops printing the
 # reason. --height is not enough: a fixed number is correct once, and this runs
 # for as long as it runs. Something that can see a chain writes height.txt.
+#
+# --since-window is not one of those refusals and is not optional either. kwd
+# will not scan from genesis, so kw exits 2 without a since height and bob reads
+# that as "confirmation backend failed" on every open.
 ExecStart=/usr/local/bin/bob --wif @/etc/payment-channel/bob.wif \
     --listen 127.0.0.1:9876 --min-slack 100 \
     --height-file /var/lib/payment-channel/height.txt \
     --state /var/lib/payment-channel/channels \
     --confirm-cmd "/usr/local/bin/kw outpoint --daemon /run/kwd.sock" \
+    --since-window 400 \
     --broadcast-cmd "/usr/local/bin/kw send --node NODE --yes" \
     --min-depth 6 \
     --price 5.0 --price 7.5 --price 17.5

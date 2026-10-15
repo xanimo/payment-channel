@@ -13,6 +13,12 @@
 #   CMD --watch ADDR --outpoint TXID:VOUT
 #   exit 0 and "unspent height H depth D value V koinu"   confirmed
 #   exit 3 and "not found (unconfirmed or already spent)" not
+#   exit 4                                                did not look that far back
+#   anything else                                         could not tell us
+#
+# Only 3 is a terminal no. 4 and the rest are undetermined, which the sweep
+# needs to be a retry rather than a channel it retires while the funding is
+# still there.
 #
 # A stub stands in for it here so the cases are testable without a node: too
 # shallow, spent, a value that disagrees, a backend that hangs. What a stub
@@ -61,6 +67,8 @@ case "$mode" in
   unspent) echo "unspent height 900 depth $arg value 10000000000 koinu"; exit 0 ;;
   wrongvalue) echo "unspent height 900 depth 100 value $arg koinu"; exit 0 ;;
   notfound) echo "not found (unconfirmed or already spent)"; exit 3 ;;
+  unscanned) echo "not seen in the range asked for"; exit 4 ;;
+  usage)   echo "kw: --daemon needs --since HEIGHT" >&2; exit 2 ;;
   hang)    sleep 120; exit 0 ;;
   broken)  echo "unspent but who knows"; exit 0 ;;
   crash)   exit 1 ;;
@@ -126,6 +134,16 @@ expect_reject shallow "deep enough" "depth 2 under --min-depth 6: refused"
 
 answer notfound
 expect_reject gone "unconfirmed or spent" "not in the unspent set: refused"
+
+# 4 and 3 must not collapse into one answer: the reject names the range, not a
+# spend, because a sweep reading 4 as a spend would retire a live channel
+answer unscanned
+expect_reject unscanned "not in the scanned range" "a range it did not scan: refused"
+
+# what a kwd without --since exits, which is every open when --since-window is
+# unset against --daemon
+answer usage
+expect_reject usage "backend failed" "a flag the backend needed: refused"
 
 answer wrongvalue 500000000
 expect_reject value "worth what it says" "on-chain value disagrees: refused"
