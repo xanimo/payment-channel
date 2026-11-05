@@ -446,6 +446,7 @@ pc_result pc_payment_create(const pc_channel *ch,
     unsigned char *fbytes = NULL, *rbytes = NULL, *raw = NULL;
     pc_result rc = PC_ERR_PSBT;
     kw_psbt *p = kw_psbt_new();
+    kw_tx *spend = NULL;
 
     /* Bob's payout and Alice's change addresses, to their hash160s. */
     uint8_t bpay[64], apay[64];
@@ -472,7 +473,8 @@ pc_result pc_payment_create(const pc_channel *ch,
        pc_tx_verify_payment finds the payout where it expects; change is dropped
        when it is nothing, the caller having already folded a dust remainder into
        the fee. */
-    kw_tx *spend = kw_tx_new();
+    spend = kw_tx_new();
+    if (!spend) goto out;
     if (!kw_tx_add_input(spend, ch->funding_txid, (uint32_t)ch->funding_vout)) goto out;
     if (!kw_tx_add_output_p2pkh(spend, to_bob_koinu, bpay + 1)) goto out;
     uint64_t change = ch->capacity_koinu - to_bob_koinu - fee_koinu;
@@ -509,6 +511,7 @@ pc_result pc_payment_create(const pc_channel *ch,
 out:
     free(fbytes); free(rbytes); free(raw);
     kw_psbt_free(p);
+    kw_tx_free(spend);
     return rc;
 }
 
@@ -567,6 +570,7 @@ static pc_result assemble_two_sig(const pc_channel *ch, kw_psbt *p,
 {
     unsigned char *rbytes = NULL, *raw = NULL;
     pc_result rc = PC_ERR_PSBT;
+    kw_tx *tx = NULL;
 
     /* Two signatures, Alice's and Bob's. No built-in finalizer can build the
        scriptSig for this redeem script because OP_IF does not classify, so
@@ -628,7 +632,8 @@ static pc_result assemble_two_sig(const pc_channel *ch, kw_psbt *p,
 
     if (!kw_psbt_finalize(p, 0, ss, n)) goto out;
 
-    kw_tx *tx = kw_tx_new();
+    tx = kw_tx_new();
+    if (!tx) goto out;
     if (!kw_psbt_extract(p, tx)) goto out;
     raw = (unsigned char *)malloc(PC_MAX_PSBT_HEX / 2);
     if (!raw) goto out;
@@ -641,6 +646,7 @@ static pc_result assemble_two_sig(const pc_channel *ch, kw_psbt *p,
     rc = PC_OK;
 out:
     free(rbytes); free(raw);
+    kw_tx_free(tx);
     return rc;
 }
 
