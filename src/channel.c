@@ -317,30 +317,28 @@ pc_result pc_channel_open_create(const pc_channel *ch, const char *funding_tx_he
 
     /* The unsigned spend is one input (the funding outpoint) and no outputs yet;
        kw_tx builds it directly rather than through a serialized round trip. */
-    kw_tx spend;
-    kw_tx_init(&spend);
-    if (!kw_tx_add_input(&spend, txid, (uint32_t)vout)) return PC_ERR_PSBT;
-
-    kw_psbt p;
-    kw_psbt_init(&p);
+    kw_tx *spend = kw_tx_new();
+    kw_psbt *p = kw_psbt_new();
     unsigned char *fbytes = NULL, *rbytes = NULL, *raw = NULL;
     pc_result rc = PC_ERR_PSBT;
 
-    if (!kw_psbt_create(&p, &spend)) goto out;
+    if (!spend || !p) goto out;
+    if (!kw_tx_add_input(spend, txid, (uint32_t)vout)) goto out;
+    if (!kw_psbt_create(p, spend)) goto out;
 
     /* the input's non-witness utxo is the whole funding transaction, and the
        redeem script it spends */
     size_t flen = 0;
     if (!hex_to_bytes(funding_tx_hex, &fbytes, &flen)) goto out;
-    if (!kw_psbt_set_utxo(&p, 0, fbytes, flen)) goto out;
+    if (!kw_psbt_set_utxo(p, 0, fbytes, flen)) goto out;
 
     size_t rlen = 0;
     if (!hex_to_bytes(ch->redeem_script_hex, &rbytes, &rlen)) goto out;
-    if (!kw_psbt_set_redeem(&p, 0, rbytes, rlen)) goto out;
+    if (!kw_psbt_set_redeem(p, 0, rbytes, rlen)) goto out;
 
     raw = (unsigned char *)malloc(PC_MAX_PSBT_HEX / 2);
     if (!raw) goto out;
-    size_t n = kw_psbt_serialize(&p, raw, PC_MAX_PSBT_HEX / 2);
+    size_t n = kw_psbt_serialize(p, raw, PC_MAX_PSBT_HEX / 2);
     if (n == 0) goto out;
     char *hex = (char *)malloc(n * 2 + 1);
     if (!hex) goto out;
@@ -349,7 +347,8 @@ pc_result pc_channel_open_create(const pc_channel *ch, const char *funding_tx_he
     rc = PC_OK;
 out:
     free(fbytes); free(rbytes); free(raw);
-    kw_psbt_free(&p);
+    kw_psbt_free(p);
+    kw_tx_free(spend);
     return rc;
 }
 
@@ -378,14 +377,14 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
     size_t pblen = 0;
     if (!hex_to_bytes(psbt_hex, &pbytes, &pblen)) return PC_ERR_PSBT;
 
-    kw_psbt p;
-    kw_psbt_init(&p);
+    kw_psbt *p = kw_psbt_new();
     pc_result rc = PC_ERR_PSBT;
-    if (!kw_psbt_parse(pbytes, pblen, &p)) goto out;
+    if (!p) goto out;
+    if (!kw_psbt_parse(pbytes, pblen, p)) goto out;
 
-    const kw_tx *utx = kw_psbt_unsigned_tx(&p);
-    if (!utx || utx->nin != 1 || utx->nout != 0) goto out;  /* nothing promised yet */
-    if (p.in[0].nsigs != 0) goto out;
+    const kw_tx *utx = kw_psbt_unsigned_tx(p);
+    if (!utx || kw_tx_nin(utx) != 1 || kw_tx_nout(utx) != 0) goto out;  /* nothing promised yet */
+    if (kw_psbt_nsigs(p, 0) != 0) goto out;
 
     /* The input has to name the outpoint derived above. Nothing downstream
        reads it, since every later check runs against ch->funding_txid, so a
@@ -395,18 +394,22 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
        the psbt carries the prevout in internal order, ch->funding_txid is in
        display order, so one of them has to be reversed. */
     {
-        unsigned char want[32], got[32];
+        unsigned char want[32], got[32], prev[32];
+        uint32_t pvout = 0;
         if (!pc_hex_to_bin(txid, want, sizeof(want))) goto out;
         for (int k = 0; k < 32; k++) got[k] = want[31 - k];
-        if (memcmp(utx->vin[0].prevout, got, 32) != 0) goto out;
-        if (utx->vin[0].vout != (uint32_t)vout) goto out;
+        if (!kw_tx_input_prevout(utx, 0, prev, &pvout)) goto out;
+        if (memcmp(prev, got, 32) != 0) goto out;
+        if (pvout != (uint32_t)vout) goto out;
     }
 
     /* The redeem script commits Bob's key and the locktime, so matching it
        against the one he computed is what makes the rest of this his channel. */
-    if (p.in[0].redeemlen == 0 || p.in[0].redeemlen * 2 + 1 > PC_MAX_SCRIPT_HEX) goto out;
+    const uint8_t *rscript = NULL; size_t rscriptlen = 0;
+    if (!kw_psbt_redeem(p, 0, &rscript, &rscriptlen)) goto out;
+    if (rscriptlen == 0 || rscriptlen * 2 + 1 > PC_MAX_SCRIPT_HEX) goto out;
     char rhex[PC_MAX_SCRIPT_HEX];
-    pc_bin_to_hex(p.in[0].redeem, p.in[0].redeemlen, rhex);
+    pc_bin_to_hex(rscript, rscriptlen, rhex);
     if (strcmp(rhex, ch->redeem_script_hex) != 0) goto out;
 
     r = pc_channel_set_funding(ch, txid, vout, value);
@@ -414,7 +417,7 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
     if (capacity_out) *capacity_out = value;
     rc = PC_OK;
 out:
-    kw_psbt_free(&p);
+    kw_psbt_free(p);
     free(pbytes);
     return rc;
 }
@@ -442,8 +445,7 @@ pc_result pc_payment_create(const pc_channel *ch,
     *psbt_hex_out = NULL;
     unsigned char *fbytes = NULL, *rbytes = NULL, *raw = NULL;
     pc_result rc = PC_ERR_PSBT;
-    kw_psbt p;
-    kw_psbt_init(&p);
+    kw_psbt *p = kw_psbt_new();
 
     /* Bob's payout and Alice's change addresses, to their hash160s. */
     uint8_t bpay[64], apay[64];
@@ -470,35 +472,34 @@ pc_result pc_payment_create(const pc_channel *ch,
        pc_tx_verify_payment finds the payout where it expects; change is dropped
        when it is nothing, the caller having already folded a dust remainder into
        the fee. */
-    kw_tx spend;
-    kw_tx_init(&spend);
-    if (!kw_tx_add_input(&spend, ch->funding_txid, (uint32_t)ch->funding_vout)) goto out;
-    if (!kw_tx_add_output_p2pkh(&spend, to_bob_koinu, bpay + 1)) goto out;
+    kw_tx *spend = kw_tx_new();
+    if (!kw_tx_add_input(spend, ch->funding_txid, (uint32_t)ch->funding_vout)) goto out;
+    if (!kw_tx_add_output_p2pkh(spend, to_bob_koinu, bpay + 1)) goto out;
     uint64_t change = ch->capacity_koinu - to_bob_koinu - fee_koinu;
-    if (change > 0 && !kw_tx_add_output_p2pkh(&spend, change, apay + 1)) goto out;
+    if (change > 0 && !kw_tx_add_output_p2pkh(spend, change, apay + 1)) goto out;
 
-    if (!kw_psbt_create(&p, &spend)) goto out;
+    if (!kw_psbt_create(p, spend)) goto out;
 
     /* updater: the funding transaction and the redeem script it pays to */
     size_t flen = 0;
     if (!hex_to_bytes(funding_tx_hex, &fbytes, &flen)) goto out;
-    if (!kw_psbt_set_utxo(&p, 0, fbytes, flen)) goto out;
+    if (!kw_psbt_set_utxo(p, 0, fbytes, flen)) goto out;
     size_t rlen = 0;
     if (!hex_to_bytes(ch->redeem_script_hex, &rbytes, &rlen)) goto out;
-    if (!kw_psbt_set_redeem(&p, 0, rbytes, rlen)) goto out;
+    if (!kw_psbt_set_redeem(p, 0, rbytes, rlen)) goto out;
 
     /* signer: Alice only. Bob countersigns when he accepts. */
     uint8_t sk[32];
     int comp = 0;
     uint8_t ver = 0;
     if (!kw_wif_decode(alice_wif, sk, &comp, &ver)) { rc = PC_ERR_KEY; goto out; }
-    int ok = kw_psbt_sign(&p, 0, sk, KW_SIGHASH_ALL) == 1;
+    int ok = kw_psbt_sign(p, 0, sk, KW_SIGHASH_ALL) == 1;
     { volatile uint8_t *z = sk; for (int i = 0; i < 32; i++) z[i] = 0; }
     if (!ok) goto out;
 
     raw = (unsigned char *)malloc(PC_MAX_PSBT_HEX / 2);
     if (!raw) goto out;
-    size_t n = kw_psbt_serialize(&p, raw, PC_MAX_PSBT_HEX / 2);
+    size_t n = kw_psbt_serialize(p, raw, PC_MAX_PSBT_HEX / 2);
     if (n == 0) goto out;
     char *hex = (char *)malloc(n * 2 + 1);
     if (!hex) goto out;
@@ -507,7 +508,7 @@ pc_result pc_payment_create(const pc_channel *ch,
     rc = PC_OK;
 out:
     free(fbytes); free(rbytes); free(raw);
-    kw_psbt_free(&p);
+    kw_psbt_free(p);
     return rc;
 }
 
@@ -529,27 +530,28 @@ pc_result pc_payment_accept(pc_channel *ch, const char *psbt_hex,
     size_t pblen = 0;
     if (!hex_to_bytes(psbt_hex, &pbytes, &pblen)) return PC_ERR_PSBT;
 
-    kw_psbt p;
-    kw_psbt_init(&p);
+    kw_psbt *p = kw_psbt_new();
     pc_result rc = PC_ERR_PSBT;
-    if (!kw_psbt_parse(pbytes, pblen, &p)) goto out;
+    if (!kw_psbt_parse(pbytes, pblen, p)) goto out;
 
-    const kw_tx *utx = kw_psbt_unsigned_tx(&p);
-    if (!utx || utx->nin != 1) goto out;
+    const kw_tx *utx = kw_psbt_unsigned_tx(p);
+    if (!utx || kw_tx_nin(utx) != 1) goto out;
 
     /* it must carry Alice's signature already */
-    if (p.in[0].nsigs < 1) goto out;
+    if (kw_psbt_nsigs(p, 0) < 1) goto out;
 
     /* and it must be spending this channel's redeem script */
-    if (p.in[0].redeemlen == 0 || p.in[0].redeemlen * 2 + 1 > PC_MAX_SCRIPT_HEX) goto out;
+    const uint8_t *rs = NULL; size_t rslen = 0;
+    if (!kw_psbt_redeem(p, 0, &rs, &rslen)) goto out;
+    if (rslen == 0 || rslen * 2 + 1 > PC_MAX_SCRIPT_HEX) goto out;
     char rhex[PC_MAX_SCRIPT_HEX];
-    pc_bin_to_hex(p.in[0].redeem, p.in[0].redeemlen, rhex);
+    pc_bin_to_hex(rs, rslen, rhex);
     if (strcmp(rhex, ch->redeem_script_hex) != 0) goto out;
 
     ch->paid_to_bob_koinu = claimed_to_bob_koinu;
     rc = PC_OK;
 out:
-    kw_psbt_free(&p);
+    kw_psbt_free(p);
     free(pbytes);
     return rc;
 }
@@ -572,18 +574,20 @@ static pc_result assemble_two_sig(const pc_channel *ch, kw_psbt *p,
            OP_0 <sig A> <sig B> OP_0 <redeem script>
        The leading OP_0 is CHECKMULTISIG's off-by-one pop. The trailing OP_0 is
        the branch selector: false takes OP_ELSE, the cooperative 2-of-2. */
-    if (p->in[0].nsigs != 2) goto out;
+    if (kw_psbt_nsigs(p, 0) != 2) goto out;
 
     /* CHECKMULTISIG requires the signatures in the order the pubkeys appear in
        the redeem script, which is Alice then Bob. Each kw_psbt_sig carries the
        33-byte pubkey and the DER signature with its hashtype byte. */
+    uint8_t sigbuf[2][80], pk[2][33];
     const uint8_t *sigs[2];
     size_t siglen[2];
     char pkhex[2][PUBKEYHEXLEN];
     for (size_t i = 0; i < 2; i++) {
-        sigs[i]   = p->in[0].sigs[i].sig;
-        siglen[i] = p->in[0].sigs[i].siglen;
-        pc_bin_to_hex(p->in[0].sigs[i].pubkey, 33, pkhex[i]);
+        siglen[i] = sizeof(sigbuf[i]);
+        if (!kw_psbt_get_sig(p, 0, i, pk[i], sigbuf[i], &siglen[i])) goto out;
+        sigs[i] = sigbuf[i];
+        pc_bin_to_hex(pk[i], 33, pkhex[i]);
     }
     int alice_idx = (strcmp(pkhex[0], ch->alice_pubkey_hex) == 0) ? 0 : 1;
     int bob_idx   = alice_idx ^ 1;
@@ -624,12 +628,11 @@ static pc_result assemble_two_sig(const pc_channel *ch, kw_psbt *p,
 
     if (!kw_psbt_finalize(p, 0, ss, n)) goto out;
 
-    kw_tx tx;
-    kw_tx_init(&tx);
-    if (!kw_psbt_extract(p, &tx)) goto out;
+    kw_tx *tx = kw_tx_new();
+    if (!kw_psbt_extract(p, tx)) goto out;
     raw = (unsigned char *)malloc(PC_MAX_PSBT_HEX / 2);
     if (!raw) goto out;
-    size_t tn = kw_tx_serialize(&tx, raw, PC_MAX_PSBT_HEX / 2);
+    size_t tn = kw_tx_serialize(tx, raw, PC_MAX_PSBT_HEX / 2);
     if (tn == 0) goto out;
     char *hex = (char *)malloc(tn * 2 + 1);
     if (!hex) goto out;
@@ -643,11 +646,10 @@ out:
 
 /* Parse a psbt hex and add a signature for input 0 with (wif), over the input's
    redeem script. The key is decoded and wiped here so no caller holds it. On
-   return (p) is always initialised and the caller frees it with kw_psbt_free;
+   (p) comes from kw_psbt_new() and the caller frees it with kw_psbt_free;
    PC_OK means it now carries one more signature. */
 static pc_result parse_and_sign(const char *psbt_hex, const char *wif, kw_psbt *p)
 {
-    kw_psbt_init(p);
     unsigned char *pbytes = NULL;
     size_t pblen = 0;
     if (!hex_to_bytes(psbt_hex, &pbytes, &pblen)) return PC_ERR_PSBT;
@@ -655,7 +657,7 @@ static pc_result parse_and_sign(const char *psbt_hex, const char *wif, kw_psbt *
     pc_result rc = PC_ERR_PSBT;
     if (!kw_psbt_parse(pbytes, pblen, p)) goto out;
     const kw_tx *utx = kw_psbt_unsigned_tx(p);
-    if (!utx || utx->nin != 1) goto out;
+    if (!utx || kw_tx_nin(utx) != 1) goto out;
 
     uint8_t sk[32];
     int comp = 0;
@@ -675,10 +677,11 @@ pc_result pc_payment_countersign(const pc_channel *ch, const char *psbt_hex,
     if (!ch || !psbt_hex || !bob_wif || !raw_tx_hex_out) return PC_ERR_ARG;
     *raw_tx_hex_out = NULL;
 
-    kw_psbt p;
-    pc_result rc = parse_and_sign(psbt_hex, bob_wif, &p);
-    if (rc == PC_OK) rc = assemble_two_sig(ch, &p, raw_tx_hex_out);
-    kw_psbt_free(&p);
+    kw_psbt *p = kw_psbt_new();
+    if (!p) return PC_ERR_PSBT;
+    pc_result rc = parse_and_sign(psbt_hex, bob_wif, p);
+    if (rc == PC_OK) rc = assemble_two_sig(ch, p, raw_tx_hex_out);
+    kw_psbt_free(p);
     return rc;
 }
 
@@ -695,14 +698,13 @@ pc_result pc_payment_assemble(const pc_channel *ch, const char *signed_psbt_hex,
     unsigned char *pbytes = NULL;
     size_t pblen = 0;
     if (!hex_to_bytes(signed_psbt_hex, &pbytes, &pblen)) return PC_ERR_PSBT;
-    kw_psbt p;
-    kw_psbt_init(&p);
+    kw_psbt *p = kw_psbt_new();
     pc_result rc = PC_ERR_PSBT;
-    if (kw_psbt_parse(pbytes, pblen, &p)) {
-        const kw_tx *utx = kw_psbt_unsigned_tx(&p);
-        if (utx && utx->nin == 1) rc = assemble_two_sig(ch, &p, raw_tx_hex_out);
+    if (kw_psbt_parse(pbytes, pblen, p)) {
+        const kw_tx *utx = kw_psbt_unsigned_tx(p);
+        if (utx && kw_tx_nin(utx) == 1) rc = assemble_two_sig(ch, p, raw_tx_hex_out);
     }
-    kw_psbt_free(&p);
+    kw_psbt_free(p);
     free(pbytes);
     return rc;
 }
@@ -720,17 +722,18 @@ pc_result pc_payment_sign(const char *psbt_hex, const char *bob_wif,
     *signed_psbt_hex_out = NULL;
     (void)chain;   /* the wif carries its own version; kw_wif_decode needs no chain */
 
-    kw_psbt p;
-    pc_result rc = parse_and_sign(psbt_hex, bob_wif, &p);
+    kw_psbt *p = kw_psbt_new();
+    if (!p) return PC_ERR_PSBT;
+    pc_result rc = parse_and_sign(psbt_hex, bob_wif, p);
     if (rc == PC_OK) {
         unsigned char *raw = (unsigned char *)malloc(PC_MAX_PSBT_HEX / 2);
-        size_t n = raw ? kw_psbt_serialize(&p, raw, PC_MAX_PSBT_HEX / 2) : 0;
+        size_t n = raw ? kw_psbt_serialize(p, raw, PC_MAX_PSBT_HEX / 2) : 0;
         char *hex = n ? (char *)malloc(n * 2 + 1) : NULL;
         if (hex) { pc_bin_to_hex(raw, n, hex); *signed_psbt_hex_out = hex; }
         else rc = PC_ERR_PSBT;
         free(raw);
     }
-    kw_psbt_free(&p);
+    kw_psbt_free(p);
     return rc;
 }
 

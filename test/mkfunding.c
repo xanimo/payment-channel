@@ -71,23 +71,23 @@ int main(int argc, char **argv)
 
     /* one dummy input, the channel output first (so it is vout 0), then a token
        change output. It is never signed or broadcast. */
-    kw_tx tx;
-    kw_tx_init(&tx);
-    if (!kw_tx_add_input(&tx,
+    kw_tx *tx = kw_tx_new();
+    if (!tx) return 1;
+    if (!kw_tx_add_input(tx,
         "b4455e7b7b7acb51fb6feba7a2702c42a5100f61f61abafa31851ed6ae076074", 0))
         return 1;
-    if (!kw_tx_add_output(&tx, koinu, p2sh_spk, sizeof(p2sh_spk))) return 1;
-    if (!kw_tx_add_output_p2pkh(&tx, 100000000ULL, craw + 1)) return 1;
+    if (!kw_tx_add_output(tx, koinu, p2sh_spk, sizeof(p2sh_spk))) return 1;
+    if (!kw_tx_add_output_p2pkh(tx, 100000000ULL, craw + 1)) return 1;
 
     uint8_t raw[8192];
-    size_t n = kw_tx_serialize(&tx, raw, sizeof(raw));
+    size_t n = kw_tx_serialize(tx, raw, sizeof(raw));
     if (n == 0) return 1;
     char *hex = (char *)malloc(n * 2 + 1);
     if (!hex) return 1;
     pc_bin_to_hex(raw, n, hex);
 
     uint8_t txid[32], rev[32];
-    if (!kw_tx_txid(&tx, txid)) { free(hex); return 1; }
+    if (!kw_tx_txid(tx, txid)) { free(hex); return 1; }
     for (int i = 0; i < 32; i++) rev[i] = txid[31 - i];
     char txid_hex[65];
     pc_bin_to_hex(rev, 32, txid_hex);

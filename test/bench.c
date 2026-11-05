@@ -55,23 +55,23 @@ static char *make_funding_tx(const char *p2sh_addr, const char *change_addr,
     uint8_t spk[23];
     spk[0] = 0xa9; spk[1] = 0x14; memcpy(spk + 2, praw + 1, 20); spk[22] = 0x87;
 
-    kw_tx tx;
-    kw_tx_init(&tx);
-    if (!kw_tx_add_input(&tx,
+    kw_tx *tx = kw_tx_new();
+    if (!tx) return 1;
+    if (!kw_tx_add_input(tx,
         "b4455e7b7b7acb51fb6feba7a2702c42a5100f61f61abafa31851ed6ae076074", 0) ||
-        !kw_tx_add_output(&tx, 10000000000ULL, spk, sizeof(spk)) ||      /* 100 DOGE */
-        !kw_tx_add_output_p2pkh(&tx, 4900000000ULL, craw + 1))          /* 49 change */
+        !kw_tx_add_output(tx, 10000000000ULL, spk, sizeof(spk)) ||      /* 100 DOGE */
+        !kw_tx_add_output_p2pkh(tx, 4900000000ULL, craw + 1))          /* 49 change */
         return NULL;
 
     uint8_t raw[8192];
-    size_t n = kw_tx_serialize(&tx, raw, sizeof(raw));
+    size_t n = kw_tx_serialize(tx, raw, sizeof(raw));
     if (n == 0) return NULL;
     char *hex = (char *)malloc(n * 2 + 1);
     if (!hex) return NULL;
     pc_bin_to_hex(raw, n, hex);
 
     uint8_t txid[32], rev[32];
-    if (!kw_tx_txid(&tx, txid)) { free(hex); return NULL; }
+    if (!kw_tx_txid(tx, txid)) { free(hex); return NULL; }
     for (int i = 0; i < 32; i++) rev[i] = txid[31 - i];
     pc_bin_to_hex(rev, 32, txid_out);
     return hex;

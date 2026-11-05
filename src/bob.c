@@ -797,18 +797,22 @@ static int handle_open(int fd, session *s, const pc_envelope *in,
     if (hl && !(hl % 2)) {
         unsigned char *pb = (unsigned char *)malloc(hl / 2);
         if (pb && pc_hex_to_bin(in->psbt_hex, pb, hl / 2)) {
-            kw_psbt p;
-            kw_psbt_init(&p);
-            if (kw_psbt_parse(pb, hl / 2, &p)) {
-                const kw_tx *utx = kw_psbt_unsigned_tx(&p);
-                if (utx && utx->nin == 1 && p.in[0].redeemlen > 0 &&
-                    p.in[0].redeemlen <= sizeof(rbuf)) {
-                    rlen = p.in[0].redeemlen;
-                    memcpy(rbuf, p.in[0].redeem, rlen);
+            kw_psbt *p = kw_psbt_new();
+            if (p && kw_psbt_parse(pb, hl / 2, p)) {
+                const kw_tx *utx = kw_psbt_unsigned_tx(p);
+                const uint8_t *rs = NULL;
+                size_t rslen = 0;
+                /* the script is borrowed out of the psbt, so it is copied
+                   before the psbt is freed below rather than kept */
+                if (utx && kw_tx_nin(utx) == 1 &&
+                    kw_psbt_redeem(p, 0, &rs, &rslen) &&
+                    rslen > 0 && rslen <= sizeof(rbuf)) {
+                    rlen = rslen;
+                    memcpy(rbuf, rs, rlen);
                     ok = 1;
                 }
             }
-            kw_psbt_free(&p);
+            kw_psbt_free(p);
         }
         free(pb);
     }

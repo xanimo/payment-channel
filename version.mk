@@ -7,4 +7,4 @@
 # rather than each parsing their own idea of the format.
 
 PC_VERSION=0.1.0
-KOINU_TAG=v0.3.0
+KOINU_TAG=v0.5.0
