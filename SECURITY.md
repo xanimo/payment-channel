@@ -55,6 +55,21 @@ against something you did not write, that is the question to ask it first. this
 is stated here because it is the assumption pc cannot verify and cannot defend
 against, not because any particular backend is known to be wrong.
 
+a filter backend carries one more assumption that the merkle and work checks do
+not cover, and `--daemon` is a filter backend. koinu checks a filter-header
+chain against anchors compiled into chainparams, 644 of them every 10000 blocks
+to 6430000 and a last at 6432061, so a peer serving a different filter set is
+caught at the first anchor it crosses. above the last one the base is that
+peer's word. a peer that omits the block a spend landed in has bob told the
+funding is unspent when it is not, which is the direction that costs him: he
+opens against an outpoint already gone. mainnet is above 6432061 now, so this
+is the operating range rather than a corner of it.
+
+what makes it tolerable is that `--daemon` points at a kwd the operator runs,
+and trusting your own node is the assumption anyway. it stops being tolerable
+the moment that kwd is pointed at somebody else's filter server, and the reason
+nobody does that today is that there are none to point it at.
+
 for the same reason there is a version floor, which is koinu v0.3.0 or later,
 and the reasons are different ones.
 
