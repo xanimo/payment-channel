@@ -146,18 +146,36 @@ echo ok > "$CONFIRM_ANSWER"
 # Collapsing the two retires the channel and drops the payment, which is the one
 # outcome worse than doing nothing, and it is what this did until a real kw
 # failed against a real chain and retired a real payment.
-rm -rf "$WORK/state3"; mkdir -p "$WORK/state3"
-cp "$WORK/pristine" "$WORK/state3/$(basename "$(ls "$WORK"/state/*.channel)")"
-echo broken > "$CONFIRM_ANSWER"
-: > "$SENT_LOG"
-./bob --sweep --state "$WORK/state3" --height-file "$WORK/height" \
-      --broadcast-cmd "$WORK/send" --confirm-cmd "$WORK/confirm" \
-      --sweep-margin 400000 > "$WORK/sweep3.log" 2>&1 || true
-if grep -q "leaving it for the next pass" "$WORK/sweep3.log" \
-   && grep -q "^closed 0" "$WORK"/state3/*.channel && [ ! -s "$SENT_LOG" ]; then
-    say "a backend that cannot answer retires nothing" "yes"
+#
+# It is also not a reason to hold the transaction. An outside review ran the
+# other half to the end: with the backend down every pass said "leaving it for
+# the next pass" until the locktime, and alice refunded. So a due channel is
+# broadcast on a backend that cannot answer, and an undetermined one that is
+# not yet due still waits. Neither is ever retired.
+sweep_broken() {   # state dir, sweep margin
+    rm -rf "$WORK/$1"; mkdir -p "$WORK/$1"
+    cp "$WORK/pristine" "$WORK/$1/$(basename "$(ls "$WORK"/state/*.channel)")"
+    echo broken > "$CONFIRM_ANSWER"
+    : > "$SENT_LOG"
+    ./bob --sweep --state "$WORK/$1" --height-file "$WORK/height" \
+          --broadcast-cmd "$WORK/send" --confirm-cmd "$WORK/confirm" \
+          --sweep-margin "$2" > "$WORK/$1.log" 2>&1 || true
+}
+# margin 400000 against locktime 300000 and height 1000: due
+sweep_broken state3 400000
+if grep -q "broadcasting anyway: it is due" "$WORK/state3.log" \
+   && grep -q "^closed 0" "$WORK"/state3/*.channel && [ -s "$SENT_LOG" ]; then
+    say "a due channel is broadcast when the backend cannot answer" "yes"
 else
-    say "a backend that cannot answer retires nothing" "$(tail -1 "$WORK/sweep3.log")"; fail=1
+    say "a due channel is broadcast when the backend cannot answer" "$(tail -1 "$WORK/state3.log")"; fail=1
+fi
+# margin 50: 300000 is far above 1000 + 50, so not due
+sweep_broken state3b 50
+if grep -q "leaving it for the next pass" "$WORK/state3b.log" \
+   && grep -q "^closed 0" "$WORK"/state3b/*.channel && [ ! -s "$SENT_LOG" ]; then
+    say "and one that is not due waits, retiring nothing" "yes"
+else
+    say "and one that is not due waits, retiring nothing" "$(tail -1 "$WORK/state3b.log")"; fail=1
 fi
 
 # funding present but shallower than --min-depth is not a spent output. Folding

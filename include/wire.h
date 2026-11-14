@@ -55,6 +55,14 @@ int pc_wire_send(int fd, const pc_envelope *env);
  * line this protocol does not accept. */
 int pc_wire_recv(int fd, pc_envelope *env);
 
+/* The same, for a caller that knows whether this connection has already
+   completed a message. An established session may sit idle between messages
+   for the whole-line deadline, which is the thirty seconds doc/PROTOCOL.md
+   gives a customer who is deciding; one that has finished nothing is held to
+   the per-read budget so a peer cannot take a slot by connecting and going
+   quiet. pc_wire_recv is this with established = 0. */
+int pc_wire_recv_session(int fd, pc_envelope *env, int established);
+
 /* Split "host:port"; port may be omitted and defaults to (defport). */
 int pc_wire_split(const char *hostport, char *host, size_t hostcap, int defport);
 

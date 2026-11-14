@@ -176,7 +176,7 @@ int pc_wire_send(int fd, const pc_envelope *env)
 /* The socket timeout bounds one read(), and this reads a byte at a time, so a
    peer dribbling one byte every timeout-minus-a-second would hold the loop open
    for as long as it liked. The deadline is on the whole line. */
-static int read_line(int fd, char *buf, size_t cap)
+static int read_line(int fd, char *buf, size_t cap, int established)
 {
     time_t deadline = time(NULL) + PC_WIRE_TIMEOUT_SEC;
     size_t n = 0;
@@ -185,6 +185,23 @@ static int read_line(int fd, char *buf, size_t cap)
         ssize_t r = read(fd, &c, 1);
         if (r < 0) {
             if (errno == EINTR) {
+                if (time(NULL) >= deadline) return -1;
+                continue;
+            }
+            /* SO_RCVTIMEO expiring is EAGAIN. Treating it as an error made
+               PC_WIRE_IO_SEC the real idle limit, so the thirty seconds
+               doc/PROTOCOL.md promises a session between messages was five and
+               a customer who thought for six lost the connection.
+
+               It is not simply retried either: a peer that connects and says
+               nothing, and one that sends half a line and stops, both have to
+               go in PC_WIRE_IO_SEC or 64 children are a slot to sit in. The
+               difference is that neither of those has finished a message. So
+               the long wait is only for a session that has, and only while it
+               is between messages rather than part way through one. A stranger
+               gets the short budget; a customer who is deciding gets the
+               deadline. */
+            if ((errno == EAGAIN || errno == EWOULDBLOCK) && established && n == 0) {
                 if (time(NULL) >= deadline) return -1;
                 continue;
             }
@@ -202,9 +219,14 @@ static int read_line(int fd, char *buf, size_t cap)
 
 int pc_wire_recv(int fd, pc_envelope *env)
 {
+    return pc_wire_recv_session(fd, env, 0);
+}
+
+int pc_wire_recv_session(int fd, pc_envelope *env, int established)
+{
     char *line = (char *)malloc(PC_WIRE_MAX);
     if (!line) return -1;
-    int rc = read_line(fd, line, PC_WIRE_MAX);
+    int rc = read_line(fd, line, PC_WIRE_MAX, established);
     if (rc == 1 && pc_envelope_decode(line, env) != PC_OK) rc = -1;
     free(line);
     return rc;

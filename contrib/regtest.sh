@@ -353,14 +353,29 @@ if [ -n "${KW:-}" ]; then
     SWEEP 50 | grep -q "0 broadcast" \
         || { echo "FAIL: swept a channel with time left" >&2; exit 1; }
 
-    # a backend that cannot answer must change nothing
+    # a backend that cannot answer retires nothing, and while the channel is
+    # not yet due it sends nothing either
     ./bob $NET --sweep --state "$WORK/sstate" --height-file "$WORK/sheight" \
           --broadcast-cmd "$KWSEND" --confirm-cmd /bin/false \
-          --sweep-margin 600 > "$WORK/sweep0.log" 2>&1 || true
+          --sweep-margin 50 > "$WORK/sweep0.log" 2>&1 || true
     grep -q "leaving it for the next pass" "$WORK/sweep0.log" \
-        || { echo "FAIL: a broken backend did not leave the channel alone" >&2; exit 1; }
+        || { echo "FAIL: a broken backend did not leave a channel with time left alone" >&2; exit 1; }
     grep -q "^closed 0" "$WORK/sstate"/*.channel \
         || { echo "FAIL: a broken backend retired the channel" >&2; exit 1; }
+    grep -q "^sent 0" "$WORK/sstate"/*.channel \
+        || { echo "FAIL: a broken backend sent a channel that was not due" >&2; exit 1; }
+
+    # due, and the backend still cannot answer: the close goes to the chain
+    # anyway. Holding it here is how the review lost the payment to alice's
+    # refund, and a close offered when the funding is gone is simply refused.
+    ./bob $NET --sweep --state "$WORK/sstate" --height-file "$WORK/sheight" \
+          --broadcast-cmd "$KWSEND" --confirm-cmd /bin/false \
+          --sweep-margin 600 > "$WORK/sweepblind.log" 2>&1 || true
+    grep -q "broadcasting anyway: it is due" "$WORK/sweepblind.log" \
+        || { echo "FAIL: a due channel was held while the backend was down" >&2; exit 1; }
+    grep -q "^closed 0" "$WORK/sstate"/*.channel \
+        || { echo "FAIL: a blind send retired the channel" >&2; exit 1; }
+    echo "confirm  a due channel is broadcast even with the backend down"
 
     # inside the margin: broadcast, but record it as sent rather than finished
     SWEEP 600 | grep -q "1 broadcast" \

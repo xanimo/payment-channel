@@ -36,6 +36,7 @@
 
 /* koinu crypto: the sha256/hash160, ec verify, and base58 this file needs.
    koinu's crypto/hex.h is not included; pc uses its own. */
+#include "tx.h"
 #include "sha2.h"
 #include "ripemd160.h"
 #include "ec.h"
@@ -431,6 +432,14 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
         rdr r = { buf, blen, 0, 0 };
         rd_u(&r, 4);
         uint64_t nin = rd_varint(&r);
+        /* Every payment on this channel is signed through kw_psbt_sign, which
+           reads the funding transaction with kw_tx_parse and holds at most
+           KW_TX_MAX_IN inputs. Without this bound Bob accepts a funding over
+           that limit and invoices on it, and then Alice's own signer refuses
+           every payment she tries to make: a channel nobody can pay on, with
+           the coins stuck until the locktime. The limit is koinu's rather than
+           consensus, so it is read from koinu's header instead of copied. */
+        if (r.bad || nin == 0 || nin > KW_TX_MAX_IN) { rc = PC_ERR_ARG; goto out; }
         for (uint64_t i = 0; i < nin && !r.bad; i++) {
             /* before advancing, not after. need(&r, 0) afterwards catches the
                same overrun, but only because a zero-length check still compares

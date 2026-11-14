@@ -621,6 +621,12 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
                      canon.p2sh_address);
         }
 
+        /* Due now if the channel is closed, which leaves no rest of the channel
+           to lose, or if the locktime is near enough that waiting risks the
+           refund becoming spendable first. Decided before the backend is asked,
+           because what to do when the backend cannot answer depends on it. */
+        const int due = closed || (uint64_t)ch.locktime <= (uint64_t)height + margin;
+
         /* Ask the chain first, because what to do next depends on whether the
            funding output is still there rather than on what was sent. */
         if (confirm_cmd) {
@@ -630,12 +636,25 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
             if (ok == 1 && at && at != ch.funding_height) ch.funding_height = at;
             if (ok < 0) {
                 /* Not knowing is a reason to try again, never a reason to
-                   retire: the transaction is the payment. */
-                printf("sweep    %s:%d %s, leaving it for the next pass\n",
-                       txid, vout, why);
+                   retire: the transaction is the payment. It is also no reason
+                   to hold the transaction once the channel is due. A close
+                   offered when the funding is gone is refused by the network
+                   and costs nothing; one held back because the backend was
+                   down is the payment lost to Alice's refund at the locktime.
+                   So an undetermined channel that is not yet due waits, and one
+                   that is due is broadcast anyway. It stays counted as
+                   undetermined either way, which is what --alert-cmd fires on:
+                   a blind send is the case an operator most needs to hear
+                   about, so the two counts overlap here on purpose. */
                 unknown++;
-                pc_state_close(&st);
-                continue;
+                if (!due) {
+                    printf("sweep    %s:%d %s, leaving it for the next pass\n",
+                           txid, vout, why);
+                    pc_state_close(&st);
+                    continue;
+                }
+                printf("sweep    %s:%d %s, broadcasting anyway: it is due\n",
+                       txid, vout, why);
             }
             if (ok == 0) {
                 /* The outpoint is spent. If this is the transaction that spent
@@ -667,7 +686,7 @@ static int do_sweep(const char *dir, const char *height_file, unsigned max_age,
            enough that waiting risks the refund becoming spendable first, since
            sending early costs a customer the rest of the channel. A closed one
            has no rest of the channel to lose and is due now. */
-        if (!closed && (uint64_t)ch.locktime > (uint64_t)height + margin) {
+        if (!due) {
             at_risk += ch.paid_to_bob_koinu;
             /* Approaching, but not yet due. Surface it now so a channel drifting
                toward its locktime, or a height feed that stopped advancing, is
@@ -1045,7 +1064,12 @@ static void serve_connection(int fd, const char *wif, pc_chain chain,
 
     pc_envelope in, out;
     int alive = 1, opened = 0, sent = 0;
-    while (alive && pc_wire_recv(fd, &in) == 1) {
+    /* After the first message this peer is a session rather than a stranger, so
+       it may think between messages for the deadline doc/PROTOCOL.md gives it.
+       Until then it is held to the per-read budget. */
+    int established = 0;
+    while (alive && pc_wire_recv_session(fd, &in, established) == 1) {
+        established = 1;
         switch (in.type) {
         case PC_MSG_REQUEST:                      /* [1][2] */
             memset(&out, 0, sizeof(out));
