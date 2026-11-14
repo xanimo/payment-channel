@@ -173,7 +173,12 @@ check: koinu-version $(TESTS) $(BINS)
 	./test/feerate.sh
 	./test/metrics.sh
 
+# The cases in test/review.sh, from an outside review. Not part of check: each
+# one fails until what it names is changed.
+review: koinu-version $(BINS) test/mkfunding
+	./test/review.sh
+
 clean:
 	rm -f $(BINS) $(TESTS) src/*.o test/*.o src/*.d test/*.d fuzz/*.o fuzz/*.d
 
-.PHONY: all check clean fuzz
+.PHONY: all check clean fuzz review
