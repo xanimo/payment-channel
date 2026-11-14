@@ -432,13 +432,20 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
         rdr r = { buf, blen, 0, 0 };
         rd_u(&r, 4);
         uint64_t nin = rd_varint(&r);
-        /* Every payment on this channel is signed through kw_psbt_sign, which
-           reads the funding transaction with kw_tx_parse and holds at most
-           KW_TX_MAX_IN inputs. Without this bound Bob accepts a funding over
-           that limit and invoices on it, and then Alice's own signer refuses
-           every payment she tries to make: a channel nobody can pay on, with
-           the coins stuck until the locktime. The limit is koinu's rather than
-           consensus, so it is read from koinu's header instead of copied. */
+        /* A funding this walker will read, which is also a funding the pinned
+           koinu can sign against. Without a bound Bob accepts one over the
+           limit and invoices on it, and Alice's own signer then refuses every
+           payment: a channel nobody can pay on, with the coins held until the
+           locktime.
+           Two different reasons sit behind the same number today. At the
+           pinned v0.5.0 kw_psbt_sign reads the funding with kw_tx_parse, so
+           KW_TX_MAX_IN is a hard requirement rather than a preference. koinu
+           117660c reads only the output being spent, which drops that
+           requirement and leaves KW_TX_MAX_IN bounding the spend's own inputs,
+           where a 2-of-2 close has one. So when the pin moves past that, this
+           stops being koinu's limit and becomes pc's own answer to how long a
+           stranger's transaction it is willing to walk: keep a bound, and say
+           it is this file's rather than borrowed. */
         if (r.bad || nin == 0 || nin > KW_TX_MAX_IN) { rc = PC_ERR_ARG; goto out; }
         for (uint64_t i = 0; i < nin && !r.bad; i++) {
             /* before advancing, not after. need(&r, 0) afterwards catches the
