@@ -116,5 +116,34 @@ stop
 check "doc/PROTOCOL.md gives a peer thirty seconds, and bob does too" \
       "$(echo "$ANSWER" | grep -q announce && echo yes || echo no)"
 
+# From a second pass of the same review. pc_tx_find_channel_output is what tells
+# alice which output of the funding pays the channel, and alice --refund asks it
+# before she builds her unilateral close. Its bounds are the opening's: at most
+# KW_TX_MAX_IN inputs since c60201f, and at most PC_MAX_OUTPUTS outputs since
+# before that. A funding outside them is refused with "does not pay", and by
+# then it is on chain, so the refund is the one thing she still needs.
+echo "the refund, for a funding the opening would refuse:"
+refund() {   # funding hex file
+    ./alice --wif "$ALICE_WIF" --peer-pubkey "$BOB_PUB" --locktime "$LOCKTIME" \
+            --refund --funding-tx "@$1" 2>"$WORK/refund.err" | grep -cE '^[0-9a-f]{100,}$' || true
+}
+check "control: a funding with one input and two outputs refunds" \
+      "$([ "$(refund "$WORK/funding.hex")" = 1 ] && echo yes || echo no)"
+check "a funding with 34 inputs refunds" \
+      "$([ "$(refund "$WORK/many.hex")" = 1 ] && echo yes || echo no)"
+sed 's/^/      /' "$WORK/refund.err" | head -1
+# the same funding with sixteen more outputs before its locktime, eighteen in
+# all: the shape of a batch payout that happens to pay the channel
+WIDE="${F:0:92}12${F:94:$(( ${#F} - 102 ))}"
+for i in $(seq 1 16); do
+    WIDE="$WIDE$(printf '00e1f50500000000%s%02x%s' 1976a914 "$i" 0000000000000000000000000000000000000088ac)"
+done
+WIDE="$WIDE${F:$(( ${#F} - 8 ))}"
+printf '%s' "$WIDE" > "$WORK/wide.hex"
+[ "${F:92:2}" = 02 ] || { echo "  the fabricated funding does not have two outputs; fix this case" >&2; fail=$((fail + 1)); }
+check "a funding with 18 outputs refunds" \
+      "$([ "$(refund "$WORK/wide.hex")" = 1 ] && echo yes || echo no)"
+sed 's/^/      /' "$WORK/refund.err" | head -1
+
 echo
 if [ "$fail" -eq 0 ]; then echo "review ok"; else echo "review: $fail of these do not hold"; exit 1; fi

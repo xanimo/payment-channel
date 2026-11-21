@@ -236,6 +236,11 @@ pc_result pc_redeem_parse(const char *redeem_hex, char alice_pubkey_hex[PUBKEYHE
  * Bob is told a funding transaction, not an outpoint: which output funds the
  * channel is a fact about the transaction, so he works it out rather than
  * trusting it. */
+/* Whether the pinned koinu can sign a payment against an output of this
+   transaction. The opening asks it; the refund does not, because by then the
+   funding is on chain and the only question left is which output is hers. */
+pc_result pc_tx_funding_signable(const char *raw_tx_hex);
+
 pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex,
                                     char txid_out[65], int *vout_out,
                                     uint64_t *value_out);

@@ -391,6 +391,32 @@ static int p2sh_script_for(const pc_channel *ch, unsigned char out[23])
     return 1;
 }
 
+/* Whether the pinned koinu can sign a payment spending an output of this
+   transaction. kw_psbt_sign reads it with kw_tx_parse at v0.5.0, whose limits
+   are the wallet's own rather than consensus, so a funding over them opens a
+   channel bob can invoice on and alice can never pay on. koinu 117660c reads
+   only the output being spent and drops the input limit, at which point this
+   becomes pc's own answer to how large an opening it will take. The refund
+   does not ask: by then the transaction is on chain and the only question is
+   which output is hers. */
+pc_result pc_tx_funding_signable(const char *raw_tx_hex)
+{
+    if (!raw_tx_hex) return PC_ERR_ARG;
+    size_t hl = strlen(raw_tx_hex);
+    if (hl == 0 || (hl % 2) || !pc_is_hex(raw_tx_hex, hl)) return PC_ERR_ARG;
+    unsigned char *buf = (unsigned char *)malloc(hl / 2);
+    if (!buf) return PC_ERR_ARG;
+    pc_result rc = PC_ERR_ARG;
+    if (pc_hex_to_bin(raw_tx_hex, buf, hl / 2)) {
+        rdr r = { buf, hl / 2, 0, 0 };
+        rd_u(&r, 4);
+        uint64_t nin = rd_varint(&r);
+        if (!r.bad && nin > 0 && nin <= KW_TX_MAX_IN) rc = PC_OK;
+    }
+    free(buf);
+    return rc;
+}
+
 pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex,
                                     char txid_out[65], int *vout_out,
                                     uint64_t *value_out)
@@ -432,21 +458,18 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
         rdr r = { buf, blen, 0, 0 };
         rd_u(&r, 4);
         uint64_t nin = rd_varint(&r);
-        /* A funding this walker will read, which is also a funding the pinned
-           koinu can sign against. Without a bound Bob accepts one over the
-           limit and invoices on it, and Alice's own signer then refuses every
-           payment: a channel nobody can pay on, with the coins held until the
-           locktime.
-           Two different reasons sit behind the same number today. At the
-           pinned v0.5.0 kw_psbt_sign reads the funding with kw_tx_parse, so
-           KW_TX_MAX_IN is a hard requirement rather than a preference. koinu
-           117660c reads only the output being spent, which drops that
-           requirement and leaves KW_TX_MAX_IN bounding the spend's own inputs,
-           where a 2-of-2 close has one. So when the pin moves past that, this
-           stops being koinu's limit and becomes pc's own answer to how long a
-           stranger's transaction it is willing to walk: keep a bound, and say
-           it is this file's rather than borrowed. */
-        if (r.bad || nin == 0 || nin > KW_TX_MAX_IN) { rc = PC_ERR_ARG; goto out; }
+        /* No bound on the input count here, and none on the outputs below.
+           This answers one question, which output pays the channel, and by the
+           time anyone asks it the funding is on chain. alice --refund asks it
+           before she builds her unilateral close, so a bound here is a bound on
+           getting the coins back: a customer whose wallet gathered 34 coins, or
+           who was one payee of an eighteen-output batch, could not be refunded
+           by a tool that agreed the output was hers. Whether the pinned koinu
+           can sign a payment against this transaction is a different question,
+           asked by the opening through pc_tx_funding_signable. The walk
+           terminates without a count because every iteration consumes bytes and
+           need() bounds it by the length. */
+        if (r.bad || nin == 0) { rc = PC_ERR_ARG; goto out; }
         for (uint64_t i = 0; i < nin && !r.bad; i++) {
             /* before advancing, not after. need(&r, 0) afterwards catches the
                same overrun, but only because a zero-length check still compares
@@ -458,11 +481,11 @@ pc_result pc_tx_find_channel_output(const pc_channel *ch, const char *raw_tx_hex
             rd_u(&r, 4);
         }
         uint64_t nout = rd_varint(&r);
-        /* the same bound the payment reader uses. it terminates either way,
-           since every iteration consumes bytes, but two walkers over
-           peer-supplied bytes disagreeing about their limits is where the next
-           one goes wrong */
-        if (r.bad || nout == 0 || nout > PC_MAX_OUTPUTS) goto out;
+        /* PC_MAX_OUTPUTS is pc_tx_verify_payment's, where it keeps a sum of
+           output values inside a uint64. This walker sums nothing and returns
+           one output, so it borrowed a limit it had no use for and refused a
+           funding that paid the channel as one of eighteen. */
+        if (r.bad || nout == 0) goto out;
         rc = PC_ERR_AMOUNT;
         for (uint64_t i = 0; i < nout; i++) {
             uint64_t value = rd_u(&r, 8);

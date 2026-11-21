@@ -312,7 +312,11 @@ pc_result pc_channel_open_create(const pc_channel *ch, const char *funding_tx_he
     char txid[65] = {0};
     int vout = 0;
     uint64_t value = 0;
-    pc_result r = pc_tx_find_channel_output(ch, funding_tx_hex, txid, &vout, &value);
+    /* Asked on both sides of the opening. Bob refuses it anyway, but Alice
+       finding out before she connects is a clearer failure than a reject. */
+    pc_result r = pc_tx_funding_signable(funding_tx_hex);
+    if (r != PC_OK) return r;
+    r = pc_tx_find_channel_output(ch, funding_tx_hex, txid, &vout, &value);
     if (r != PC_OK) return r;
 
     /* The unsigned spend is one input (the funding outpoint) and no outputs yet;
@@ -369,7 +373,9 @@ pc_result pc_channel_open_accept(pc_channel *ch, const char *psbt_hex,
     char txid[65] = {0};
     int vout = 0;
     uint64_t value = 0;
-    pc_result r = pc_tx_find_channel_output(ch, funding_tx_hex, txid, &vout, &value);
+    pc_result r = pc_tx_funding_signable(funding_tx_hex);
+    if (r != PC_OK) return r;
+    r = pc_tx_find_channel_output(ch, funding_tx_hex, txid, &vout, &value);
     if (r != PC_OK) return r;
     if (value == 0) return PC_ERR_AMOUNT;
 
